@@ -13,7 +13,7 @@ for artifact in python/pgtask/_native.*.so; do
     fi
 done
 
-cargo test --workspace --all-features --all-targets --locked
+cargo test --workspace --all-features --all-targets --locked -- --test-threads=1
 cargo build --workspace --all-features --bins --locked
 
 for scenario in \
