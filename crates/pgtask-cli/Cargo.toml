@@ -1,0 +1,23 @@
+[package]
+name = "pgtask-cli"
+description = "Administrative CLI for pgtask"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "pgtask"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+pgtask = { path = "../pgtask", version = "0.1.0" }
+tokio.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

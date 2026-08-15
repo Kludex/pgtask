@@ -1,0 +1,8 @@
+FROM ubuntu:24.04
+
+COPY pgtask /usr/local/bin/pgtask
+COPY pgtask-bench /usr/local/bin/pgtask-bench
+COPY pgtask-smoke /usr/local/bin/pgtask-smoke
+COPY pgtask-web /usr/local/bin/pgtask-web
+USER 65532:65532
+CMD ["pgtask", "health"]

@@ -1,0 +1,155 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/kludex/pgtask
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+database:
+  existingSecret:
+    name: pgtask-database
+    key: url
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+
+migrations:
+  enabled: true
+  command: ["pgtask"]
+  args: ["migrate"]
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  annotations: {}
+  resources: {}
+
+workers:
+  default:
+    enabled: true
+    replicas: 1
+    queue: default
+    concurrency: 10
+    scheduler:
+      enabled: true
+    drainOnly: false
+    health:
+      enabled: true
+      port: 8081
+    image: {}
+    command: []
+    args: []
+    terminationGracePeriodSeconds: 30
+    env: []
+    envFrom: []
+    resources: {}
+    startupProbe:
+      httpGet:
+        path: /livez
+        port: health
+      failureThreshold: 30
+      periodSeconds: 2
+    readinessProbe:
+      httpGet:
+        path: /readyz
+        port: health
+      periodSeconds: 10
+      timeoutSeconds: 3
+    livenessProbe:
+      httpGet:
+        path: /livez
+        port: health
+      periodSeconds: 10
+      timeoutSeconds: 3
+    podAnnotations: {}
+    podLabels: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    topologySpreadConstraints: []
+    volumes: []
+    volumeMounts: []
+    extraContainers: []
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    autoscaling:
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 10
+      targetCPUUtilizationPercentage: 70
+      queueDemand:
+        enabled: false
+        metricName: pgtask_queue_ready_tasks
+        targetAverageValue: "100"
+        selectorLabels: {}
+
+otel:
+  enabled: false
+  endpoint: ""
+  protocol: grpc
+  resourceAttributes: ""
+  env: []
+
+ui:
+  enabled: false
+  administrator:
+    enabled: false
+    actorHeader: x-pgtask-actor
+  replicas: 1
+  image: {}
+  command: ["pgtask-web"]
+  args: []
+  port: 8080
+  env: []
+  resources: {}
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts:
+      - host: pgtask.local
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+serviceMonitor:
+  enabled: false
+  labels: {}
+  interval: 30s
+  scrapeTimeout: 10s
+
+networkPolicy:
+  enabled: false
+  ingress: []
+  egress: []
+
+extraVolumes: []
+extraObjects: []
+
+developmentPostgres:
+  enabled: false
+  image: postgres:18-alpine
+  database: pgtask
+  username: pgtask
+  password: pgtask

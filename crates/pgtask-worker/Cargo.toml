@@ -1,0 +1,28 @@
+[package]
+name = "pgtask-worker"
+description = "Worker and scheduler runtime for pgtask"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+axum.workspace = true
+chrono.workspace = true
+futures.workspace = true
+pgtask-core = { path = "../pgtask-core", version = "0.1.0" }
+pgtask-otel = { path = "../pgtask-otel", version = "0.1.0" }
+pgtask-postgres = { path = "../pgtask-postgres", version = "0.1.0" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

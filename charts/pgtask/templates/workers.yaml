@@ -1,0 +1,163 @@
+{{- $root := . -}}
+{{- range $name, $worker := .Values.workers }}
+{{- if $worker.enabled }}
+{{- if and $worker.scheduler.enabled (not $worker.autoscaling.enabled) (lt (int $worker.replicas) 1) }}
+{{- fail (printf "workers.%s.replicas must be at least 1 when scheduling is enabled" $name) }}
+{{- end }}
+{{- if and $worker.scheduler.enabled $worker.autoscaling.enabled (lt (int $worker.autoscaling.minReplicas) 1) }}
+{{- fail (printf "workers.%s.autoscaling.minReplicas must be at least 1 when scheduling is enabled" $name) }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "pgtask.fullname" $root }}-{{ $name | kebabcase | trunc 30 | trimSuffix "-" }}
+  labels:
+    {{- include "pgtask.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: worker
+    pgtask.io/queue: {{ $worker.queue | quote }}
+spec:
+  {{- if not $worker.autoscaling.enabled }}
+  replicas: {{ $worker.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "pgtask.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: worker
+      pgtask.io/worker: {{ $name | quote }}
+  template:
+    metadata:
+      labels:
+        {{- include "pgtask.selectorLabels" $root | nindent 8 }}
+        app.kubernetes.io/component: worker
+        pgtask.io/worker: {{ $name | quote }}
+        pgtask.io/queue: {{ $worker.queue | quote }}
+        {{- with $root.Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with $worker.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- with $root.Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with $worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "pgtask.serviceAccountName" $root }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ $worker.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "pgtask.image" (list $root $worker.image) }}
+          imagePullPolicy: {{ default $root.Values.image.pullPolicy $worker.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $root.Values.securityContext | nindent 12 }}
+          {{- with $worker.command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $worker.args }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if $worker.health.enabled }}
+          ports:
+            - name: health
+              containerPort: {{ $worker.health.port }}
+              protocol: TCP
+          {{- end }}
+          env:
+            - name: PGTASK_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pgtask.databaseSecretName" $root }}
+                  key: {{ $root.Values.database.existingSecret.key }}
+            - name: PGTASK_QUEUE
+              value: {{ $worker.queue | quote }}
+            - name: PGTASK_CONCURRENCY
+              value: {{ $worker.concurrency | quote }}
+            - name: PGTASK_SCHEDULER_ENABLED
+              value: {{ $worker.scheduler.enabled | quote }}
+            - name: PGTASK_DRAIN_ONLY
+              value: {{ $worker.drainOnly | quote }}
+            {{- if $worker.health.enabled }}
+            - name: PGTASK_HEALTH_ADDRESS
+              value: {{ printf "0.0.0.0:%v" $worker.health.port | quote }}
+            {{- end }}
+            {{- if $root.Values.otel.enabled }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ required "otel.endpoint is required when otel.enabled is true" $root.Values.otel.endpoint | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: {{ $root.Values.otel.protocol | quote }}
+            {{- with $root.Values.otel.resourceAttributes }}
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with $root.Values.otel.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+            {{- with $worker.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with $worker.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $worker.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $worker.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $worker.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml $worker.resources | nindent 12 }}
+          {{- with $worker.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        {{- with $worker.extraContainers }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $worker.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if or $worker.volumes $root.Values.extraVolumes }}
+      volumes:
+        {{- with $worker.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with $root.Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+{{- end }}
+{{- end }}

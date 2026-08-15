@@ -1,0 +1,9 @@
+apiVersion: v2
+name: pgtask
+description: PostgreSQL-native durable task workers, migrations, and optional UI
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.28.0-0"
+annotations:
+  artifacthub.io/license: MIT OR Apache-2.0

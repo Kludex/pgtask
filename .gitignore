@@ -1,0 +1,10 @@
+/target/
+/.coverage
+/.pytest_cache/
+/.ruff_cache/
+/.venv/
+*.profraw
+*.pyc
+python/pgtask/_native.*.so
+.DS_Store
+.env

@@ -1,0 +1,47 @@
+database:
+  existingSecret:
+    name: ""
+    key: url
+
+workers:
+  default:
+    enabled: true
+    replicas: 1
+    queue: default
+    concurrency: 10
+    scheduler:
+      enabled: true
+    drainOnly: false
+    image: {}
+    command: []
+    args: []
+    terminationGracePeriodSeconds: 10
+    env: []
+    envFrom: []
+    resources: {}
+    startupProbe:
+      exec:
+        command: ["pgtask", "health"]
+      failureThreshold: 60
+      periodSeconds: 2
+    readinessProbe:
+      exec:
+        command: ["pgtask", "health"]
+      periodSeconds: 5
+    livenessProbe: {}
+    podAnnotations: {}
+    podLabels: {}
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+    topologySpreadConstraints: []
+    volumes: []
+    volumeMounts: []
+    extraContainers: []
+    podDisruptionBudget:
+      enabled: false
+    autoscaling:
+      enabled: false
+
+developmentPostgres:
+  enabled: true

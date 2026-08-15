@@ -1,0 +1,20 @@
+[package]
+name = "pgtask"
+description = "PostgreSQL-native durable tasks and workflows"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+pgtask-core = { path = "../pgtask-core", version = "0.1.0" }
+pgtask-otel = { path = "../pgtask-otel", version = "0.1.0" }
+pgtask-postgres = { path = "../pgtask-postgres", version = "0.1.0" }
+pgtask-worker = { path = "../pgtask-worker", version = "0.1.0" }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

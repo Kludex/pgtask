@@ -1,0 +1,5 @@
+.coverage
+.git
+.venv
+dist
+target

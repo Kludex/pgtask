@@ -1,0 +1,24 @@
+[package]
+name = "pgtask-bench"
+description = "Load and failure generator for pgtask"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+pgtask = { path = "../pgtask", version = "0.1.0" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+
+[[bin]]
+name = "pgtask-smoke"
+path = "src/smoke.rs"
+
+[lints]
+workspace = true

@@ -1,0 +1,6 @@
+{{- if .Values.developmentPostgres.enabled }}
+This release uses a disposable PostgreSQL pod. Do not use values-development.yaml for production.
+{{- else }}
+This release reads PostgreSQL credentials from Secret {{ include "pgtask.databaseSecretName" . }}.
+Workers require session-capable PostgreSQL connections for LISTEN and NOTIFY.
+{{- end }}

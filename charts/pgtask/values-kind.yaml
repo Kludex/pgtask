@@ -1,0 +1,42 @@
+image:
+  repository: pgtask-kind
+  tag: test
+  pullPolicy: Never
+
+database:
+  existingSecret:
+    name: pgtask-pgtask-postgres
+    key: url
+
+workers:
+  default:
+    command: ["pgtask-smoke"]
+    args: ["worker"]
+    env:
+      - name: PGTASK_SMOKE_HANDLER_MILLISECONDS
+        value: "250"
+      - name: PGTASK_SMOKE_LEASE_SECONDS
+        value: "2"
+    startupProbe:
+      exec: null
+      httpGet:
+        path: /livez
+        port: health
+      failureThreshold: 30
+      periodSeconds: 2
+    readinessProbe:
+      exec: null
+      httpGet:
+        path: /readyz
+        port: health
+      periodSeconds: 2
+      timeoutSeconds: 1
+    livenessProbe:
+      httpGet:
+        path: /livez
+        port: health
+      periodSeconds: 5
+      timeoutSeconds: 1
+
+developmentPostgres:
+  enabled: false

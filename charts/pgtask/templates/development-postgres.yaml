@@ -1,0 +1,69 @@
+{{- if .Values.developmentPostgres.enabled }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "pgtask.fullname" . }}-postgres
+  labels:
+    {{- include "pgtask.labels" . | nindent 4 }}
+stringData:
+  {{ .Values.database.existingSecret.key }}: {{ printf "postgresql://%s:%s@%s-postgres:5432/%s" .Values.developmentPostgres.username .Values.developmentPostgres.password (include "pgtask.fullname" .) .Values.developmentPostgres.database | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "pgtask.fullname" . }}-postgres
+  labels:
+    {{- include "pgtask.labels" . | nindent 4 }}
+    app.kubernetes.io/component: development-postgres
+spec:
+  selector:
+    {{- include "pgtask.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: development-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "pgtask.fullname" . }}-postgres
+  labels:
+    {{- include "pgtask.labels" . | nindent 4 }}
+    app.kubernetes.io/component: development-postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "pgtask.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: development-postgres
+  template:
+    metadata:
+      labels:
+        {{- include "pgtask.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: development-postgres
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: postgres
+          image: {{ .Values.developmentPostgres.image }}
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.developmentPostgres.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.developmentPostgres.username | quote }}
+            - name: POSTGRES_PASSWORD
+              value: {{ .Values.developmentPostgres.password | quote }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", {{ .Values.developmentPostgres.username | quote }}, "-d", {{ .Values.developmentPostgres.database | quote }}]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+      volumes:
+        - name: data
+          emptyDir: {}
+{{- end }}

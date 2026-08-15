@@ -1,0 +1,56 @@
+{{- $root := . -}}
+{{- range $name, $worker := .Values.workers }}
+{{- if and $worker.enabled $worker.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "pgtask.fullname" $root }}-{{ $name | kebabcase | trunc 30 | trimSuffix "-" }}
+  labels:
+    {{- include "pgtask.labels" $root | nindent 4 }}
+spec:
+  minAvailable: {{ $worker.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "pgtask.selectorLabels" $root | nindent 6 }}
+      app.kubernetes.io/component: worker
+      pgtask.io/worker: {{ $name | quote }}
+{{- end }}
+{{- if and $worker.enabled $worker.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "pgtask.fullname" $root }}-{{ $name | kebabcase | trunc 30 | trimSuffix "-" }}
+  labels:
+    {{- include "pgtask.labels" $root | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "pgtask.fullname" $root }}-{{ $name | kebabcase | trunc 30 | trimSuffix "-" }}
+  minReplicas: {{ $worker.autoscaling.minReplicas }}
+  maxReplicas: {{ $worker.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $worker.autoscaling.targetCPUUtilizationPercentage }}
+    {{- if $worker.autoscaling.queueDemand.enabled }}
+    - type: External
+      external:
+        metric:
+          name: {{ $worker.autoscaling.queueDemand.metricName | quote }}
+          {{- with $worker.autoscaling.queueDemand.selectorLabels }}
+          selector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+        target:
+          type: AverageValue
+          averageValue: {{ $worker.autoscaling.queueDemand.targetAverageValue | quote }}
+    {{- end }}
+{{- end }}
+{{- end }}

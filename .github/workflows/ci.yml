@@ -1,0 +1,189 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/check-release-version.sh
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
+
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - run: cargo install cargo-deny --version 0.19.6 --locked
+      - run: cargo deny check
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-features
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v5
+        with:
+          version: v4.1.1
+      - uses: astral-sh/setup-uv@v7
+      - run: ./scripts/validate-chart.sh
+
+  postgres:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [17, 18]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_DB: pgtask
+          POSTGRES_PASSWORD: pgtask
+          POSTGRES_USER: pgtask
+        options: >-
+          --health-cmd "pg_isready -U pgtask -d pgtask"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
+        ports:
+          - 5432:5432
+    env:
+      PGTASK_DATABASE_URL: postgresql://pgtask:pgtask@localhost:5432/pgtask
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features
+
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: pgtask
+          POSTGRES_PASSWORD: pgtask
+          POSTGRES_USER: pgtask
+        options: >-
+          --health-cmd "pg_isready -U pgtask -d pgtask"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
+        ports:
+          - 5432:5432
+    env:
+      PGTASK_DATABASE_URL: postgresql://pgtask:pgtask@localhost:5432/pgtask
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --group dev
+      - run: uv run ruff format --check python tests
+      - run: uv run ruff check python tests
+      - run: uv run mypy python tests
+      - run: uv run pytest --cov=pgtask --cov=tests --cov-report=term-missing
+
+  coverage:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: pgtask
+          POSTGRES_PASSWORD: pgtask
+          POSTGRES_USER: pgtask
+        options: >-
+          --health-cmd "pg_isready -U pgtask -d pgtask"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
+        ports:
+          - 5432:5432
+    env:
+      PGTASK_COVERAGE_OWNER: pgtask
+      PGTASK_DATABASE_URL: postgresql://pgtask:pgtask@localhost:5432/pgtask
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: llvm-tools-preview
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.14"
+      - run: cargo install cargo-llvm-cov --version 0.8.6 --locked
+      - run: uv sync --group dev
+      - run: ./scripts/coverage.sh
+
+  wheels:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            manylinux: "2_28"
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            manylinux: auto
+          - os: macos-15
+            target: aarch64-apple-darwin
+            manylinux: auto
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: auto
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+      - uses: astral-sh/setup-uv@v7
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          rust-toolchain: "1.94"
+          args: --release --locked --compatibility pypi --out dist
+      - run: uv pip install --system --no-deps --no-index --find-links dist pgtask
+      - run: python -c "import pgtask; assert pgtask.Client"

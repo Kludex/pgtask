@@ -1,0 +1,32 @@
+services:
+  postgres:
+    image: postgres:18.0
+    environment:
+      POSTGRES_DB: pgtask
+      POSTGRES_PASSWORD: pgtask
+      POSTGRES_USER: pgtask
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgtask -d pgtask"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    ports:
+      - "54329:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+  benchmark:
+    profiles: [benchmark]
+    build: .
+    entrypoint: ["pgtask-bench"]
+    environment:
+      PGTASK_DATABASE_URL: postgresql://pgtask:pgtask@postgres:5432/pgtask
+      PGTASK_BENCH_TASKS: ${PGTASK_BENCH_TASKS:-10000}
+      PGTASK_BENCH_SCENARIO: ${PGTASK_BENCH_SCENARIO:-noop}
+      PGTASK_BENCH_BATCH_SIZE: ${PGTASK_BENCH_BATCH_SIZE:-100}
+      PGTASK_BENCH_WORKERS: ${PGTASK_BENCH_WORKERS:-1}
+      PGTASK_BENCH_CONCURRENCY: ${PGTASK_BENCH_CONCURRENCY:-100}
+      PGTASK_BENCH_TIMEOUT_SECONDS: ${PGTASK_BENCH_TIMEOUT_SECONDS:-300}
+      PGTASK_BENCH_RETRY_ATTEMPTS: ${PGTASK_BENCH_RETRY_ATTEMPTS:-3}
+    depends_on:
+      postgres:
+        condition: service_healthy
