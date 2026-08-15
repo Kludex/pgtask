@@ -40,6 +40,30 @@ async fn database_fault_guard() -> MutexGuard<'static, ()> {
     GUARD.get_or_init(|| Mutex::new(())).lock().await
 }
 
+async fn drop_runtime_role(admin: &Store, role: &str) {
+    sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = $1")
+        .bind(role)
+        .execute(admin.pool())
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP OWNED BY {role}")))
+        .execute(admin.pool())
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {role}")))
+        .execute(admin.pool())
+        .await
+        .unwrap();
+}
+
+struct DropNotification(Arc<Notify>);
+
+impl Drop for DropNotification {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
 async fn health_status(address: std::net::SocketAddr, path: &str) -> u16 {
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream
@@ -172,19 +196,7 @@ impl DatabaseFaultWorker {
     async fn stop(self) {
         self.shutdown.cancel();
         self.worker_task.await.unwrap().unwrap();
-        sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = $1")
-            .bind(&self.role)
-            .execute(self.admin.pool())
-            .await
-            .unwrap();
-        sqlx::query(sqlx::AssertSqlSafe(format!("DROP OWNED BY {}", self.role)))
-            .execute(self.admin.pool())
-            .await
-            .unwrap();
-        sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {}", self.role)))
-            .execute(self.admin.pool())
-            .await
-            .unwrap();
+        drop_runtime_role(&self.admin, &self.role).await;
     }
 }
 
@@ -542,6 +554,52 @@ async fn stale_success_and_panic_results_do_not_overwrite_cancellation() {
             TaskState::Cancelled
         );
     }
+    shutdown.cancel();
+    worker_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn lease_renewal_propagates_database_cancellation_to_the_handler() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("renewal-cancellation-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("renewal-cancellation-handler-{suffix}")).unwrap();
+    let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
+    request.queue_name = queue_name.clone();
+    let task_id = store.enqueue(&request).await.unwrap().task_id;
+    let started = Arc::new(Notify::new());
+    let dropped = Arc::new(Notify::new());
+    let handler_started = Arc::clone(&started);
+    let handler_dropped = Arc::clone(&dropped);
+    let mut registry = HandlerRegistry::new();
+    registry.register(task_name, HandlerVersion::default(), RetryPolicy::Never, move |_task| {
+        let started = Arc::clone(&handler_started);
+        let dropped = DropNotification(Arc::clone(&handler_dropped));
+        async move {
+            started.notify_one();
+            let _dropped = dropped;
+            std::future::pending::<Result<serde_json::Value, HandlerError>>().await
+        }
+    });
+    let mut config = WorkerConfig::new(queue_name);
+    config.lease_duration = Duration::from_millis(90);
+    config.poll_interval = Duration::from_millis(5);
+    let worker = Worker::new(store.clone(), registry, config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, started.notified()).await.unwrap();
+    assert!(store.cancel(task_id).await.unwrap());
+    tokio::time::timeout(TEST_TIMEOUT, dropped.notified()).await.unwrap();
+    assert_eq!(
+        store.get_task(task_id).await.unwrap().unwrap().state,
+        TaskState::Cancelled
+    );
     shutdown.cancel();
     worker_task.await.unwrap().unwrap();
 }
@@ -1010,6 +1068,107 @@ async fn worker_recovers_from_database_disconnects_and_registration_loss() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(60)).await;
     fixture.stop().await;
+}
+
+#[tokio::test]
+async fn notification_listener_reports_failure_and_recovers() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let _guard = database_fault_guard().await;
+    let admin = Store::connect(&database_url).await.unwrap();
+    admin.migrate().await.unwrap();
+    let suffix = Uuid::new_v4().simple();
+    let role = format!("pgtask_listener_{suffix}");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role} LOGIN PASSWORD 'listener-test'"
+    )))
+    .execute(admin.pool())
+    .await
+    .unwrap();
+    let owner: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(admin.pool())
+        .await
+        .unwrap();
+    admin
+        .configure_grants(&owner, &role, &role, &role, &role)
+        .await
+        .unwrap();
+    let options = PgConnectOptions::from_str(&database_url)
+        .unwrap()
+        .username(&role)
+        .password("listener-test")
+        .application_name(&role);
+    let store = Store::from_pool(
+        PgPoolOptions::new()
+            .acquire_timeout(Duration::from_millis(100))
+            .connect_with(options)
+            .await
+            .unwrap(),
+    );
+    let queue_name = QueueName::new(format!("listener-recovery-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("listener-recovery-handler-{suffix}")).unwrap();
+    let socket = StdTcpListener::bind("127.0.0.1:0").unwrap();
+    let address = socket.local_addr().unwrap();
+    drop(socket);
+    let mut config = WorkerConfig::new(queue_name);
+    config.health_address = Some(address);
+    config.poll_interval = Duration::from_secs(5);
+    config.supervisor_interval = Duration::from_millis(10);
+    let worker = Worker::new(store, successful_registry(&task_name), config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while TcpStream::connect(address).await.is_err() {}
+    })
+    .await
+    .unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while health_status(address, "/readyz").await != 200 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("SELECT pg_notify('pgtask_ready', 'another-queue')")
+        .execute(admin.pool())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    sqlx::query(sqlx::AssertSqlSafe(format!("ALTER ROLE {role} CONNECTION LIMIT 0")))
+        .execute(admin.pool())
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = $1")
+        .bind(&role)
+        .execute(admin.pool())
+        .await
+        .unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while health_status(address, "/readyz").await != 503 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    sqlx::query(sqlx::AssertSqlSafe(format!("ALTER ROLE {role} CONNECTION LIMIT -1")))
+        .execute(admin.pool())
+        .await
+        .unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while health_status(address, "/readyz").await != 200 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    shutdown.cancel();
+    worker_task.await.unwrap().unwrap();
+    drop_runtime_role(&admin, &role).await;
 }
 
 #[tokio::test]
@@ -1698,6 +1857,86 @@ async fn durable_signal_wait_closes_the_lost_wakeup_race() {
     .unwrap();
     shutdown.cancel();
     worker_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn durable_signal_available_before_execution_completes_without_suspending() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("durable-ready-signal-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("durable-ready-signal-handler-{suffix}")).unwrap();
+    let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
+    request.queue_name = queue_name.clone();
+    let task_id = store.enqueue(&request).await.unwrap().task_id;
+    store
+        .emit_signal(
+            task_id,
+            &SignalName::new("approval").unwrap(),
+            0,
+            &json!({"approved": true}),
+        )
+        .await
+        .unwrap();
+
+    let mut registry = HandlerRegistry::new();
+    registry.register_durable(
+        task_name,
+        HandlerVersion::default(),
+        RetryPolicy::Never,
+        |_task, context| async move {
+            context
+                .wait_for_signal(
+                    &StepName::new("ready-approval").unwrap(),
+                    0,
+                    &SignalName::new("approval").unwrap(),
+                    0,
+                    None,
+                )
+                .await
+                .map(|signal| signal.unwrap_or(json!(null)))
+        },
+    );
+    let worker = Worker::new(store.clone(), registry, WorkerConfig::new(queue_name)).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let task = store.get_task(task_id).await.unwrap().unwrap();
+            if task.state == TaskState::Succeeded {
+                assert_eq!(task.attempt, 1);
+                assert_eq!(task.result, Some(json!({"approved": true})));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.cancel();
+    worker_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn worker_accepts_shutdown_before_runtime_loops_start() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("pre-cancelled-worker-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("pre-cancelled-handler-{suffix}")).unwrap();
+    let worker = Worker::new(store, successful_registry(&task_name), WorkerConfig::new(queue_name)).unwrap();
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    worker.run(shutdown).await.unwrap();
 }
 
 #[tokio::test]

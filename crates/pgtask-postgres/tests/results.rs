@@ -1,8 +1,9 @@
-use std::time::Duration;
+use std::{str::FromStr, time::Duration};
 
 use pgtask_core::{EnqueueRequest, HandlerVersion, QueueName, StepName, TaskId, TaskName, TaskState, WorkerId};
 use pgtask_postgres::{PostgresError, ResultWait, ResultWaitRequest, Store, TaskResultWait};
 use serde_json::json;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
 
 fn database_url() -> Option<String> {
@@ -195,7 +196,11 @@ async fn external_result_wait_uses_notifications() {
     let Some(database_url) = database_url() else {
         return;
     };
-    let store = Store::connect(&database_url).await.unwrap();
+    let application_name = format!("result-listener-{}", Uuid::new_v4().simple());
+    let options = PgConnectOptions::from_str(&database_url)
+        .unwrap()
+        .application_name(&application_name);
+    let store = Store::from_pool(PgPoolOptions::new().connect_with(options).await.unwrap());
     store.migrate().await.unwrap();
 
     let suffix = Uuid::new_v4();
@@ -211,6 +216,28 @@ async fn external_result_wait_uses_notifications() {
             .await
             .unwrap()
     });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let listening: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = $1 AND query LIKE 'LISTEN%')",
+            )
+            .bind(&application_name)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            if listening {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("SELECT pg_notify('pgtask_result', $1)")
+        .bind(TaskId::new().to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(20)).await;
     sqlx::query("SELECT pg_notify('pgtask_result', $1)")
         .bind(task_id.to_string())
@@ -244,6 +271,48 @@ async fn external_result_wait_uses_notifications() {
     };
     assert_eq!(result.state, TaskState::Succeeded);
     assert_eq!(result.result, Some(json!({"done": true})));
+}
+
+#[tokio::test]
+async fn external_result_wait_returns_an_already_completed_task() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("completed-result-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("completed-result-handler-{suffix}")).unwrap();
+    let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
+    request.queue_name = queue_name.clone();
+    let task_id = store.enqueue(&request).await.unwrap().task_id;
+    let task = store
+        .claim(
+            &queue_name,
+            WorkerId::new(),
+            &[(task_name, HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    store
+        .complete(
+            task.id,
+            task.attempt,
+            task.lease_token.unwrap(),
+            Some(&json!({"ready": true})),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        store.wait_for_task_result(task_id, None).await.unwrap(),
+        TaskResultWait::Ready(result) if result.result == Some(json!({"ready": true}))
+    ));
 }
 
 #[tokio::test]

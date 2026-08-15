@@ -216,7 +216,9 @@ All state-machine behavior is exercised through the public Rust API against real
 - Crash tests terminate workers before and after each persisted transition.
 - Network tests interrupt PostgreSQL connectivity and validate recovery.
 - Migration tests cover fresh install and every supported upgrade path.
-- Rust coverage uses `cargo llvm-cov` with a 98 percent release gate and a tracked 100 percent goal.
+- Rust coverage uses `cargo llvm-cov` with a 98 percent release gate. Every explicit source line is covered. The tracked
+  raw 100 percent goal remains open while the stable toolchain attributes generated and macro-expanded spans without
+  uncovered source locations.
 - CI runs formatting, Clippy with warnings denied, documentation tests, dependency policy checks, and the full integration suite.
 
 ## Load testing

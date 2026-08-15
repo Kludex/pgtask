@@ -798,9 +798,6 @@ async fn materialize_schedules(
     shutdown: CancellationToken,
 ) {
     loop {
-        if shutdown.is_cancelled() {
-            return;
-        }
         if enabled && let Err(error) = store.materialize_due_schedules(schedule_batch_size.get()).await {
             warn!(%error, "could not materialize due schedules");
         }

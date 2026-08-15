@@ -20,7 +20,9 @@ Configure the GitHub `pypi` environment as a trusted publisher for the PyPI proj
 with this repository and `release.yml` as its trusted publisher. Add `CARGO_REGISTRY_TOKEN` as a repository secret. Allow
 GitHub Actions to write packages so it can publish to `ghcr.io`.
 
-The workflow uses GitHub OIDC for keyless Sigstore signatures. It does not store a signing key.
+The workflow uses GitHub OIDC for keyless Sigstore signatures. It does not store a signing key. Rust crates publish in
+dependency order and wait for crates.io indexing before publishing a dependent crate, so a partial workflow can be rerun
+without republishing completed artifacts.
 
 ## Create a release
 
@@ -32,8 +34,8 @@ git push origin v1.0.0
 ```
 
 The release workflow rejects a tag that differs from the Cargo workspace and npm package versions. It reruns the full
-Rust suite on PostgreSQL 17 and 18 before any artifact is published. Tag the Go module with `sdks/go/v1.0.0` at the same
-commit so the Go module proxy resolves the release.
+Rust suite on PostgreSQL 17 and 18 before any artifact is published. After every artifact succeeds, it creates the
+corresponding `sdks/go/v1.0.0` tag at the same commit so the Go module proxy resolves the release.
 
 ## Test local artifacts
 

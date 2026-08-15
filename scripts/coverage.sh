@@ -168,7 +168,16 @@ coverage_web_pid=
 
 cargo llvm-cov report \
     --ignore-filename-regex 'crates/pgtask-python/src/lib.rs' \
-    --fail-under-lines 97.4
+    --text \
+    --show-missing-lines \
+    --output-path target/llvm-cov/missing.txt
+cargo llvm-cov report \
+    --ignore-filename-regex 'crates/pgtask-python/src/lib.rs' \
+    --json \
+    --output-path target/llvm-cov/report.json
+cargo llvm-cov report \
+    --ignore-filename-regex 'crates/pgtask-python/src/lib.rs' \
+    --fail-under-lines 98
 
 uv run --no-sync maturin develop --all-features
 uv run --no-sync pytest --cov=pgtask --cov=tests --cov-report=term-missing

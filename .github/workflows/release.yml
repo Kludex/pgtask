@@ -173,15 +173,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94"
-      - run: |
-          set -eu
-          cargo publish --locked -p pgtask-core
-          cargo publish --locked -p pgtask-otel
-          cargo publish --locked -p pgtask-postgres
-          cargo publish --locked -p pgtask-worker
-          cargo publish --locked -p pgtask
-          cargo publish --locked -p pgtask-cli
-          cargo publish --locked -p pgtask-web
+      - run: ./scripts/publish-crates.sh "${{ needs.version.outputs.version }}"
 
   image:
     needs: [version, quality]
@@ -275,4 +267,14 @@ jobs:
           path: dist
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+        run: |
+          set -eu
+          go_tag="sdks/go/$GITHUB_REF_NAME"
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$go_tag" >/dev/null 2>&1; then
+            gh api \
+              --method POST \
+              "repos/$GITHUB_REPOSITORY/git/refs" \
+              --field ref="refs/tags/$go_tag" \
+              --field sha="$GITHUB_SHA"
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag

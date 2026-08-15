@@ -1007,13 +1007,14 @@ impl Store {
         let wait = async {
             loop {
                 let notification = listener.recv().await?;
-                if notification.payload() == task_id.to_string() {
-                    let result = self.task_result(task_id).await?.ok_or_else(|| {
-                        PostgresError::InvalidTask("task disappeared while waiting for result".to_owned())
-                    })?;
-                    if result.state.is_terminal() {
-                        return Ok(result);
-                    }
+                if notification.payload() != task_id.to_string() {
+                    continue;
+                }
+                let result = self.task_result(task_id).await?.ok_or_else(|| {
+                    PostgresError::InvalidTask("task disappeared while waiting for result".to_owned())
+                })?;
+                if result.state.is_terminal() {
+                    return Ok(result);
                 }
             }
         };
