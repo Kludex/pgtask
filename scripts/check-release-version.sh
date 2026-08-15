@@ -14,6 +14,12 @@ if test "$app_version" != "$version"; then
     exit 1
 fi
 
+npm_version=$(jq -r .version sdks/typescript/package.json)
+if test "$npm_version" != "$version"; then
+    printf 'npm package version %s does not match engine version %s\n' "$npm_version" "$version" >&2
+    exit 1
+fi
+
 if test -n "${RELEASE_VERSION:-}" && test "$RELEASE_VERSION" != "$version"; then
     printf 'release version %s does not match engine version %s\n' "$RELEASE_VERSION" "$version" >&2
     exit 1

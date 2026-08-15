@@ -4,7 +4,8 @@
 
 `0.1.0` is the first integration release. Its public surface is versioned, but it is not the 1.0 freeze. Pilot feedback may still remove or rename APIs before 1.0. Every breaking change before 1.0 must be recorded in the release notes.
 
-All Rust crates, the Python package, container images, and `appVersion` use the same engine version. The Helm chart has its own package version and declares the engine version through `appVersion`.
+All Rust crates, the Python package, the TypeScript package, the Go module, container images, and `appVersion` use the
+same engine version. The Helm chart has its own package version and declares the engine version through `appVersion`.
 
 ## Rust
 
@@ -58,6 +59,33 @@ The supported imports are `Client`, `EnqueueRequest`, `JSONValue`, `Task`, `Task
 
 Task registration is explicit. A registry owns one queue. A definition owns the stable task name, handler version, payload type, result type, and retry policy. There is no global discovery or ARQ compatibility API.
 
+## TypeScript
+
+```typescript
+const render = defineTask<{ reportId: string }, { rendered: string }>("reports.render");
+const task = await client.enqueue(render.request({ reportId: "report-123" }));
+const result = await task.result({ timeoutMs: 30_000 });
+```
+
+The supported entry point is `@pgtask/client`. Its public surface is `Client`, `EnqueueRequest`, `TaskDefinition`,
+`TaskHandle`, `defineTask`, and their exported JSON, option, request, and result types.
+
+## Go
+
+```go
+render, err := pgtask.DefineTask[renderRequest, renderResult]("reports.render", pgtask.DefinitionOptions{})
+if err != nil {
+	return err
+}
+task, err := render.Enqueue(ctx, client, renderRequest{ReportID: "report-123"}, pgtask.EnqueueOptions{})
+```
+
+The supported module is `github.com/Kludex/pgtask/sdks/go`. Its public surface is the typed task definition and handle,
+`Client`, enqueue options and results, task results, and `QueryRowExecutor` for transactional enqueueing.
+
+TypeScript and Go are producer SDKs. They enqueue, inspect, wait, signal, cancel, propagate OpenTelemetry context, and
+join application transactions. Handler execution remains in the Rust and Python runtimes.
+
 ## SQL
 
 ```sql
@@ -103,6 +131,9 @@ Task identifiers, payloads, results, errors, and idempotency keys are never metr
 
 ## Compatibility checks
 
-The integration suite compiles against the public Rust entry point, checks the Python export list, drives the CLI help and mutations, exercises every SQL operation through PostgreSQL 17 and 18, and records telemetry through the public engine paths. Release CI builds every artifact from one tag and rejects an engine version mismatch.
+The integration suite compiles against the public Rust entry point, checks the Python export list, type-checks the
+TypeScript package, tests the Go module with the race detector, drives the CLI help and mutations, exercises every SQL
+operation through PostgreSQL 17 and 18, and records telemetry through the public engine paths. Release CI builds every
+artifact from one version and rejects an engine version mismatch.
 
 The 1.0 contract freeze remains open until both adopter pilots pass. After 1.0, incompatible Rust, Python, SQL, CLI, or telemetry changes require a new major version.

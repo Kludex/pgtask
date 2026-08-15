@@ -8,3 +8,6 @@
 python/pgtask/_native.*.so
 .DS_Store
 .env
+/sdks/typescript/coverage/
+/sdks/typescript/dist/
+/sdks/go/coverage.out

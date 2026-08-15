@@ -93,7 +93,14 @@ The worker runtime has separate supervised loops for claims, batched lease renew
 
 ### Language SDKs
 
-The Rust API is the reference client. The Python package has four explicit concepts: `TaskDefinition`, `TaskRegistry`, `Client`, and `TaskHandle`. A definition statically links the payload and result types. A registry owns one logical queue, holds stable task names and versions, and is passed directly to a worker. It contains no global discovery. A client submits requests. A correspondingly typed handle inspects results, waits, signals, and cancels.
+The Rust API is the reference client. The Python package has four explicit concepts: `TaskDefinition`, `TaskRegistry`,
+`Client`, and `TaskHandle`. A definition statically links the payload and result types. A registry owns one logical queue,
+holds stable task names and versions, and is passed directly to a worker. It contains no global discovery. A client
+submits requests. A correspondingly typed handle inspects results, waits, signals, and cancels.
+
+TypeScript and Go provide typed producer SDKs over the same SQL protocol. They support normal and transactional enqueue,
+inspection, required `LISTEN`-based result waiting, signals, cancellation, and OpenTelemetry propagation. They do not
+duplicate worker execution. A future language runtime must justify its handler bridge separately from its producer API.
 
 Normal enqueueing uses the Rust-backed client. Transactional enqueueing accepts an existing Psycopg connection and invokes the public SQL enqueue function so it participates in the caller's transaction. Migration helpers translate at the application boundary and do not expose an ARQ-shaped public facade.
 
@@ -326,6 +333,15 @@ Exit gate: a Python producer and worker integration runs without Redis through t
 
 Exit gate: forced termination resumes from completed checkpoints without repeating them.
 
+### Milestone 4a: TypeScript and Go producer SDKs
+
+- Add typed task definitions, enqueueing, handles, result waiting, signals, and cancellation.
+- Preserve application transactions through `pg` and pgx connection interfaces.
+- Inject active OpenTelemetry context with each language's standard propagation API.
+- Test the public SDKs against PostgreSQL 17 and 18 with 100 percent SDK coverage.
+
+Exit gate: TypeScript and Go applications enqueue and await work executed by the Rust or Python runtime.
+
 ### Milestone 6: Scale validation
 
 - Complete `pgtask-bench`, Docker Compose performance environments, and `kind` chaos tests.
@@ -368,7 +384,8 @@ Exit gate: both pilots meet their service objectives and rollback procedure.
 
 - Freeze the public API and schema compatibility policy.
 - Complete security, dependency, and operational reviews.
-- Publish crates, Python wheels, images, Helm chart, reference documentation, and migration guides.
+- Publish crates, Python wheels, the TypeScript package, the Go module, images, Helm chart, reference documentation, and
+  migration guides.
 
 Exit gate: every explicit guarantee and release artifact is verified from a clean environment.
 

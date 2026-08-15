@@ -1,0 +1,51 @@
+{
+  "name": "@pgtask/client",
+  "version": "0.1.0",
+  "description": "Typed PostgreSQL client for pgtask",
+  "homepage": "https://github.com/Kludex/pgtask/blob/main/docs/typescript.md",
+  "bugs": "https://github.com/Kludex/pgtask/issues",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kludex/pgtask.git",
+    "directory": "sdks/typescript"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsc",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint --deny-warnings src test",
+    "test": "c8 --all --include 'src/**/*.ts' --check-coverage --lines 100 --branches 100 --functions 100 --statements 100 node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.9.1",
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "@types/pg": "8.18.0",
+    "c8": "12.0.0",
+    "oxfmt": "0.63.0",
+    "oxlint": "1.78.0",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

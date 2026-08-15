@@ -119,6 +119,95 @@ jobs:
       - run: uv run mypy python tests
       - run: uv run pytest --cov=pgtask --cov=tests --cov-report=term-missing
 
+  typescript:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [17, 18]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_DB: pgtask
+          POSTGRES_PASSWORD: pgtask
+          POSTGRES_USER: pgtask
+        options: >-
+          --health-cmd "pg_isready -U pgtask -d pgtask"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
+        ports:
+          - 5432:5432
+    env:
+      PGTASK_DATABASE_URL: postgresql://pgtask:pgtask@localhost:5432/pgtask
+    defaults:
+      run:
+        working-directory: sdks/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - working-directory: .
+        run: cargo run -p pgtask-cli --bin pgtask -- --database-url "$PGTASK_DATABASE_URL" migrate
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - run: npm pack --dry-run
+
+  go:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [17, 18]
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_DB: pgtask
+          POSTGRES_PASSWORD: pgtask
+          POSTGRES_USER: pgtask
+        options: >-
+          --health-cmd "pg_isready -U pgtask -d pgtask"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
+        ports:
+          - 5432:5432
+    env:
+      PGTASK_DATABASE_URL: postgresql://pgtask:pgtask@localhost:5432/pgtask
+    defaults:
+      run:
+        working-directory: sdks/go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: sdks/go/go.mod
+          cache-dependency-path: sdks/go/go.sum
+      - working-directory: .
+        run: cargo run -p pgtask-cli --bin pgtask -- --database-url "$PGTASK_DATABASE_URL" migrate
+      - run: go vet ./...
+      - run: go test -race -coverprofile=coverage.out ./...
+      - run: test "$(go tool cover -func=coverage.out | awk '/^total:/ { print $3 }')" = "100.0%"
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.10.1
+          working-directory: sdks/go
+
   coverage:
     runs-on: ubuntu-latest
     services:

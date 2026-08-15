@@ -8,6 +8,7 @@ cargo package --workspace --allow-dirty --locked
 cargo build --workspace --all-features --bins --release --locked
 uv run --no-sync maturin build --release --locked --out dist
 uv build --sdist --out-dir dist
+(cd sdks/typescript && npm ci && npm run build && npm pack --pack-destination ../../dist)
 helm package charts/pgtask --version "$version" --app-version "$version" --destination dist
 
 if test "${PGTASK_BUILD_IMAGE:-true}" = true; then

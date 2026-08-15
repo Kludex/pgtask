@@ -135,6 +135,34 @@ jobs:
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
 
+  npm:
+    needs: [version, quality]
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: sdks/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          cache: npm
+          cache-dependency-path: sdks/typescript/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm pack
+      - run: npm publish "pgtask-client-${{ needs.version.outputs.version }}.tgz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: sdks/typescript/*.tgz
+          if-no-files-found: error
+
   crates:
     needs: [version, quality]
     runs-on: ubuntu-latest
@@ -223,7 +251,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [version, wheels, source-distribution, python, crates, image, chart]
+    needs: [version, wheels, source-distribution, python, npm, crates, image, chart]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -240,6 +268,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: helm-chart
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-package
           path: dist
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
