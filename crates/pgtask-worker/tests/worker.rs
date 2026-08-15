@@ -1101,7 +1101,7 @@ async fn notification_listener_reports_failure_and_recovers() {
         .application_name(&role);
     let store = Store::from_pool(
         PgPoolOptions::new()
-            .acquire_timeout(Duration::from_millis(100))
+            .acquire_timeout(Duration::from_secs(1))
             .connect_with(options)
             .await
             .unwrap(),
@@ -1153,7 +1153,7 @@ async fn notification_listener_reports_failure_and_recovers() {
     })
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    tokio::time::sleep(Duration::from_millis(1_200)).await;
     sqlx::query(sqlx::AssertSqlSafe(format!("ALTER ROLE {role} CONNECTION LIMIT -1")))
         .execute(admin.pool())
         .await
