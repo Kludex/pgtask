@@ -166,6 +166,7 @@ kill -TERM "$coverage_web_pid"
 wait "$coverage_web_pid" || true
 coverage_web_pid=
 
+mkdir -p target/llvm-cov
 cargo llvm-cov report \
     --ignore-filename-regex 'crates/pgtask-python/src/lib.rs' \
     --text \
