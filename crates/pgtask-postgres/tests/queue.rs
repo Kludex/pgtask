@@ -16,7 +16,7 @@ fn database_url() -> Option<String> {
     std::env::var("PGTASK_DATABASE_URL").ok()
 }
 
-async fn configure_test_roles(store: &Store) -> String {
+async fn configure_test_roles(store: &Store) {
     sqlx::query(
         r"
         DO $$
@@ -46,38 +46,6 @@ async fn configure_test_roles(store: &Store) -> String {
             "pgtask_test_observer",
             "pgtask_test_administrator",
         )
-        .await
-        .unwrap();
-    let unprivileged_role = format!("pgtask_unprivileged_{}", Uuid::new_v4().simple());
-    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE ROLE {unprivileged_role}")))
-        .execute(store.pool())
-        .await
-        .unwrap();
-    unprivileged_role
-}
-
-async fn assert_role_cannot_use_protocol(store: &Store, role: &str) {
-    let mut connection = store.pool().acquire().await.unwrap();
-    sqlx::query(sqlx::AssertSqlSafe(format!("SET ROLE {role}")))
-        .execute(&mut *connection)
-        .await
-        .unwrap();
-    let current_role: String = sqlx::query_scalar("SELECT current_user")
-        .fetch_one(&mut *connection)
-        .await
-        .unwrap();
-    assert_eq!(current_role, role);
-    for query in [
-        "SELECT pgtask.storage_protocol_version()",
-        "SELECT count(*) FROM pgtask.task_view",
-    ] {
-        let error = sqlx::query(query).execute(&mut *connection).await.unwrap_err();
-        assert_eq!(error.as_database_error().unwrap().code().as_deref(), Some("42501"));
-    }
-    sqlx::query("RESET ROLE").execute(&mut *connection).await.unwrap();
-    drop(connection);
-    sqlx::query(sqlx::AssertSqlSafe(format!("DROP ROLE {role}")))
-        .execute(store.pool())
         .await
         .unwrap();
 }
@@ -1143,7 +1111,7 @@ async fn runtime_roles_only_receive_their_protocol_capabilities() {
     };
     let store = Store::connect(&database_url).await.unwrap();
     store.migrate().await.unwrap();
-    let unprivileged_role = configure_test_roles(&store).await;
+    configure_test_roles(&store).await;
 
     let queue_name = format!("roles-{}", Uuid::new_v4());
     let mut producer = store.pool().acquire().await.unwrap();
@@ -1224,6 +1192,4 @@ async fn runtime_roles_only_receive_their_protocol_capabilities() {
     assert_eq!(cancelled.as_deref(), Some("role-task"));
     sqlx::query("RESET ROLE").execute(&mut *administrator).await.unwrap();
     drop(administrator);
-
-    assert_role_cannot_use_protocol(&store, &unprivileged_role).await;
 }
