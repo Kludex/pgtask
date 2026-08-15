@@ -100,7 +100,7 @@ impl DatabaseFaultWorker {
             .application_name(&role);
         let worker_store = Store::from_pool(
             PgPoolOptions::new()
-                .acquire_timeout(Duration::from_millis(50))
+                .acquire_timeout(Duration::from_secs(1))
                 .connect_with(options)
                 .await
                 .unwrap(),

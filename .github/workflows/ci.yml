@@ -185,5 +185,6 @@ jobs:
           manylinux: ${{ matrix.manylinux }}
           rust-toolchain: "1.94"
           args: --release --locked --compatibility pypi --out dist
+      - run: uv pip install --system opentelemetry-api 'psycopg[binary]'
       - run: uv pip install --system --no-deps --no-index --find-links dist pgtask
       - run: python -c "import pgtask; assert pgtask.Client"

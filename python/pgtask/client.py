@@ -128,7 +128,9 @@ class TaskResult(Generic[ResultT]):
             state=cast(TaskState, value["state"]),
             result=cast(ResultT | None, value["result"]),
             error=value["error"],
-            completed_at=datetime.fromisoformat(completed_at) if completed_at is not None else None,
+            completed_at=datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+            if completed_at is not None
+            else None,
         )
 
 
@@ -159,8 +161,8 @@ class Task:
             state=cast(TaskState, value["state"]),
             attempt=int(value["attempt"]),
             max_attempts=int(value["max_attempts"]),
-            run_at=datetime.fromisoformat(value["run_at"]),
-            created_at=datetime.fromisoformat(value["created_at"]),
+            run_at=datetime.fromisoformat(value["run_at"].replace("Z", "+00:00")),
+            created_at=datetime.fromisoformat(value["created_at"].replace("Z", "+00:00")),
             _context=context,
         )
 
