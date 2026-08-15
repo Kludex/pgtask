@@ -1566,7 +1566,7 @@ async fn external_side_effect_before_checkpoint_commit_is_at_least_once() {
 }
 
 #[tokio::test]
-async fn durable_sleep_releases_the_worker_and_resumes_once() {
+async fn durable_sleep_variants_release_the_worker_and_resume_once() {
     let Some(database_url) = database_url() else {
         return;
     };
@@ -1585,8 +1585,16 @@ async fn durable_sleep_releases_the_worker_and_resumes_once() {
         HandlerVersion::default(),
         RetryPolicy::Never,
         |_task, context| async move {
+            assert!(!context.cancellation_token().is_cancelled());
             context
                 .sleep_for(&StepName::new("short-sleep").unwrap(), 0, Duration::from_millis(50))
+                .await?;
+            context
+                .sleep_until(
+                    &StepName::new("short-sleep-until").unwrap(),
+                    0,
+                    Utc::now() + TimeDelta::milliseconds(50),
+                )
                 .await?;
             Ok(json!({"resumed": true}))
         },
@@ -1603,7 +1611,7 @@ async fn durable_sleep_releases_the_worker_and_resumes_once() {
         loop {
             let task = store.get_task(task_id).await.unwrap().unwrap();
             if task.state == TaskState::Succeeded {
-                assert_eq!(task.attempt, 2);
+                assert_eq!(task.attempt, 3);
                 assert_eq!(task.result, Some(json!({"resumed": true})));
                 break;
             }
@@ -1612,7 +1620,7 @@ async fn durable_sleep_releases_the_worker_and_resumes_once() {
     })
     .await
     .unwrap();
-    assert!(started_at.elapsed() >= Duration::from_millis(40));
+    assert!(started_at.elapsed() >= Duration::from_millis(80));
     shutdown.cancel();
     worker_task.await.unwrap().unwrap();
 }

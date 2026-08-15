@@ -25,6 +25,9 @@ impl TextMapPropagator for KeysPropagator {
 
     fn extract_with_context(&self, context: &Context, extractor: &dyn Extractor) -> Context {
         assert!(extractor.keys().contains(&"application"));
+        assert_eq!(extractor.get("application"), Some("kept"));
+        assert_eq!(extractor.get("numeric"), None);
+        assert_eq!(extractor.get("missing"), None);
         context.clone()
     }
 
@@ -48,6 +51,7 @@ fn propagation_uses_json_headers_without_replacing_application_values() {
         .with_baggage([KeyValue::new("tenant", "acme")]);
     let mut original = Map::new();
     original.insert("application".to_owned(), Value::String("kept".to_owned()));
+    original.insert("numeric".to_owned(), Value::from(1));
 
     let headers = inject_context(&original, &context);
 

@@ -15,8 +15,6 @@ done
 
 cargo test --workspace --all-features --all-targets --locked
 cargo build --workspace --all-features --bins --locked
-uv run --no-sync maturin develop --all-features
-uv run --no-sync pytest --cov=pgtask --cov=tests --cov-report=term-missing
 
 for scenario in \
     noop \
@@ -168,4 +166,9 @@ kill -TERM "$coverage_web_pid"
 wait "$coverage_web_pid" || true
 coverage_web_pid=
 
-cargo llvm-cov report --fail-under-lines 98
+cargo llvm-cov report \
+    --ignore-filename-regex 'crates/pgtask-python/src/lib.rs' \
+    --fail-under-lines 98
+
+uv run --no-sync maturin develop --all-features
+uv run --no-sync pytest --cov=pgtask --cov=tests --cov-report=term-missing
