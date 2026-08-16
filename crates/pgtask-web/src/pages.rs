@@ -150,6 +150,10 @@ pub fn tasks(tasks: &[TaskSummary], query: Option<&str>) -> String {
 }
 
 pub fn task(task: &TaskDetail, administrator: bool) -> String {
+    let parent = task.parent_task_id.map_or_else(
+        || "root task".to_owned(),
+        |parent_task_id| format!("child of <a href=\"/tasks/{parent_task_id}\"><code>{parent_task_id}</code></a>"),
+    );
     let mut attempt_rows = String::new();
     for attempt in &task.attempts {
         write!(
@@ -209,7 +213,7 @@ pub fn task(task: &TaskDetail, administrator: bool) -> String {
         String::new()
     };
     let body = format!(
-        "<h1><code>{}</code></h1><p><strong>{}</strong> on {} - {} v{} - attempt {}/{}</p>\
+        "<h1><code>{}</code></h1><p><strong>{}</strong> on {} - {} v{} - attempt {}/{} - {parent}</p>\
          <p class=\"muted\">Run {} - created {} - completed {}</p><h2>Payload</h2><pre>{}</pre>\
          <h2>Result</h2><pre>{}</pre><h2>Error</h2><pre>{}</pre>\
          <h2>Attempts</h2><table><tr><th>Attempt</th><th>State</th><th>Started</th><th>Finished</th><th>Error</th></tr>{attempt_rows}</table>\

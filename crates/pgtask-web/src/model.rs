@@ -89,6 +89,7 @@ pub struct AdministratorAudit {
 #[derive(FromRow)]
 pub struct TaskDetail {
     pub id: Uuid,
+    pub parent_task_id: Option<Uuid>,
     pub queue_name: String,
     pub task_name: String,
     pub handler_version: i32,
@@ -114,7 +115,7 @@ pub struct TaskDetail {
 impl TaskDetail {
     pub async fn load(pool: &PgPool, task_id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         let Some(mut task): Option<Self> = sqlx::query_as(
-            "SELECT id, queue_name, task_name, handler_version, state, attempt, max_attempts, \
+            "SELECT id, parent_task_id, queue_name, task_name, handler_version, state, attempt, max_attempts, \
              payload::text AS payload, result::text AS result, error::text AS error, run_at, created_at, completed_at \
              FROM pgtask.task_view WHERE id = $1",
         )

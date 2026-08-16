@@ -111,14 +111,17 @@ async fn run_child(context: TaskContext) -> Result<Value, HandlerError> {
             &StepName::new("wait-for-report").expect("valid step name"),
             0,
             child_id,
+            Some(std::time::Duration::from_secs(10 * 60)),
         )
         .await
 }
 ```
 
-`spawn` inserts the child and its parent checkpoint in one transaction. The step identity supplies the child idempotency key, so replay returns the same task identifier. The child can use another queue and handler version through its `EnqueueRequest`.
+`spawn` inserts the child, records its immutable parent, and checkpoints its identifier in one transaction. The step identity supplies the child idempotency key, so replay returns the same task identifier. The child can use another queue and handler version through its `EnqueueRequest`.
 
-`wait_for_result` returns a checkpoint object containing `state`, `result`, and `error`. It releases the parent lease while the child runs. A database trigger commits the parent checkpoint and wakes its queue when the child succeeds, fails, or is cancelled.
+`wait_for_result` only accepts a direct child of the current task. This ownership rule prevents result-wait cycles. It returns a checkpoint object containing `state`, `result`, and `error`, then releases the parent lease while the child runs. A database trigger commits the parent checkpoint and wakes its queue when the child succeeds, fails, or is cancelled.
+
+A result timeout returns a checkpoint with `state` set to `timeout`. It cancels the unfinished child and its descendants. When a parent succeeds, fails, or is cancelled, PostgreSQL cancels every unfinished descendant. Retention deletes terminal leaves before their parents, so an active workflow never loses its ownership chain.
 
 For a client that is not inside a task handler, use `Store::task_result` for inspection or `Store::wait_for_task_result` for notification-driven waiting. The latter establishes `LISTEN pgtask_result` before checking task state, so completion cannot be lost between subscription and inspection.
 

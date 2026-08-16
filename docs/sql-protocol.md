@@ -94,9 +94,11 @@ Schedulers claim due definitions with `pgtask.claim_due_schedules`. They calcula
 
 ### Child tasks and result waits
 
-`pgtask.spawn_task` atomically enqueues one child and checkpoints its identifier under the parent step identity. The function derives the child idempotency key from `(parent_task_id, parent_handler_version, step_name, occurrence)`.
+`pgtask.spawn_task` atomically enqueues one child, records its immutable parent, and checkpoints its identifier under the parent step identity. The function derives the child idempotency key from `(parent_task_id, parent_handler_version, step_name, occurrence)`.
 
-`pgtask.wait_for_result` either checkpoints an already-terminal child or registers a durable result wait and releases the parent lease. A trigger on terminal task transitions checkpoints the child state, result, and error before waking the parent queue. This closes both result-before-wait and wait-before-result races.
+`pgtask.wait_for_result` accepts only a direct child. It either checkpoints an already-terminal child or registers a durable result wait and releases the parent lease. Its optional database timeout checkpoints `timeout`, wakes the parent, and cancels the unfinished child subtree. A trigger on terminal task transitions checkpoints the child state, result, and error before waking the parent queue. This closes both result-before-wait and wait-before-result races without permitting wait cycles.
+
+Any terminal parent transition cancels unfinished descendants. `pgtask.delete_expired_terminal` deletes terminal leaves before parents so retention cannot orphan an active workflow.
 
 Every worker establishes session-level `LISTEN` subscriptions to its deterministic `pgtask_ready_*` shard, `pgtask_schedule`, and `pgtask_wait` before it claims or materializes work. One process connection multiplexes these channels. A low-frequency database reconciliation remains required because notifications are not durable across disconnects.
 

@@ -24,7 +24,7 @@ async def build_export(task: Task, request: ExportRequest) -> JSONValue:
 
     export = await task.step("load-export", load_export)
     child_id = await task.spawn("render-export", render_export.request(export))
-    result = await task.wait_for_result("wait-for-render", child_id)
+    result = await task.wait_for_result("wait-for-render", child_id, timeout=600)
     return await task.step("record-result", lambda: exports.complete(request["export_id"], result))
 ```
 

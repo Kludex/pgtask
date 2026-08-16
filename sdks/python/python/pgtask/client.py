@@ -137,6 +137,7 @@ class TaskResult(Generic[ResultT]):
 @dataclass(frozen=True)
 class Task:
     id: str
+    parent_task_id: str | None
     queue_name: str
     task_name: str
     handler_version: int
@@ -153,6 +154,7 @@ class Task:
     def from_native(cls, value: dict[str, Any], context: _native.TaskContext) -> Task:
         return cls(
             id=str(value["id"]),
+            parent_task_id=str(value["parent_task_id"]) if value["parent_task_id"] is not None else None,
             queue_name=str(value["queue_name"]),
             task_name=str(value["task_name"]),
             handler_version=int(value["handler_version"]),
@@ -198,8 +200,15 @@ class Task:
     async def spawn(self, step_name: str, request: EnqueueRequest[Any], occurrence: int = 0) -> str:
         return await self._context.spawn(step_name, occurrence, _request_value(request))
 
-    async def wait_for_result(self, step_name: str, task_id: str, occurrence: int = 0) -> JSONValue:
-        return cast(JSONValue, await self._context.wait_for_result(step_name, occurrence, task_id))
+    async def wait_for_result(
+        self,
+        step_name: str,
+        task_id: str,
+        *,
+        occurrence: int = 0,
+        timeout: float | None = None,
+    ) -> JSONValue:
+        return cast(JSONValue, await self._context.wait_for_result(step_name, occurrence, task_id, timeout))
 
 
 @dataclass(frozen=True)

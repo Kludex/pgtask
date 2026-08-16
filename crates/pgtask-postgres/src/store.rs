@@ -49,6 +49,8 @@ pub enum PostgresError {
     InvalidSleepDuration,
     #[error("wait recovery limit must be greater than zero")]
     InvalidWaitLimit,
+    #[error("result wait timeout must be greater than zero and fit in the PostgreSQL bigint range")]
+    InvalidResultWaitTimeout,
     #[error("notification listener failed: {0}")]
     Notification(String),
     #[error(transparent)]
@@ -206,6 +208,7 @@ pub struct ResultWaitRequest<'a> {
     pub step_name: &'a StepName,
     pub occurrence: u32,
     pub result_task_id: TaskId,
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Clone, Debug)]
@@ -1030,7 +1033,7 @@ impl Store {
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
                 run_at, attempt, max_attempts, lease_token, lease_owner, lease_expires_at,
-                created_at, updated_at, completed_at, result, error
+                created_at, updated_at, completed_at, result, error, parent_task_id
             FROM pgtask.claim($1, $2, $3, $4, $5, $6)
             ",
         )
@@ -1058,7 +1061,7 @@ impl Store {
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
                 run_at, attempt, max_attempts, lease_token, lease_owner, lease_expires_at,
-                created_at, updated_at, completed_at, result, error
+                created_at, updated_at, completed_at, result, error, parent_task_id
             FROM pgtask.get_task($1)
             ",
         )
@@ -1232,14 +1235,24 @@ impl Store {
 
     pub async fn wait_for_result(&self, request: ResultWaitRequest<'_>) -> Result<Option<ResultWait>, PostgresError> {
         let occurrence = i32::try_from(request.occurrence).map_err(invalid_number)?;
+        let timeout_milliseconds = request
+            .timeout
+            .map(|duration| {
+                if duration.is_zero() {
+                    return Err(PostgresError::InvalidResultWaitTimeout);
+                }
+                i64::try_from(duration.as_millis()).map_err(|_| PostgresError::InvalidResultWaitTimeout)
+            })
+            .transpose()?;
         let row: Option<ResultWaitRow> =
-            sqlx::query_as("SELECT status, checkpoint FROM pgtask.wait_for_result($1, $2, $3, $4, $5, $6)")
+            sqlx::query_as("SELECT status, checkpoint FROM pgtask.wait_for_result($1, $2, $3, $4, $5, $6, $7)")
                 .bind(request.task_id.as_uuid())
                 .bind(i32::from(request.attempt))
                 .bind(request.lease_token.as_uuid())
                 .bind(request.step_name.as_str())
                 .bind(occurrence)
                 .bind(request.result_task_id.as_uuid())
+                .bind(timeout_milliseconds)
                 .fetch_optional(&self.pool)
                 .await?;
         row.map(ResultWait::try_from).transpose()
@@ -1295,6 +1308,17 @@ impl Store {
             return Err(PostgresError::InvalidWaitLimit);
         }
         let recovered: i64 = sqlx::query_scalar("SELECT pgtask.recover_wait_timeouts($1)")
+            .bind(i32::from(limit))
+            .fetch_one(&self.pool)
+            .await?;
+        u64::try_from(recovered).map_err(invalid_number)
+    }
+
+    pub async fn recover_result_wait_timeouts(&self, limit: u16) -> Result<u64, PostgresError> {
+        if limit == 0 {
+            return Err(PostgresError::InvalidWaitLimit);
+        }
+        let recovered: i64 = sqlx::query_scalar("SELECT pgtask.recover_result_wait_timeouts($1)")
             .bind(i32::from(limit))
             .fetch_one(&self.pool)
             .await?;
@@ -1718,6 +1742,7 @@ impl From<EnqueueRow> for EnqueueResult {
 #[derive(FromRow)]
 struct TaskRow {
     id: Uuid,
+    parent_task_id: Option<Uuid>,
     queue_name: String,
     task_name: String,
     handler_version: i32,
@@ -1755,6 +1780,7 @@ impl TryFrom<TaskRow> for Task {
             .ok_or_else(|| PostgresError::InvalidTask("headers are not an object".to_owned()))?;
         Ok(Self {
             id: TaskId::from_uuid(row.id),
+            parent_task_id: row.parent_task_id.map(TaskId::from_uuid),
             queue_name: QueueName::new(row.queue_name)
                 .map_err(|error| PostgresError::InvalidTask(error.to_string()))?,
             task_name: TaskName::new(row.task_name).map_err(|error| PostgresError::InvalidTask(error.to_string()))?,

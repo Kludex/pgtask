@@ -212,6 +212,7 @@ impl TaskContext {
         step_name: &StepName,
         occurrence: u32,
         result_task_id: TaskId,
+        timeout: Option<std::time::Duration>,
     ) -> Result<Value, HandlerError> {
         if let Some(checkpoint) = self
             .store
@@ -230,6 +231,7 @@ impl TaskContext {
                 step_name,
                 occurrence,
                 result_task_id,
+                timeout,
             })
             .await
             .map_err(|error| HandlerError::checkpoint("result_wait_error", error.to_string()))?

@@ -90,7 +90,8 @@ async fn rejects_corrupted_wait_protocol_rows() {
             p_lease_token uuid,
             p_step_name text,
             p_occurrence integer,
-            p_result_task_id uuid
+            p_result_task_id uuid,
+            p_timeout_milliseconds bigint
         )
         RETURNS TABLE(status text, checkpoint jsonb)
         LANGUAGE sql
@@ -109,6 +110,7 @@ async fn rejects_corrupted_wait_protocol_rows() {
                 step_name: &StepName::new("corrupt-result").unwrap(),
                 occurrence: 0,
                 result_task_id: TaskId::new(),
+                timeout: None,
             })
             .await,
         Err(PostgresError::InvalidTask(message)) if message.contains("result wait")

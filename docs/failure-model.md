@@ -32,6 +32,9 @@ A stale handler receives a lease-lost result and must stop. Fencing prevents sta
 | Write checkpoint | Step remains absent | Step result is durable | Step runs again or is replayed |
 | Sleep | Task remains running | Task is pending at wake time | Lease expiry or later claim |
 | Register signal wait | Task remains running | Task is waiting | Lease expiry or signal delivery |
+| Register child-result wait | Task remains running | Parent is waiting for its direct child | Child completion or database timeout |
+| Child-result timeout | Parent and child remain unchanged | Parent is pending and the child subtree is cancelled | Parent replays the timeout checkpoint |
+| Parent terminal transition | Parent and children remain unchanged | Unfinished descendants are cancelled | No action |
 | Emit signal | Signal remains absent | Signal is immutable and durable | Emitter retries or waiter wakes |
 | Materialize schedule | No task and no advance | Task insert and schedule advance commit together | Another scheduler retries |
 | Retention delete | Rows remain | Terminal rows are removed | Later bounded cleanup pass |
@@ -82,4 +85,4 @@ Materialization and advancement share one transaction. A unique schedule occurre
 
 ## Retention failures
 
-Retention only deletes terminal tasks older than the configured threshold. Every pass is bounded and ordered. Failure leaves rows for a later pass. It does not block claiming pending tasks.
+Retention only deletes terminal tasks older than the configured threshold. A pass deletes leaves before parents so an active workflow keeps its ownership chain. Every pass is bounded and ordered. Failure leaves rows for a later pass. It does not block claiming pending tasks.

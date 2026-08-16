@@ -836,6 +836,9 @@ async fn materialize_schedules(
         if let Err(error) = store.recover_wait_timeouts(wait_batch_size.get()).await {
             warn!(%error, "could not recover signal wait timeouts");
         }
+        if let Err(error) = store.recover_result_wait_timeouts(wait_batch_size.get()).await {
+            warn!(%error, "could not recover result wait timeouts");
+        }
         let mut delay = reconciliation_interval;
         if enabled {
             match store.next_schedule_delay().await {
@@ -853,7 +856,7 @@ async fn materialize_schedules(
                     delay = delay.min(wait_delay);
                 }
             }
-            Err(error) => warn!(%error, "could not read the next signal wait deadline"),
+            Err(error) => warn!(%error, "could not read the next wait deadline"),
         }
         tokio::select! {
             () = shutdown.cancelled() => return,

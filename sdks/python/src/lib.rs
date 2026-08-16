@@ -297,19 +297,24 @@ impl PythonTaskContext {
         })
     }
 
+    #[pyo3(signature = (step_name, occurrence, task_id, timeout=None))]
     fn wait_for_result<'py>(
         &self,
         py: Python<'py>,
         step_name: String,
         occurrence: u32,
         task_id: &str,
+        timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let context = self.inner.clone();
         let step_name = StepName::new(step_name).map_err(value_error)?;
         let task_id = task_id.parse().map_err(value_error)?;
+        let timeout = timeout
+            .map(|seconds| Duration::try_from_secs_f64(seconds).map_err(value_error))
+            .transpose()?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let value = context
-                .wait_for_result(&step_name, occurrence, task_id)
+                .wait_for_result(&step_name, occurrence, task_id, timeout)
                 .await
                 .map_err(|error| handler_error(&error))?;
             Python::attach(|py| pythonize(py, &value).map(Bound::unbind).map_err(value_error))

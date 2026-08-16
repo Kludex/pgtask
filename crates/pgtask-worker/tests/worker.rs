@@ -86,6 +86,31 @@ fn successful_registry(task_name: &TaskName) -> HandlerRegistry {
     registry
 }
 
+async fn complete_ready_child(store: &Store, queue_name: &QueueName, task_name: &TaskName) -> Result<(), HandlerError> {
+    let child = store
+        .claim(
+            queue_name,
+            pgtask_core::WorkerId::new(),
+            &[(task_name.clone(), HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .map_err(|error| HandlerError::terminal(error.to_string()))?
+        .pop()
+        .unwrap();
+    store
+        .complete(
+            child.id,
+            child.attempt,
+            child.lease_token.unwrap(),
+            Some(&json!({"ready": true})),
+        )
+        .await
+        .map_err(|error| HandlerError::terminal(error.to_string()))?;
+    Ok(())
+}
+
 struct DatabaseFaultWorker {
     admin: Store,
     fault_queue: QueueName,
@@ -2247,7 +2272,7 @@ async fn durable_result_wait_releases_the_worker_until_the_child_finishes() {
                     .spawn(&StepName::new("spawn-child").unwrap(), 0, &child_request)
                     .await?;
                 context
-                    .wait_for_result(&StepName::new("child-result").unwrap(), 0, child_id)
+                    .wait_for_result(&StepName::new("child-result").unwrap(), 0, child_id, None)
                     .await
             }
         },
@@ -2305,44 +2330,35 @@ async fn durable_result_wait_handles_ready_and_stale_parents() {
 
     let mut child_request = EnqueueRequest::new(child_name.clone(), json!({}));
     child_request.queue_name = queue_name.clone();
-    let child_id = store.enqueue(&child_request).await.unwrap().task_id;
-    let child = store
-        .claim(
-            &queue_name,
-            pgtask_core::WorkerId::new(),
-            &[(child_name, HandlerVersion::default())],
-            1,
-            Duration::from_secs(30),
-        )
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
-    store
-        .complete(
-            child.id,
-            child.attempt,
-            child.lease_token.unwrap(),
-            Some(&json!({"ready": true})),
-        )
-        .await
-        .unwrap();
 
     let mut registry = HandlerRegistry::new();
+    let ready_store = store.clone();
+    let ready_child_name = child_name.clone();
+    let ready_child_request = child_request.clone();
     registry.register_durable(
         parent_name.clone(),
         HandlerVersion::default(),
         RetryPolicy::Never,
-        move |_task, context| async move {
-            context
-                .wait_for_result(&StepName::new("already-ready").unwrap(), 0, child_id)
-                .await
+        move |_task, context| {
+            let store = ready_store.clone();
+            let child_name = ready_child_name.clone();
+            let child_request = ready_child_request.clone();
+            async move {
+                let child_id = context
+                    .spawn(&StepName::new("spawn-ready").unwrap(), 0, &child_request)
+                    .await?;
+                complete_ready_child(&store, &child_request.queue_name, &child_name).await?;
+                context
+                    .wait_for_result(&StepName::new("already-ready").unwrap(), 0, child_id, None)
+                    .await
+            }
         },
     );
     let started = Arc::new(Notify::new());
     let release = Arc::new(Semaphore::new(0));
     let handler_started = Arc::clone(&started);
     let handler_release = Arc::clone(&release);
+    let stale_child_request = child_request;
     registry.register_durable(
         stale_name.clone(),
         HandlerVersion::default(),
@@ -2350,11 +2366,15 @@ async fn durable_result_wait_handles_ready_and_stale_parents() {
         move |_task, context| {
             let started = Arc::clone(&handler_started);
             let release = Arc::clone(&handler_release);
+            let child_request = stale_child_request.clone();
             async move {
+                let child_id = context
+                    .spawn(&StepName::new("spawn-stale").unwrap(), 0, &child_request)
+                    .await?;
                 started.notify_one();
                 release.acquire().await.unwrap().forget();
                 context
-                    .wait_for_result(&StepName::new("stale-result").unwrap(), 0, child_id)
+                    .wait_for_result(&StepName::new("stale-result").unwrap(), 0, child_id, None)
                     .await
             }
         },

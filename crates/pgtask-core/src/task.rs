@@ -140,6 +140,7 @@ pub struct EnqueueResult {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Task {
     pub id: TaskId,
+    pub parent_task_id: Option<TaskId>,
     pub queue_name: QueueName,
     pub task_name: TaskName,
     pub handler_version: HandlerVersion,

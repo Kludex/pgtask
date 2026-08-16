@@ -121,7 +121,7 @@ async def approve(task: Task, request: RenderRequest) -> JSONValue:
     waiting.set()
     approval = await task.wait_for_signal("wait-for-approval", "approval")
     child_id = await task.spawn("render-report", render.request(report))
-    rendered = await task.wait_for_result("wait-for-render", child_id)
+    rendered = await task.wait_for_result("wait-for-render", child_id, timeout=600)
     return {"approval": approval, "rendered": rendered}
 
 

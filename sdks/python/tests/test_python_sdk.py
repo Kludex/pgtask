@@ -362,10 +362,12 @@ async def test_python_handler_uses_durable_workflow_operations() -> None:
     @registry.task("python.durable-child")
     async def child(task: Task, payload: dict[str, int]) -> int:
         assert task.attempt == 1
+        assert task.parent_task_id is not None
         return payload["value"] * 2
 
     @registry.task("python.durable-parent")
     async def parent(task: Task, payload: dict[str, int]) -> JSONValue:
+        assert task.parent_task_id is None
         async def checkpointed_value() -> int:
             nonlocal step_calls
             step_calls += 1
@@ -377,7 +379,10 @@ async def test_python_handler_uses_durable_workflow_operations() -> None:
         waiting.set()
         approval = await task.wait_for_signal("approval-wait", "approval", timeout=1.0)
         child_id = await task.spawn("spawn-child", child.request({"value": value}))
-        child_result = cast(dict[str, JSONValue], await task.wait_for_result("wait-for-child", child_id))
+        child_result = cast(
+            dict[str, JSONValue],
+            await task.wait_for_result("wait-for-child", child_id, timeout=1.0),
+        )
         return {"approval": approval, "child": child_result}
 
     worker = Worker(database_url, registry, concurrency=1, poll_interval=30.0)

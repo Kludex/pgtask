@@ -85,9 +85,11 @@ Durable operations are database transitions, not an in-memory workflow graph.
   stored JSON value.
 - A durable sleep stores its checkpoint, changes the task to `pending`, sets a database deadline, and releases the
   lease.
-- A signal wait or child-result wait changes the task to `waiting` and releases the lease. The signal, result, or
-  timeout stores a checkpoint before returning the task to `pending`.
-- A child spawn inserts the child task and checkpoints its identifier in one transaction.
+- A signal wait or direct-child result wait changes the task to `waiting` and releases the lease. The signal, result,
+  or timeout stores a checkpoint before returning the task to `pending`.
+- A child spawn inserts the child task, records its parent, and checkpoints its identifier in one transaction.
+- A terminal parent cancels unfinished descendants. A result timeout also cancels the awaited child subtree.
+- Retention deletes terminal workflow leaves before their parents.
 
 The handler runs again after a suspended task becomes ready. Stable step identities let it replay completed operations
 and continue from the durable boundary. See [Durable execution](durable-execution.md) for the handler API and replay

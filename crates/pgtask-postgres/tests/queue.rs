@@ -69,17 +69,19 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             .await
             .unwrap();
     assert_eq!(capable_tasks, 1);
-    let maintenance_grants: (bool, bool) = sqlx::query_as(
+    let maintenance_grants: (bool, bool, bool, bool) = sqlx::query_as(
         r"
         SELECT
             has_function_privilege(current_user, 'pgtask.put_schedule(uuid, text, text, bigint, text, text, integer, text, text, integer, jsonb, jsonb, smallint, integer, timestamptz)', 'EXECUTE'),
-            has_function_privilege(current_user, 'pgtask.delete_expired_terminal(text, integer)', 'EXECUTE')
+            has_function_privilege(current_user, 'pgtask.delete_expired_terminal(text, integer)', 'EXECUTE'),
+            has_function_privilege(current_user, 'pgtask.wait_for_result(uuid, integer, uuid, text, integer, uuid, bigint)', 'EXECUTE'),
+            has_function_privilege(current_user, 'pgtask.recover_result_wait_timeouts(integer)', 'EXECUTE')
         ",
     )
     .fetch_one(&mut *connection)
     .await
     .unwrap();
-    assert_eq!(maintenance_grants, (true, true));
+    assert_eq!(maintenance_grants, (true, true, true, true));
 }
 
 #[tokio::test]
@@ -215,6 +217,10 @@ async fn invalid_runtime_limits_fail_before_mutating_storage() {
     ));
     assert!(matches!(
         store.recover_wait_timeouts(0).await,
+        Err(PostgresError::InvalidWaitLimit)
+    ));
+    assert!(matches!(
+        store.recover_result_wait_timeouts(0).await,
         Err(PostgresError::InvalidWaitLimit)
     ));
     assert!(matches!(

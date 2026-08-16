@@ -87,7 +87,7 @@ fn registry(
                     .spawn(&StepName::new("child").unwrap(), 0, &child_request)
                     .await?;
                 let child = context
-                    .wait_for_result(&StepName::new("child-result").unwrap(), 0, child_id)
+                    .wait_for_result(&StepName::new("child-result").unwrap(), 0, child_id, None)
                     .await?;
                 Ok(json!({"checkpoint": checkpoint, "signal": signal, "child": child}))
             }
