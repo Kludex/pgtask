@@ -2,8 +2,8 @@ use std::{str::FromStr, time::Duration};
 
 use chrono::{TimeDelta, Utc};
 use pgtask_core::{
-    EnqueueRequest, LeaseToken, ScheduleConfig, ScheduleDefinition, ScheduleName, SignalName, StepName, TaskId,
-    TaskName,
+    EnqueueRequest, LeaseToken, STORAGE_PROTOCOL_RANGE, ScheduleConfig, ScheduleDefinition, ScheduleName, SignalName,
+    StepName, TaskId, TaskName,
 };
 use pgtask_postgres::{PostgresError, ResultWaitRequest, SignalWaitRequest, Store};
 use serde_json::json;
@@ -14,7 +14,7 @@ fn database_url() -> Option<String> {
     std::env::var("PGTASK_DATABASE_URL").ok()
 }
 
-async fn isolated_store(database_url: &str) -> (Store, PgPool, String) {
+async fn unmigrated_store(database_url: &str) -> (Store, PgPool, String) {
     let database_name = format!("pgtask_corruption_{}", Uuid::new_v4().simple());
     let options = PgConnectOptions::from_str(database_url).unwrap();
     let maintenance = PgPool::connect_with(options.clone().database("postgres"))
@@ -25,6 +25,11 @@ async fn isolated_store(database_url: &str) -> (Store, PgPool, String) {
         .await
         .unwrap();
     let store = Store::from_pool(PgPool::connect_with(options.database(&database_name)).await.unwrap());
+    (store, maintenance, database_name)
+}
+
+async fn isolated_store(database_url: &str) -> (Store, PgPool, String) {
+    let (store, maintenance, database_name) = unmigrated_store(database_url).await;
     store.migrate().await.unwrap();
     (store, maintenance, database_name)
 }
@@ -115,6 +120,27 @@ async fn rejects_corrupted_wait_protocol_rows() {
             .await,
         Err(PostgresError::InvalidTask(message)) if message.contains("result wait")
     ));
+
+    drop_isolated_store(store, &maintenance, &database_name).await;
+}
+
+#[tokio::test]
+async fn negotiates_the_storage_protocol_before_and_after_migrating() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let (store, maintenance, database_name) = unmigrated_store(&database_url).await;
+
+    assert_eq!(
+        store.ensure_storage_protocol(STORAGE_PROTOCOL_RANGE).await.unwrap(),
+        None
+    );
+
+    store.migrate().await.unwrap();
+    assert_eq!(
+        store.ensure_storage_protocol(STORAGE_PROTOCOL_RANGE).await.unwrap(),
+        Some(STORAGE_PROTOCOL_RANGE)
+    );
 
     drop_isolated_store(store, &maintenance, &database_name).await;
 }

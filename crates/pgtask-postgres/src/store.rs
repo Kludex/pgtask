@@ -24,6 +24,8 @@ use uuid::Uuid;
 
 static MIGRATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+const UNDEFINED_SCHEMA: &str = "3F000";
+
 #[derive(Debug, Error)]
 pub enum PostgresError {
     #[error("database operation failed: {0}")]
@@ -400,13 +402,22 @@ impl Store {
             .ok_or(PostgresError::InvalidStorageProtocolRange { minimum, maximum })
     }
 
+    /// Returns `None` when the schema is absent, so a caller may still migrate it.
     pub async fn ensure_storage_protocol(
         &self,
         client: StorageProtocolRange,
-    ) -> Result<StorageProtocolRange, PostgresError> {
-        let database = self.storage_protocol_range().await?;
+    ) -> Result<Option<StorageProtocolRange>, PostgresError> {
+        let database = match self.storage_protocol_range().await {
+            Ok(database) => database,
+            Err(PostgresError::Database(sqlx::Error::Database(error)))
+                if error.code().as_deref() == Some(UNDEFINED_SCHEMA) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
         if database.overlaps(client) {
-            return Ok(database);
+            return Ok(Some(database));
         }
         Err(PostgresError::IncompatibleStorageProtocol {
             database_minimum: database.minimum,

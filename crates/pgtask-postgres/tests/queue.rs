@@ -134,7 +134,7 @@ async fn reports_the_supported_storage_protocol() {
     assert_eq!(store.storage_protocol_range().await.unwrap(), STORAGE_PROTOCOL_RANGE);
     assert_eq!(
         store.ensure_storage_protocol(STORAGE_PROTOCOL_RANGE).await.unwrap(),
-        STORAGE_PROTOCOL_RANGE
+        Some(STORAGE_PROTOCOL_RANGE)
     );
 }
 
