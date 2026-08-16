@@ -24,7 +24,7 @@ This is a development diagnostic on Apple Silicon with PostgreSQL 17 in Docker. 
 | Deadlocks | 0 |
 | Task table and index allocation after cleanup | 16,277,504 bytes |
 
-PostgreSQL can reuse the allocated pages after bounded deletion. Migration `0021` lowers the task table's autovacuum and analyze scale factor to two percent with a 1,000-row threshold.
+PostgreSQL can reuse the allocated pages after bounded deletion. The initial migration lowers the task table's autovacuum and analyze scale factor to two percent with a 1,000-row threshold.
 
 ## Decision
 

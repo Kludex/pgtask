@@ -34,7 +34,7 @@ The retained-history scenario drains the queue, then deletes terminal rows in bo
 
 The PostgreSQL metrics wrapper captures WAL bytes, locks and lock waits, connections, cache hit ratio, transaction counts, temporary bytes, deadlocks, database size, and task table and index size before and after a benchmark. Set `PGTASK_POSTGRES_CONTAINER` to add peak PostgreSQL container CPU. Managed benchmark runs use the provider's database CPU metric instead.
 
-Local index statistics identified queue-scoped lease recovery as the first tuning target. The original `(lease_expires_at, id)` index read 492,077 tuples across many independent queue runtimes. Migration `0020` leads with `queue_name`, matching the recovery predicate while retaining deadline order inside each queue. Re-running all 19 worker integration tests produced 664 index scans that read only six tuples.
+Local index statistics identified queue-scoped lease recovery as the first tuning target. The original `(lease_expires_at, id)` index read 492,077 tuples across many independent queue runtimes. The queue-scoped index leads with `queue_name`, matching the recovery predicate while retaining deadline order inside each queue. Re-running all 19 worker integration tests produced 664 index scans that read only six tuples.
 
 The measured defaults remain bounded: claim batches do not exceed available concurrency, lease renewals share one batch, notification wake-ups use a 30-second reconciliation fallback, and retention deletes at most 1,000 terminal rows per transaction. The high-churn task table uses a two-percent autovacuum and analyze scale factor with a 1,000-row threshold. Change these defaults only with the same workload and PostgreSQL measurements.
 
