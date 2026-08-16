@@ -59,6 +59,8 @@ The supported imports are `Client`, `EnqueueRequest`, `JSONValue`, `Task`, `Task
 
 Task registration is explicit. A registry owns one queue. A definition owns the stable task name, handler version, payload type, result type, and retry policy. There is no global discovery or ARQ compatibility API.
 
+The retry policy is immutable within a queue, task name, and handler version. PostgreSQL persists the definition and each task snapshots it before execution.
+
 ## TypeScript
 
 ```typescript

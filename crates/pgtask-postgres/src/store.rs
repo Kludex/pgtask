@@ -8,8 +8,8 @@ use std::{
 use chrono::{DateTime, Utc};
 use pgtask_core::{
     Checkpoint, EnqueueRequest, EnqueueResult, HandlerVersion, LeaseRenewal, LeaseToken, MisfirePolicy, Queue,
-    QueueConfig, QueueName, Schedule, ScheduleConfig, ScheduleDefinition, ScheduleError, ScheduleId, ScheduleName,
-    Signal, SignalName, StepName, Task, TaskId, TaskName, TaskResult, TaskState, WorkerId, WorkerRecord,
+    QueueConfig, QueueName, RetryPolicy, Schedule, ScheduleConfig, ScheduleDefinition, ScheduleError, ScheduleId,
+    ScheduleName, Signal, SignalName, StepName, Task, TaskId, TaskName, TaskResult, TaskState, WorkerId, WorkerRecord,
 };
 use serde_json::Value;
 use sqlx::{
@@ -51,6 +51,8 @@ pub enum PostgresError {
     InvalidWaitLimit,
     #[error("result wait timeout must be greater than zero and fit in the PostgreSQL bigint range")]
     InvalidResultWaitTimeout,
+    #[error("retry policy values exceed the PostgreSQL integer range")]
+    InvalidRetryPolicy,
     #[error("notification listener failed: {0}")]
     Notification(String),
     #[error(transparent)]
@@ -423,6 +425,52 @@ impl Store {
             .bind(version)
             .bind(&task_names)
             .bind(&handler_versions)
+            .bind(ttl_milliseconds)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn register_worker_with_policies(
+        &self,
+        worker_id: WorkerId,
+        queue_name: &QueueName,
+        version: &str,
+        capabilities: &[(TaskName, HandlerVersion, RetryPolicy)],
+        ttl: Duration,
+    ) -> Result<(), PostgresError> {
+        if capabilities.is_empty() {
+            return Err(PostgresError::MissingCapabilities);
+        }
+        let ttl_milliseconds = i64::try_from(ttl.as_millis()).map_err(|_| PostgresError::InvalidLeaseDuration)?;
+        if ttl_milliseconds == 0 {
+            return Err(PostgresError::InvalidLeaseDuration);
+        }
+        let task_names: Vec<_> = capabilities.iter().map(|(name, _, _)| name.as_str()).collect();
+        let handler_versions: Vec<_> = capabilities
+            .iter()
+            .map(|(_, handler_version, _)| {
+                i32::try_from(handler_version.get()).map_err(|_| PostgresError::InvalidHandlerVersion)
+            })
+            .collect::<Result<_, _>>()?;
+        let policies = capabilities
+            .iter()
+            .map(|(_, _, policy)| retry_policy_columns(*policy))
+            .collect::<Result<Vec<_>, _>>()?;
+        let retry_kinds: Vec<_> = policies.iter().map(|policy| policy.kind).collect();
+        let base_delays: Vec<_> = policies.iter().map(|policy| policy.base_delay).collect();
+        let factors: Vec<_> = policies.iter().map(|policy| policy.factor).collect();
+        let max_delays: Vec<_> = policies.iter().map(|policy| policy.max_delay).collect();
+        sqlx::query("SELECT pgtask.register_worker($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)")
+            .bind(worker_id.as_uuid())
+            .bind(queue_name.as_str())
+            .bind(version)
+            .bind(&task_names)
+            .bind(&handler_versions)
+            .bind(&retry_kinds)
+            .bind(&base_delays)
+            .bind(&factors)
+            .bind(&max_delays)
             .bind(ttl_milliseconds)
             .execute(&self.pool)
             .await?;
@@ -1033,7 +1081,8 @@ impl Store {
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
                 run_at, attempt, max_attempts, lease_token, lease_owner, lease_expires_at,
-                created_at, updated_at, completed_at, result, error, parent_task_id
+                created_at, updated_at, completed_at, result, error, parent_task_id,
+                retry_kind, retry_base_delay_milliseconds, retry_factor, retry_max_delay_milliseconds
             FROM pgtask.claim($1, $2, $3, $4, $5, $6)
             ",
         )
@@ -1061,7 +1110,8 @@ impl Store {
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
                 run_at, attempt, max_attempts, lease_token, lease_owner, lease_expires_at,
-                created_at, updated_at, completed_at, result, error, parent_task_id
+                created_at, updated_at, completed_at, result, error, parent_task_id,
+                retry_kind, retry_base_delay_milliseconds, retry_factor, retry_max_delay_milliseconds
             FROM pgtask.get_task($1)
             ",
         )
@@ -1753,6 +1803,10 @@ struct TaskRow {
     run_at: DateTime<Utc>,
     attempt: i32,
     max_attempts: i32,
+    retry_kind: Option<String>,
+    retry_base_delay_milliseconds: Option<i64>,
+    retry_factor: Option<i32>,
+    retry_max_delay_milliseconds: Option<i64>,
     lease_token: Option<Uuid>,
     lease_owner: Option<Uuid>,
     lease_expires_at: Option<DateTime<Utc>>,
@@ -1795,6 +1849,12 @@ impl TryFrom<TaskRow> for Task {
             run_at: row.run_at,
             attempt: u16::try_from(row.attempt).map_err(invalid_number)?,
             max_attempts: u16::try_from(row.max_attempts).map_err(invalid_number)?,
+            retry_policy: parse_retry_policy(
+                row.retry_kind.as_deref(),
+                row.retry_base_delay_milliseconds,
+                row.retry_factor,
+                row.retry_max_delay_milliseconds,
+            )?,
             lease_token: row.lease_token.map(LeaseToken::from_uuid),
             lease_owner: row.lease_owner.map(WorkerId::from_uuid),
             lease_expires_at: row.lease_expires_at,
@@ -1816,6 +1876,68 @@ fn parse_state(value: &str) -> Result<TaskState, PostgresError> {
         "failed" => Ok(TaskState::Failed),
         "cancelled" => Ok(TaskState::Cancelled),
         other => Err(PostgresError::InvalidTask(format!("unknown state {other:?}"))),
+    }
+}
+
+struct RetryPolicyColumns {
+    kind: &'static str,
+    base_delay: Option<i64>,
+    factor: Option<i32>,
+    max_delay: Option<i64>,
+}
+
+fn retry_policy_columns(policy: RetryPolicy) -> Result<RetryPolicyColumns, PostgresError> {
+    let milliseconds =
+        |duration: Duration| i64::try_from(duration.as_millis()).map_err(|_| PostgresError::InvalidRetryPolicy);
+    match policy {
+        RetryPolicy::Never => Ok(RetryPolicyColumns {
+            kind: "never",
+            base_delay: None,
+            factor: None,
+            max_delay: None,
+        }),
+        RetryPolicy::Fixed { delay } => Ok(RetryPolicyColumns {
+            kind: "fixed",
+            base_delay: Some(milliseconds(delay)?),
+            factor: None,
+            max_delay: None,
+        }),
+        RetryPolicy::Exponential {
+            base_delay,
+            factor,
+            max_delay,
+        } => Ok(RetryPolicyColumns {
+            kind: "exponential",
+            base_delay: Some(milliseconds(base_delay)?),
+            factor: Some(i32::try_from(factor).map_err(|_| PostgresError::InvalidRetryPolicy)?),
+            max_delay: Some(milliseconds(max_delay)?),
+        }),
+    }
+}
+
+fn parse_retry_policy(
+    kind: Option<&str>,
+    base_delay_milliseconds: Option<i64>,
+    factor: Option<i32>,
+    max_delay_milliseconds: Option<i64>,
+) -> Result<Option<RetryPolicy>, PostgresError> {
+    let duration = |milliseconds: i64| {
+        u64::try_from(milliseconds)
+            .map(Duration::from_millis)
+            .map_err(invalid_number)
+    };
+    match (kind, base_delay_milliseconds, factor, max_delay_milliseconds) {
+        (None, None, None, None) => Ok(None),
+        (Some("never"), None, None, None) => Ok(Some(RetryPolicy::Never)),
+        (Some("fixed"), Some(delay), None, None) => Ok(Some(RetryPolicy::Fixed {
+            delay: duration(delay)?,
+        })),
+        (Some("exponential"), Some(base_delay), Some(factor), Some(max_delay)) => Ok(Some(RetryPolicy::Exponential {
+            base_delay: duration(base_delay)?,
+            factor: u32::try_from(factor).map_err(invalid_number)?,
+            max_delay: duration(max_delay)?,
+        })),
+        _ => Err(PostgresError::InvalidTask("invalid retry policy".to_owned())),
     }
 }
 

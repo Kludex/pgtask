@@ -26,6 +26,8 @@ Use expand-and-contract changes:
 
 One released worker version before and after a migration must be able to run concurrently. If a change cannot preserve that window, stop all workers and producers before migration and treat it as a declared maintenance release.
 
+Retry policies are part of a handler version's durable identity. Changing a policy requires a new handler version. The database rejects policy drift under an existing queue, task name, and handler version.
+
 ## Rollback
 
 Roll application binaries and Helm configuration back only while the installed schema supports the older worker protocol. Do not reverse migrations. If a new protocol has already committed incompatible tasks, restore the old binary only after a forward compatibility migration makes those tasks safe for it.

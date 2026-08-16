@@ -153,8 +153,10 @@ If the external system has no idempotency facility, the handler remains at-least
 
 ## Change long-running handlers
 
-Register a new `HandlerVersion` when a release changes step order, step meaning, signal identity, child identity, or checkpoint result shape. Keep the old version registered while tasks using it remain nonterminal.
+Register a new `HandlerVersion` when a release changes step order, step meaning, signal identity, child identity, checkpoint result shape, or retry policy. Keep the old version registered while tasks using it remain nonterminal.
 
 Safe changes inside one version include performance improvements and bug corrections that preserve the same durable protocol. Renaming a Rust function is safe. Renaming its stable `TaskName` or `StepName` is a protocol change.
 
 Do not deploy a new implementation under an old version and assume suspended tasks restart from the top. They resume from stored checkpoints. If you cannot keep the old handler, write an explicit data migration that transforms checkpoints and record the supported source and target versions.
+
+The first worker registration makes the retry policy immutable for the queue, task name, and handler version. Tasks snapshot that policy before their first attempt. Restarting or replacing workers cannot change their remaining retry delays.

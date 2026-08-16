@@ -296,17 +296,18 @@ impl Worker {
         let schedule_wakeup = Arc::new(Notify::new());
         let runtime_shutdown = CancellationToken::new();
         let capabilities = self.registry.capabilities();
+        let registrations = self.registry.registrations();
         let ready_listener = self.store.ready_listener(&self.config.queue_name).await?;
         self.health.set_listener(true);
         for schedule in &self.config.declared_schedules {
             self.store.put_schedule(schedule).await?;
         }
         self.store
-            .register_worker(
+            .register_worker_with_policies(
                 self.id,
                 &self.config.queue_name,
                 env!("CARGO_PKG_VERSION"),
-                &capabilities,
+                &registrations,
                 self.config.worker_ttl,
             )
             .await?;
@@ -620,7 +621,7 @@ async fn execute(
                             return Ok(());
                         }
                         let retry_after = if error.retryable {
-                            handler.retry_policy.delay_for(task.attempt)
+                            task.retry_policy.unwrap_or(handler.retry_policy).delay_for(task.attempt)
                         } else {
                             None
                         };
@@ -647,7 +648,7 @@ async fn execute(
                                 task.attempt,
                                 lease_token,
                                 &error,
-                                handler.retry_policy.delay_for(task.attempt),
+                                task.retry_policy.unwrap_or(handler.retry_policy).delay_for(task.attempt),
                             )
                             .await?;
                         if state.is_none() {

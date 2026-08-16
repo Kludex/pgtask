@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::{HandlerVersion, LeaseToken, QueueName, SignalName, StepName, TaskId, TaskName, WorkerId};
+use crate::{HandlerVersion, LeaseToken, QueueName, RetryPolicy, SignalName, StepName, TaskId, TaskName, WorkerId};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueueConfig {
@@ -151,6 +151,7 @@ pub struct Task {
     pub run_at: DateTime<Utc>,
     pub attempt: u16,
     pub max_attempts: u16,
+    pub retry_policy: Option<RetryPolicy>,
     pub lease_token: Option<LeaseToken>,
     pub lease_owner: Option<WorkerId>,
     pub lease_expires_at: Option<DateTime<Utc>>,

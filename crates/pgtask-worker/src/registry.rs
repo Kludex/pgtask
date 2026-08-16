@@ -354,6 +354,13 @@ impl HandlerRegistry {
         self.handlers.keys().cloned().collect()
     }
 
+    pub(crate) fn registrations(&self) -> Vec<(TaskName, HandlerVersion, RetryPolicy)> {
+        self.handlers
+            .iter()
+            .map(|((task_name, handler_version), handler)| (task_name.clone(), *handler_version, handler.retry_policy))
+            .collect()
+    }
+
     pub(crate) fn get(&self, task_name: &TaskName, handler_version: HandlerVersion) -> Option<&RegisteredHandler> {
         self.handlers.get(&(task_name.clone(), handler_version))
     }

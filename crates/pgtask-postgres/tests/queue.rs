@@ -3,8 +3,8 @@ use std::{collections::HashSet, num::NonZeroU32, sync::Arc};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use pgtask_core::{
-    EnqueueRequest, HandlerVersion, LeaseRenewal, QueueConfig, QueueName, STORAGE_PROTOCOL_VERSION, StepName, TaskName,
-    TaskState, WorkerId,
+    EnqueueRequest, HandlerVersion, LeaseRenewal, QueueConfig, QueueName, RetryPolicy, STORAGE_PROTOCOL_VERSION,
+    StepName, TaskName, TaskState, WorkerId,
 };
 use pgtask_postgres::{PostgresError, Store, StoreConfig};
 use serde_json::json;
@@ -69,19 +69,20 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             .await
             .unwrap();
     assert_eq!(capable_tasks, 1);
-    let maintenance_grants: (bool, bool, bool, bool) = sqlx::query_as(
+    let maintenance_grants: (bool, bool, bool, bool, bool) = sqlx::query_as(
         r"
         SELECT
             has_function_privilege(current_user, 'pgtask.put_schedule(uuid, text, text, bigint, text, text, integer, text, text, integer, jsonb, jsonb, smallint, integer, timestamptz)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.delete_expired_terminal(text, integer)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.wait_for_result(uuid, integer, uuid, text, integer, uuid, bigint)', 'EXECUTE'),
-            has_function_privilege(current_user, 'pgtask.recover_result_wait_timeouts(integer)', 'EXECUTE')
+            has_function_privilege(current_user, 'pgtask.recover_result_wait_timeouts(integer)', 'EXECUTE'),
+            has_function_privilege(current_user, 'pgtask.register_worker(uuid, text, text, text[], integer[], text[], bigint[], integer[], bigint[], bigint)', 'EXECUTE')
         ",
     )
     .fetch_one(&mut *connection)
     .await
     .unwrap();
-    assert_eq!(maintenance_grants, (true, true, true, true));
+    assert_eq!(maintenance_grants, (true, true, true, true, true));
 }
 
 #[tokio::test]
@@ -903,6 +904,90 @@ async fn worker_registration_reports_versioned_capabilities_and_expiry() {
     let stopped = store.get_worker(worker_id).await.unwrap().unwrap();
     assert!(stopped.draining);
     assert!(stopped.heartbeat_at >= registered.heartbeat_at);
+}
+
+#[tokio::test]
+async fn retry_policies_are_immutable_per_handler_version_and_snapshotted_on_tasks() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("retry-policy-{suffix}")).unwrap();
+    let fixed_name = TaskName::new(format!("fixed-{suffix}")).unwrap();
+    let exponential_name = TaskName::new(format!("exponential-{suffix}")).unwrap();
+    let fixed = RetryPolicy::Fixed {
+        delay: Duration::from_secs(3),
+    };
+    store
+        .register_worker_with_policies(
+            WorkerId::new(),
+            &queue_name,
+            "fixed",
+            &[(fixed_name.clone(), HandlerVersion::default(), fixed)],
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+    let mut fixed_request = EnqueueRequest::new(fixed_name.clone(), json!({}));
+    fixed_request.queue_name = queue_name.clone();
+    let fixed_id = store.enqueue(&fixed_request).await.unwrap().task_id;
+    assert_eq!(
+        store.get_task(fixed_id).await.unwrap().unwrap().retry_policy,
+        Some(fixed)
+    );
+
+    let mut exponential_request = EnqueueRequest::new(exponential_name.clone(), json!({}));
+    exponential_request.queue_name = queue_name.clone();
+    let exponential_id = store.enqueue(&exponential_request).await.unwrap().task_id;
+    assert_eq!(
+        store.get_task(exponential_id).await.unwrap().unwrap().retry_policy,
+        None
+    );
+    let exponential = RetryPolicy::Exponential {
+        base_delay: Duration::from_secs(2),
+        factor: 3,
+        max_delay: Duration::from_secs(20),
+    };
+    store
+        .register_worker_with_policies(
+            WorkerId::new(),
+            &queue_name,
+            "exponential",
+            &[(exponential_name.clone(), HandlerVersion::default(), exponential)],
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+    let claimed = store
+        .claim(
+            &queue_name,
+            WorkerId::new(),
+            &[(exponential_name, HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(claimed.id, exponential_id);
+    assert_eq!(claimed.retry_policy, Some(exponential));
+
+    let conflict = store
+        .register_worker_with_policies(
+            WorkerId::new(),
+            &queue_name,
+            "conflict",
+            &[(fixed_name, HandlerVersion::default(), RetryPolicy::Never)],
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap_err();
+    assert!(conflict.to_string().contains("retry policy is immutable"));
 }
 
 #[tokio::test]

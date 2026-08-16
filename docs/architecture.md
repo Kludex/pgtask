@@ -59,7 +59,7 @@ Python API with the native Rust worker and storage implementation.
    `pgtask_ready_*` channels. Both actions commit with the producer's transaction.
 2. A worker listening for notifications wakes and calls `pgtask.claim` for one logical queue. The claim uses
    `FOR NO KEY UPDATE ... SKIP LOCKED`, filters by the worker's registered task names and handler versions, creates an
-   attempt, and assigns a lease token.
+   attempt, snapshots the handler version's retry policy, and assigns a lease token.
 3. The worker commits the claim transaction before it calls the handler. User code never runs while the worker holds a
    database transaction open.
 4. A background runtime task renews active leases in batches. The handler may checkpoint steps or suspend itself through
@@ -76,6 +76,11 @@ An unsupported task name or handler version remains `pending`. The database only
 capabilities supplied by the claiming worker, so a deployment does not consume attempts for code it cannot run.
 `pgtask.queue_overview` separates ready, routable, and unroutable counts. Workers export capability-aware ready demand
 for autoscaling and a separate unroutable gauge for alerting.
+
+A worker registers one immutable retry policy for each `(queue, task name, handler version)`. PostgreSQL rejects a
+different policy under the same identity. A task snapshots the policy when the definition is already registered or
+when it is first claimed. Later deployments cannot change retries for that task. Change the handler version when you
+change its retry policy.
 
 ## Durable workflows
 

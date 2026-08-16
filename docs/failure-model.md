@@ -25,7 +25,7 @@ A stale handler receives a lease-lost result and must stop. Fencing prevents sta
 | Claim | Task remains pending | Task is running with a lease | Handler runs or the lease expires |
 | Lease renewal | Existing lease remains | Lease expiry advances | Retry renewal or lose the lease |
 | Complete | Task remains running | Task is terminal and successful | Lease expiry or no action |
-| Fail with retry | Task remains running | Task is pending with future `run_at` | Lease expiry or later claim |
+| Fail with retry | Task remains running | Task is pending with future `run_at` derived from its stored policy | Lease expiry or later claim |
 | Fail terminally | Task remains running | Task is terminal and failed | Lease expiry or no action |
 | Cancel pending | Task remains pending | Task is cancelled | Normal claim or no action |
 | Request running cancellation | Handler keeps running | Cancellation is visible | Heartbeat cancels the handler |

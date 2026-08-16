@@ -106,6 +106,10 @@ Every worker establishes session-level `LISTEN` subscriptions to its determinist
 
 `pgtask.queue_demand` returns all due tasks, due tasks supported by the caller's handler capabilities, and due tasks with no live capable worker. Workers use the supported count for autoscaling telemetry and the unroutable count for alerts. Delayed and paused tasks do not contribute demand.
 
+### Retry policies
+
+The policy-aware `pgtask.register_worker` overload durably registers one retry policy for each queue, task name, and handler version. Re-registering the same identity with different policy values fails. `pgtask.claim` snapshots that policy on a task before its first attempt. `handler_policy_view` exposes the immutable definitions to observers.
+
 ## Observer operations
 
 The observer reads `queue_overview`, `task_view`, `attempt_view`, `worker_view`, `worker_capability_view`, `checkpoint_view`, `signal_view`, `wait_view`, `result_wait_view`, `schedule_view`, and `schedule_occurrence_view`. `queue_overview` separates pending, due, routable, and unroutable tasks. The observer cannot read the underlying tables or invoke mutation functions.
