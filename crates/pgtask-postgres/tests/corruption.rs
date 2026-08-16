@@ -181,6 +181,14 @@ async fn rejects_corrupted_storage_protocol_ranges() {
             maximum: -1
         })
     ));
+    // Only an absent schema is tolerated; every other failure reaches the caller.
+    assert!(matches!(
+        store.ensure_storage_protocol(STORAGE_PROTOCOL_RANGE).await,
+        Err(PostgresError::InvalidStorageProtocolRange {
+            minimum: 1,
+            maximum: -1
+        })
+    ));
 
     drop_isolated_store(store, &maintenance, &database_name).await;
 }
