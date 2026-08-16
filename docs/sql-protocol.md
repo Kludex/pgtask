@@ -144,6 +144,8 @@ Interval and six-field cron definitions use UTC. Misfire behavior is explicit:
 
 ## Compatibility
 
-The schema records one protocol version. Each binary declares an inclusive supported range. Startup fails before processing when the installed schema falls outside that range.
+The schema exposes an inclusive range through `pgtask.storage_protocol_range()`. Each worker and normal SDK client
+declares its own inclusive range. Processing starts only when the two ranges overlap. This permits a deliberate rolling
+window such as database protocols `1..=2` while both client generations are deployed.
 
 Migrations within one rolling release are additive. A renamed or removed column, function, state, or semantic requires an expand-and-contract sequence across releases.

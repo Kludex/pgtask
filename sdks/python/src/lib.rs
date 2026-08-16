@@ -26,7 +26,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-pub use pgtask::core::STORAGE_PROTOCOL_VERSION;
+pub use pgtask::core::{STORAGE_PROTOCOL_MAX_VERSION, STORAGE_PROTOCOL_MIN_VERSION, STORAGE_PROTOCOL_VERSION};
 
 create_exception!(_native, TaskSuspended, PyException);
 
@@ -103,6 +103,10 @@ impl PythonClient {
         )?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let store = Store::connect_with_config(&config).await.map_err(runtime_error)?;
+            store
+                .ensure_storage_protocol(pgtask::core::STORAGE_PROTOCOL_RANGE)
+                .await
+                .map_err(runtime_error)?;
             Ok(Self { config, store })
         })
     }

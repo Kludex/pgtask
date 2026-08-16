@@ -9,7 +9,8 @@ use chrono::{DateTime, Utc};
 use pgtask_core::{
     Checkpoint, EnqueueRequest, EnqueueResult, HandlerVersion, LeaseRenewal, LeaseToken, MisfirePolicy, Queue,
     QueueConfig, QueueName, RetryPolicy, Schedule, ScheduleConfig, ScheduleDefinition, ScheduleError, ScheduleId,
-    ScheduleName, Signal, SignalName, StepName, Task, TaskId, TaskName, TaskResult, TaskState, WorkerId, WorkerRecord,
+    ScheduleName, Signal, SignalName, StepName, StorageProtocolRange, Task, TaskId, TaskName, TaskResult, TaskState,
+    WorkerId, WorkerRecord,
 };
 use serde_json::Value;
 use sqlx::{
@@ -55,6 +56,17 @@ pub enum PostgresError {
     InvalidRetryPolicy,
     #[error("notification listener failed: {0}")]
     Notification(String),
+    #[error("invalid storage protocol range {minimum}..={maximum} returned by Postgres")]
+    InvalidStorageProtocolRange { minimum: i32, maximum: i32 },
+    #[error(
+        "database storage protocols {database_minimum}..={database_maximum} are incompatible with client protocols {client_minimum}..={client_maximum}"
+    )]
+    IncompatibleStorageProtocol {
+        database_minimum: u32,
+        database_maximum: u32,
+        client_minimum: u32,
+        client_maximum: u32,
+    },
     #[error(transparent)]
     Schedule(#[from] ScheduleError),
 }
@@ -371,6 +383,37 @@ impl Store {
             .fetch_one(&self.pool)
             .await?;
         u32::try_from(version).map_err(invalid_number)
+    }
+
+    pub async fn storage_protocol_range(&self) -> Result<StorageProtocolRange, PostgresError> {
+        let (minimum, maximum): (i32, i32) =
+            sqlx::query_as("SELECT minimum, maximum FROM pgtask.storage_protocol_range()")
+                .fetch_one(&self.pool)
+                .await?;
+        let Ok(minimum_value) = u32::try_from(minimum) else {
+            return Err(PostgresError::InvalidStorageProtocolRange { minimum, maximum });
+        };
+        let Ok(maximum_value) = u32::try_from(maximum) else {
+            return Err(PostgresError::InvalidStorageProtocolRange { minimum, maximum });
+        };
+        StorageProtocolRange::new(minimum_value, maximum_value)
+            .ok_or(PostgresError::InvalidStorageProtocolRange { minimum, maximum })
+    }
+
+    pub async fn ensure_storage_protocol(
+        &self,
+        client: StorageProtocolRange,
+    ) -> Result<StorageProtocolRange, PostgresError> {
+        let database = self.storage_protocol_range().await?;
+        if database.overlaps(client) {
+            return Ok(database);
+        }
+        Err(PostgresError::IncompatibleStorageProtocol {
+            database_minimum: database.minimum,
+            database_maximum: database.maximum,
+            client_minimum: client.minimum,
+            client_maximum: client.maximum,
+        })
     }
 
     pub async fn ready_listener(&self, queue_name: &QueueName) -> Result<ReadyListener, PostgresError> {

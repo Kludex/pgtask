@@ -90,6 +90,9 @@ type renderResult struct {
 }
 
 func saveAndEnqueue(ctx context.Context, pool *pgxpool.Pool) error {
+	if err := pgtask.CheckStorageProtocol(ctx, pool); err != nil {
+		return err
+	}
 	render, err := pgtask.DefineTask[renderRequest, renderResult](
 		"reports.render",
 		pgtask.DefinitionOptions{QueueName: "reports"},
@@ -120,6 +123,8 @@ func saveAndEnqueue(ctx context.Context, pool *pgxpool.Pool) error {
 ```
 
 `EnqueueOn()` accepts a pgx pool, connection, or transaction. It does not open another connection or commit for you.
+Call `CheckStorageProtocol()` once when you build a low-level transactional producer. `Connect()` and normal client
+operations perform this check for you.
 
 ## OpenTelemetry
 

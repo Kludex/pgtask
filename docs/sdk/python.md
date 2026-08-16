@@ -185,6 +185,9 @@ asyncio.run(main())
 
 `enqueue_on` uses the existing Psycopg connection. The task commit and the application write succeed or roll back together. It does not open another connection or commit the caller's transaction.
 
+`Client.connect()` checks the storage protocol before returning. `enqueue_on` is the low-level transaction escape hatch.
+Use it only after the application has established a compatible normal client during startup.
+
 ## Migrate from ARQ
 
 ```python

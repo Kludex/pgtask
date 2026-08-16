@@ -4,11 +4,16 @@ import { Pool, type Notification, type PoolClient, type PoolConfig, type QueryRe
 import { type EnqueueRequest, type JSONValue, type TaskState } from "./types.js";
 
 const TERMINAL_STATES = new Set<TaskState>(["succeeded", "failed", "cancelled"]);
+const COMPATIBLE_EXECUTORS = new WeakSet<object>();
+
+export const STORAGE_PROTOCOL_MIN_VERSION = 1;
+export const STORAGE_PROTOCOL_MAX_VERSION = 1;
 
 type EnqueueRow = QueryResultRow & { task_id: string; created: boolean };
 type SignalRow = QueryResultRow & { value: JSONValue };
 type CancelRow = QueryResultRow & { cancelled: boolean };
 type ChannelRow = QueryResultRow & { channel: string };
+type ProtocolRow = QueryResultRow & { minimum: number; maximum: number };
 type ResultRow = QueryResultRow & {
   state: TaskState;
   result: unknown;
@@ -89,6 +94,7 @@ export class Client {
     });
     try {
       await Promise.all([pool.query("SELECT 1"), listenerPool.query("SELECT 1")]);
+      await ensureStorageProtocol(pool);
     } catch (error) {
       await Promise.all([pool.end(), listenerPool.end()]);
       throw error;
@@ -120,6 +126,7 @@ export class Client {
     executor: QueryExecutor,
     request: EnqueueRequest<Payload, Result>,
   ) {
+    await ensureStorageProtocol(executor);
     const headers = injectHeaders(request.headers);
     const result = await executor.query<EnqueueRow>(
       `SELECT task_id::text, created
@@ -144,6 +151,7 @@ export class Client {
   }
 
   async taskResult<Result>(taskId: string): Promise<TaskResult<Result> | null> {
+    await ensureStorageProtocol(this.#pool);
     return readTaskResult<Result>(this.#pool, taskId);
   }
 
@@ -152,6 +160,7 @@ export class Client {
     options: ResultOptions = {},
   ): Promise<TaskResult<Result> | null> {
     validateResultOptions(options);
+    await ensureStorageProtocol(this.#pool);
     const channelResult = await this.#pool.query<ChannelRow>(
       "SELECT pgtask.result_channel($1) AS channel",
       [taskId],
@@ -179,6 +188,7 @@ export class Client {
     value: JSONValue,
     occurrence = 0,
   ): Promise<JSONValue> {
+    await ensureStorageProtocol(this.#pool);
     const result = await this.#pool.query<SignalRow>(
       "SELECT value FROM pgtask.emit_signal($1, $2, $3, $4::jsonb)",
       [taskId, name, occurrence, JSON.stringify(value)],
@@ -191,12 +201,35 @@ export class Client {
   }
 
   async cancel(taskId: string): Promise<boolean> {
+    await ensureStorageProtocol(this.#pool);
     const result = await this.#pool.query<CancelRow>(
       "SELECT EXISTS(SELECT 1 FROM pgtask.cancel_task($1)) AS cancelled",
       [taskId],
     );
     return result.rows[0]?.cancelled ?? false;
   }
+}
+
+async function ensureStorageProtocol(executor: QueryExecutor): Promise<void> {
+  if (COMPATIBLE_EXECUTORS.has(executor)) {
+    return;
+  }
+  const result = await executor.query<ProtocolRow>(
+    "SELECT minimum, maximum FROM pgtask.storage_protocol_range()",
+  );
+  const protocol = result.rows[0];
+  if (protocol === undefined) {
+    throw new Error("pgtask.storage_protocol_range returned no result");
+  }
+  if (
+    protocol.minimum > STORAGE_PROTOCOL_MAX_VERSION ||
+    protocol.maximum < STORAGE_PROTOCOL_MIN_VERSION
+  ) {
+    throw new Error(
+      `database storage protocols ${protocol.minimum}..=${protocol.maximum} are incompatible with client protocols ${STORAGE_PROTOCOL_MIN_VERSION}..=${STORAGE_PROTOCOL_MAX_VERSION}`,
+    );
+  }
+  COMPATIBLE_EXECUTORS.add(executor);
 }
 
 type ResultSubscription = {

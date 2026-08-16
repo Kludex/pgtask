@@ -10,7 +10,12 @@ Migrations are ordered, immutable, and forward-only. The migrator serializes con
 
 ## Storage protocol
 
-The database exposes `pgtask.storage_protocol_version()`. Every worker compares it with its compiled `STORAGE_PROTOCOL_VERSION` before opening listeners, registering capabilities, or claiming work. A mismatch fails startup.
+The database exposes `pgtask.storage_protocol_range()`. Workers and normal SDK clients declare their own inclusive
+range. They continue only when the ranges overlap. A worker performs this check before it opens listeners, registers
+capabilities, or claims work.
+
+`pgtask.storage_protocol_version()` remains the current protocol identifier for integrations that only need to report
+it. Do not use exact equality as a compatibility check.
 
 The storage protocol changes only when a worker cannot safely share the schema with the previous protocol. Additive tables, columns, indexes, views, and functions do not require a protocol change when old workers can ignore them.
 
@@ -25,6 +30,9 @@ Use expand-and-contract changes:
 5. Remove the old shape in a later release.
 
 One released worker version before and after a migration must be able to run concurrently. If a change cannot preserve that window, stop all workers and producers before migration and treat it as a declared maintenance release.
+
+For an incompatible change, expand the database range before deploying the new clients. Contract the range only after
+the old clients are gone. A range such as `1..=2` allows both releases to operate during that interval.
 
 Retry policies are part of a handler version's durable identity. Changing a policy requires a new handler version. The database rejects policy drift under an existing queue, task name, and handler version.
 

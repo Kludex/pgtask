@@ -56,6 +56,26 @@ func (errorRow) Scan(...any) error {
 	return errors.New("database unavailable")
 }
 
+type protocolExecutor struct {
+	minimum int
+	maximum int
+}
+
+func (executor protocolExecutor) QueryRow(context.Context, string, ...any) pgx.Row {
+	return protocolRow(executor)
+}
+
+type protocolRow struct {
+	minimum int
+	maximum int
+}
+
+func (row protocolRow) Scan(destinations ...any) error {
+	*destinations[0].(*int) = row.minimum
+	*destinations[1].(*int) = row.maximum
+	return nil
+}
+
 type cancelAfterQuery struct {
 	cancel context.CancelFunc
 }
@@ -133,6 +153,20 @@ func TestTaskDefinitions(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected header encoding error")
+	}
+}
+
+func TestStorageProtocolCompatibility(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	if err := pgtask.CheckStorageProtocol(ctx, protocolExecutor{minimum: 1, maximum: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := pgtask.CheckStorageProtocol(ctx, protocolExecutor{minimum: 2, maximum: 3}); err == nil {
+		t.Fatal("expected incompatible storage protocol")
+	}
+	if err := pgtask.CheckStorageProtocol(ctx, errorExecutor{}); err == nil {
+		t.Fatal("expected storage protocol query error")
 	}
 }
 

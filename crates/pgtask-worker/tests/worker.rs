@@ -14,7 +14,7 @@ use pgtask_core::{
     EnqueueRequest, HandlerVersion, QueueConfig, QueueName, RetryPolicy, ScheduleConfig, ScheduleDefinition,
     ScheduleName, SignalName, StepName, TaskName, TaskState,
 };
-use pgtask_postgres::Store;
+use pgtask_postgres::{PostgresError, Store};
 use pgtask_worker::{HandlerError, HandlerRegistry, Worker, WorkerConfig, WorkerError};
 use serde_json::json;
 use sqlx::{
@@ -356,16 +356,25 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
     store.migrate().await.unwrap();
     sqlx::query(
         r"
-        CREATE OR REPLACE FUNCTION pgtask.storage_protocol_version()
-        RETURNS integer
+        CREATE OR REPLACE FUNCTION pgtask.storage_protocol_range()
+        RETURNS TABLE(minimum integer, maximum integer)
         LANGUAGE sql
         IMMUTABLE
-        AS $$ SELECT 2 $$
+        AS $$ SELECT 2, 3 $$
         ",
     )
     .execute(store.pool())
     .await
     .unwrap();
+    assert!(matches!(
+        store.ensure_storage_protocol(pgtask_core::STORAGE_PROTOCOL_RANGE).await,
+        Err(PostgresError::IncompatibleStorageProtocol {
+            database_minimum: 2,
+            database_maximum: 3,
+            client_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
+            client_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
+        })
+    ));
     let queue_name = QueueName::new(format!("incompatible-{}", Uuid::new_v4())).unwrap();
     let task_name = TaskName::new("incompatible-task").unwrap();
     let worker = Worker::new(store, successful_registry(&task_name), WorkerConfig::new(queue_name)).unwrap();
@@ -373,17 +382,19 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
     assert!(matches!(
         worker.run(CancellationToken::new()).await,
         Err(WorkerError::IncompatibleStorageProtocol {
-            database: 2,
-            worker: pgtask_core::STORAGE_PROTOCOL_VERSION,
+            database_minimum: 2,
+            database_maximum: 3,
+            worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
+            worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
         })
     ));
     sqlx::query(
         r"
-        CREATE OR REPLACE FUNCTION pgtask.storage_protocol_version()
-        RETURNS integer
+        CREATE OR REPLACE FUNCTION pgtask.storage_protocol_range()
+        RETURNS TABLE(minimum integer, maximum integer)
         LANGUAGE sql
         IMMUTABLE
-        AS $$ SELECT 1 $$
+        AS $$ SELECT 1, 2 $$
         ",
     )
     .execute(
@@ -1602,13 +1613,12 @@ async fn replicated_workers_delete_expired_terminal_tasks_in_bounded_batches() {
     tokio::time::timeout(TEST_TIMEOUT, async {
         loop {
             let task_exists = store.get_task(task_id).await.unwrap().is_some();
-            let key_exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM pgtask.idempotency_keys WHERE task_id = $1)",
-            )
-            .bind(task_id.as_uuid())
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
+            let key_exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pgtask.idempotency_keys WHERE task_id = $1)")
+                    .bind(task_id.as_uuid())
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
             if !task_exists && !key_exists {
                 break;
             }

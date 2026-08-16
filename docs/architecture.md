@@ -130,7 +130,9 @@ lease token. Runtime roles do not need direct table access. Observer roles read 
 surface is the cross-language protocol described in
 [SQL protocol](sql-protocol.md).
 
-The schema records a storage protocol version. A worker checks that version before registering or processing work.
+The schema and each client declare an inclusive storage protocol range. Their ranges must overlap. Workers check before
+registering or processing work. Normal SDK clients check at connection or first use. This makes rolling compatibility
+an explicit database contract instead of an assumption based on package versions.
 Schema changes within a rolling release remain additive so old and new binaries can run together. See
 [Schema compatibility](schema-compatibility.md) for the migration rules.
 

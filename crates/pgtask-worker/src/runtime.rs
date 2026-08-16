@@ -123,8 +123,15 @@ pub enum WorkerError {
     InvalidMinimumConcurrency,
     #[error("worker supervisor failed: {0}")]
     Supervisor(#[source] std::io::Error),
-    #[error("database storage protocol {database} is incompatible with worker protocol {worker}")]
-    IncompatibleStorageProtocol { database: u32, worker: u32 },
+    #[error(
+        "database storage protocols {database_minimum}..={database_maximum} are incompatible with worker protocols {worker_minimum}..={worker_maximum}"
+    )]
+    IncompatibleStorageProtocol {
+        database_minimum: u32,
+        database_maximum: u32,
+        worker_minimum: u32,
+        worker_maximum: u32,
+    },
     #[error("worker has no registered handlers")]
     MissingHandlers,
     #[error("effective concurrency {requested} exceeds configured concurrency {configured}")]
@@ -274,11 +281,13 @@ impl Worker {
     }
 
     pub async fn run(self, shutdown: CancellationToken) -> Result<(), WorkerError> {
-        let database_protocol = self.store.storage_protocol_version().await?;
-        if database_protocol != pgtask_core::STORAGE_PROTOCOL_VERSION {
+        let database_protocol = self.store.storage_protocol_range().await?;
+        if !database_protocol.overlaps(pgtask_core::STORAGE_PROTOCOL_RANGE) {
             return Err(WorkerError::IncompatibleStorageProtocol {
-                database: database_protocol,
-                worker: pgtask_core::STORAGE_PROTOCOL_VERSION,
+                database_minimum: database_protocol.minimum,
+                database_maximum: database_protocol.maximum,
+                worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
+                worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
             });
         }
         let _supervisor = Supervisor::start(

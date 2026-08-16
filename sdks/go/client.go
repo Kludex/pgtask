@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -13,11 +14,20 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 )
 
+const (
+	// StorageProtocolMinVersion is the oldest storage protocol understood by this SDK.
+	StorageProtocolMinVersion = 1
+	// StorageProtocolMaxVersion is the newest storage protocol understood by this SDK.
+	StorageProtocolMaxVersion = 1
+)
+
 // Client connects producer APIs to pgtask's PostgreSQL protocol.
 type Client struct {
 	pool         *pgxpool.Pool
 	listenerPool *pgxpool.Pool
 	owned        bool
+	compatible   bool
+	protocolMu   sync.Mutex
 }
 
 // ConnectConfig configures separate query and session-listener connection pools.
@@ -71,7 +81,12 @@ func ConnectWithConfig(ctx context.Context, config ConnectConfig) (*Client, erro
 		pool.Close()
 		return nil, fmt.Errorf("connect PostgreSQL listener pool: %w", err)
 	}
-	return &Client{pool: pool, listenerPool: listenerPool, owned: true}, nil
+	client := &Client{pool: pool, listenerPool: listenerPool, owned: true}
+	if err := client.ensureStorageProtocol(ctx); err != nil {
+		client.Close()
+		return nil, err
+	}
+	return client, nil
 }
 
 // NewClient uses an existing pool without taking ownership of it.
@@ -113,11 +128,17 @@ type TaskHandle[Result any] struct {
 
 // Inspect reads the task's current durable state.
 func (handle TaskHandle[Result]) Inspect(ctx context.Context) (*TaskResult[Result], error) {
+	if err := handle.client.ensureStorageProtocol(ctx); err != nil {
+		return nil, err
+	}
 	return readTaskResult[Result](ctx, handle.client.pool, handle.ID)
 }
 
 // Result waits for completion using PostgreSQL LISTEN notifications.
 func (handle TaskHandle[Result]) Result(ctx context.Context) (*TaskResult[Result], error) {
+	if err := handle.client.ensureStorageProtocol(ctx); err != nil {
+		return nil, err
+	}
 	connection, err := handle.client.listenerPool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire result listener: %w", err)
@@ -157,6 +178,9 @@ func (handle TaskHandle[Result]) Signal(
 	occurrence int,
 	value any,
 ) (json.RawMessage, error) {
+	if err := handle.client.ensureStorageProtocol(ctx); err != nil {
+		return nil, err
+	}
 	valueJSON, err := json.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("encode signal: %w", err)
@@ -178,6 +202,9 @@ func (handle TaskHandle[Result]) Signal(
 
 // Cancel requests cancellation. The database role must be a pgtask administrator.
 func (handle TaskHandle[Result]) Cancel(ctx context.Context) (bool, error) {
+	if err := handle.client.ensureStorageProtocol(ctx); err != nil {
+		return false, err
+	}
 	var cancelled bool
 	err := handle.client.pool.QueryRow(
 		ctx,
@@ -188,6 +215,41 @@ func (handle TaskHandle[Result]) Cancel(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("cancel task: %w", err)
 	}
 	return cancelled, nil
+}
+
+func (client *Client) ensureStorageProtocol(ctx context.Context) error {
+	client.protocolMu.Lock()
+	defer client.protocolMu.Unlock()
+	if client.compatible {
+		return nil
+	}
+	if err := CheckStorageProtocol(ctx, client.pool); err != nil {
+		return err
+	}
+	client.compatible = true
+	return nil
+}
+
+// CheckStorageProtocol verifies that an executor can use this SDK's SQL protocol.
+func CheckStorageProtocol(ctx context.Context, executor QueryRowExecutor) error {
+	var minimum int
+	var maximum int
+	if err := executor.QueryRow(
+		ctx,
+		"SELECT minimum, maximum FROM pgtask.storage_protocol_range()",
+	).Scan(&minimum, &maximum); err != nil {
+		return fmt.Errorf("read storage protocol range: %w", err)
+	}
+	if minimum > StorageProtocolMaxVersion || maximum < StorageProtocolMinVersion {
+		return fmt.Errorf(
+			"database storage protocols %d..=%d are incompatible with client protocols %d..=%d",
+			minimum,
+			maximum,
+			StorageProtocolMinVersion,
+			StorageProtocolMaxVersion,
+		)
+	}
+	return nil
 }
 
 func readTaskResult[Result any](

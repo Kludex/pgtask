@@ -4,7 +4,7 @@ use std::{collections::HashSet, num::NonZeroU32, sync::Arc};
 use chrono::{Duration as ChronoDuration, Utc};
 use pgtask_core::{
     EnqueueRequest, EnqueueResult, HandlerVersion, LeaseRenewal, QueueConfig, QueueName, RetryPolicy,
-    STORAGE_PROTOCOL_VERSION, StepName, TaskName, TaskState, WorkerId,
+    STORAGE_PROTOCOL_RANGE, STORAGE_PROTOCOL_VERSION, StepName, TaskName, TaskState, WorkerId,
 };
 use pgtask_postgres::{PostgresError, Store, StoreConfig};
 use serde_json::json;
@@ -70,6 +70,12 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
         .await
         .unwrap();
     assert_eq!(storage_protocol, i32::try_from(STORAGE_PROTOCOL_VERSION).unwrap());
+    let storage_protocol_range: (i32, i32) =
+        sqlx::query_as("SELECT minimum, maximum FROM pgtask.storage_protocol_range()")
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+    assert_eq!(storage_protocol_range, (1, 1));
     let ready_channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
         .bind(queue_name)
         .fetch_one(&mut *connection)
@@ -112,6 +118,11 @@ async fn reports_the_supported_storage_protocol() {
     assert_eq!(
         store.storage_protocol_version().await.unwrap(),
         STORAGE_PROTOCOL_VERSION
+    );
+    assert_eq!(store.storage_protocol_range().await.unwrap(), STORAGE_PROTOCOL_RANGE);
+    assert_eq!(
+        store.ensure_storage_protocol(STORAGE_PROTOCOL_RANGE).await.unwrap(),
+        STORAGE_PROTOCOL_RANGE
     );
 }
 
@@ -713,11 +724,12 @@ async fn idempotency_retention_is_independent_from_task_history() {
     assert_eq!(retried_duplicate.task_id, reusable_id);
     assert!(store.cancel(reusable_id).await.unwrap());
     assert_eq!(store.delete_expired_terminal(&queue_name, 1).await.unwrap(), 1);
-    let audited_task_id: Uuid = sqlx::query_scalar("SELECT task_id FROM pgtask.administrator_audit_view WHERE actor = $1")
-        .bind(actor)
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
+    let audited_task_id: Uuid =
+        sqlx::query_scalar("SELECT task_id FROM pgtask.administrator_audit_view WHERE actor = $1")
+            .bind(actor)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
     assert_eq!(audited_task_id, reusable_id.as_uuid());
     assert_eq!(store.delete_expired_idempotency_keys(&queue_name, 1).await.unwrap(), 1);
     let reused = store.enqueue(&reusable_request).await.unwrap();
@@ -1553,6 +1565,11 @@ async fn runtime_roles_only_receive_their_protocol_capabilities() {
         .execute(&mut *producer)
         .await
         .unwrap();
+    let producer_protocol: (i32, i32) = sqlx::query_as("SELECT minimum, maximum FROM pgtask.storage_protocol_range()")
+        .fetch_one(&mut *producer)
+        .await
+        .unwrap();
+    assert_eq!(producer_protocol, (1, 1));
     let task_id: Uuid =
         sqlx::query_scalar("SELECT task_id FROM pgtask.enqueue('role-task', '{}'::jsonb, $1) WHERE created")
             .bind(&queue_name)

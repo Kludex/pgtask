@@ -22,7 +22,8 @@ The `pgtask` crate is the supported entry point. It exposes `core`, `postgres`, 
 
 The Rust contract includes:
 
-- Domain identifiers, task and schedule values, retry policy, and `STORAGE_PROTOCOL_VERSION`.
+- Domain identifiers, task and schedule values, retry policy, and the `STORAGE_PROTOCOL_MIN_VERSION` and
+  `STORAGE_PROTOCOL_MAX_VERSION` compatibility bounds.
 - `Store` construction, migrations, enqueueing, inspection, scheduling, signals, and administrative operations.
 - `HandlerRegistry`, `TaskContext`, `Worker`, `WorkerConfig`, `WorkerControl`, and their error types.
 - OpenTelemetry propagation and metric recording functions.
@@ -105,7 +106,9 @@ FROM pgtask.enqueue(
 );
 ```
 
-Producer, worker, observer, and administrator functions and views are the cross-language protocol. Their arguments, returned columns, authorization, fencing, and transaction behavior are versioned by `pgtask.storage_protocol_version()`. Workers fail before claiming when the compiled protocol does not equal the installed protocol.
+Producer, worker, observer, and administrator functions and views are the cross-language protocol. Their arguments,
+returned columns, authorization, fencing, and transaction behavior are covered by `pgtask.storage_protocol_range()`.
+Workers and normal SDK clients reject a database whose range does not overlap their compiled range.
 
 Queue configuration includes independent terminal-history and idempotency-retention windows. Idempotency reservations are not exposed to observer roles because keys may contain application identifiers.
 

@@ -104,6 +104,9 @@ TypeScript and Go provide typed producer SDKs over the same SQL protocol. They s
 inspection, required `LISTEN`-based result waiting, signals, cancellation, and OpenTelemetry propagation. They do not
 duplicate worker execution. A future language runtime must justify its handler bridge separately from its producer API.
 
+The database, worker, and SDKs expose inclusive protocol compatibility ranges. Normal connections fail before work when
+the ranges do not overlap. Low-level transaction helpers require the caller to establish compatibility once before use.
+
 Normal enqueueing uses the Rust-backed client. Transactional enqueueing accepts an existing Psycopg connection and invokes the public SQL enqueue function so it participates in the caller's transaction. Migration helpers translate at the application boundary and do not expose an ARQ-shaped public facade.
 
 Task names are stable protocol identifiers. Long-lived workflows include an explicit handler version. A worker only claims task names and versions it registered.

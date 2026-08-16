@@ -208,7 +208,16 @@ test("owned clients close their pools and failed connections reject", async () =
 
 test("database boundary failures remain explicit", async () => {
   const emptyExecutor = {
-    async query(): Promise<QueryResult<never>> {
+    async query(sql: string): Promise<QueryResult<never>> {
+      if (sql.includes("storage_protocol_range")) {
+        return {
+          rows: [{ minimum: 1, maximum: 1 }],
+          rowCount: 1,
+          command: "SELECT",
+          oid: 0,
+          fields: [],
+        } as unknown as QueryResult<never>;
+      }
       return { rows: [], rowCount: 0, command: "SELECT", oid: 0, fields: [] };
     },
   } as QueryExecutor;
@@ -229,11 +238,40 @@ test("database boundary failures remain explicit", async () => {
   assert.equal(await client.cancel(randomUUID()), false);
   await client.close();
 
+  const missingProtocol = {
+    async query(): Promise<QueryResult<never>> {
+      return { rows: [], rowCount: 0, command: "SELECT", oid: 0, fields: [] };
+    },
+  } as QueryExecutor;
+  await assert.rejects(
+    Client.enqueueOn(missingProtocol, new EnqueueRequest("typescript.protocol", null)),
+    /storage_protocol_range returned no result/,
+  );
+  const incompatibleProtocol = {
+    async query(): Promise<QueryResult<never>> {
+      return {
+        rows: [{ minimum: 2, maximum: 3 }],
+        rowCount: 1,
+        command: "SELECT",
+        oid: 0,
+        fields: [],
+      } as unknown as QueryResult<never>;
+    },
+  } as QueryExecutor;
+  await assert.rejects(
+    Client.enqueueOn(incompatibleProtocol, new EnqueueRequest("typescript.protocol", null)),
+    /incompatible with client protocols/,
+  );
+
   for (const rows of [[], [{ channel: "invalid" }]]) {
     const invalidConnection = {
       async query(sql: string): Promise<QueryResult> {
         return {
-          rows: sql.startsWith("SELECT pgtask.result_channel") ? rows : [],
+          rows: sql.includes("storage_protocol_range")
+            ? [{ minimum: 1, maximum: 1 }]
+            : sql.startsWith("SELECT pgtask.result_channel")
+              ? rows
+              : [],
           rowCount: 0,
           command: "SELECT",
           oid: 0,
@@ -271,9 +309,11 @@ test("database boundary failures remain explicit", async () => {
   const pendingPool = {
     async query(sql: string): Promise<QueryResult> {
       return {
-        rows: sql.startsWith("SELECT pgtask.result_channel")
-          ? [{ channel: "pgtask_result_00" }]
-          : [{ state: "pending", result: null, error: null, completed_at: null }],
+        rows: sql.includes("storage_protocol_range")
+          ? [{ minimum: 1, maximum: 1 }]
+          : sql.startsWith("SELECT pgtask.result_channel")
+            ? [{ channel: "pgtask_result_00" }]
+            : [{ state: "pending", result: null, error: null, completed_at: null }],
         rowCount: 1,
         command: "SELECT",
         oid: 0,

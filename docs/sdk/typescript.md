@@ -84,6 +84,7 @@ try {
 ```
 
 `Client.enqueueOn()` uses the connection you pass. It does not open another connection or commit for you.
+It checks the storage protocol once for each executor. `Client.connect()` also checks compatibility before returning.
 
 ## OpenTelemetry
 

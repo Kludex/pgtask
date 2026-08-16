@@ -69,6 +69,9 @@ func (definition TaskDefinition[Payload, Result]) Enqueue(
 	payload Payload,
 	options EnqueueOptions,
 ) (TaskHandle[Result], error) {
+	if err := client.ensureStorageProtocol(ctx); err != nil {
+		return TaskHandle[Result]{}, err
+	}
 	result, err := definition.EnqueueOn(ctx, client.pool, payload, options)
 	if err != nil {
 		return TaskHandle[Result]{}, err

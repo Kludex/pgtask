@@ -2,10 +2,23 @@ use std::{num::NonZeroU32, str::FromStr, time::Duration};
 
 use pgtask_core::{
     EnqueueRequest, HandlerVersion, LeaseToken, NameError, QueueConfig, QueueName, RetryPolicy, ScheduleId,
-    ScheduleName, SignalName, StepName, TaskId, TaskName, TaskState, WorkerId,
+    ScheduleName, SignalName, StepName, StorageProtocolRange, TaskId, TaskName, TaskState, WorkerId,
 };
 use serde_json::json;
 use uuid::Uuid;
+
+#[test]
+fn storage_protocol_ranges_validate_and_overlap() {
+    let legacy = StorageProtocolRange::new(1, 1).unwrap();
+    let rolling = StorageProtocolRange::new(1, 2).unwrap();
+    let future = StorageProtocolRange::new(2, 3).unwrap();
+
+    assert!(legacy.overlaps(rolling));
+    assert!(rolling.overlaps(future));
+    assert!(!legacy.overlaps(future));
+    assert_eq!(StorageProtocolRange::new(0, 1), None);
+    assert_eq!(StorageProtocolRange::new(2, 1), None);
+}
 
 #[test]
 fn names_validate_and_support_their_value_conversions() {
