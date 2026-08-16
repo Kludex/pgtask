@@ -235,6 +235,24 @@ async fn invalid_runtime_limits_fail_before_mutating_storage() {
         Err(PostgresError::InvalidLeaseDuration)
     ));
     assert!(matches!(
+        store
+            .register_worker_with_policies(worker_id, &queue_name, "test", &[], Duration::from_secs(1))
+            .await,
+        Err(PostgresError::MissingCapabilities)
+    ));
+    assert!(matches!(
+        store
+            .register_worker_with_policies(
+                worker_id,
+                &queue_name,
+                "test",
+                &[(task_name, HandlerVersion::default(), RetryPolicy::Never)],
+                Duration::ZERO,
+            )
+            .await,
+        Err(PostgresError::InvalidLeaseDuration)
+    ));
+    assert!(matches!(
         store.heartbeat_worker(worker_id, Duration::ZERO, false).await,
         Err(PostgresError::InvalidLeaseDuration)
     ));

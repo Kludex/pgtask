@@ -368,6 +368,7 @@ async def test_python_handler_uses_durable_workflow_operations() -> None:
     @registry.task("python.durable-parent")
     async def parent(task: Task, payload: dict[str, int]) -> JSONValue:
         assert task.parent_task_id is None
+
         async def checkpointed_value() -> int:
             nonlocal step_calls
             step_calls += 1

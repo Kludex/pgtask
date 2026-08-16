@@ -120,6 +120,46 @@ async fn rejects_corrupted_wait_protocol_rows() {
 }
 
 #[tokio::test]
+async fn rejects_corrupted_storage_protocol_ranges() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let (store, maintenance, database_name) = isolated_store(&database_url).await;
+
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION pgtask.storage_protocol_range() \
+         RETURNS TABLE(minimum integer, maximum integer) LANGUAGE sql AS $$ SELECT -1, 1 $$",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    assert!(matches!(
+        store.storage_protocol_range().await,
+        Err(PostgresError::InvalidStorageProtocolRange {
+            minimum: -1,
+            maximum: 1
+        })
+    ));
+
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION pgtask.storage_protocol_range() \
+         RETURNS TABLE(minimum integer, maximum integer) LANGUAGE sql AS $$ SELECT 1, -1 $$",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    assert!(matches!(
+        store.storage_protocol_range().await,
+        Err(PostgresError::InvalidStorageProtocolRange {
+            minimum: 1,
+            maximum: -1
+        })
+    ));
+
+    drop_isolated_store(store, &maintenance, &database_name).await;
+}
+
+#[tokio::test]
 async fn rejects_corrupted_schedule_protocol_rows() {
     let Some(database_url) = database_url() else {
         return;

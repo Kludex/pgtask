@@ -37,6 +37,14 @@ do
         target/debug/pgtask-bench >/dev/null
 done
 
+PGTASK_BENCH_QUEUE_CAPACITY=2 \
+PGTASK_BENCH_TASKS=2 \
+PGTASK_BENCH_BATCH_SIZE=1 \
+PGTASK_BENCH_WORKERS=1 \
+PGTASK_BENCH_CONCURRENCY=1 \
+PGTASK_BENCH_TIMEOUT_SECONDS=15 \
+    target/debug/pgtask-bench >/dev/null
+
 PGTASK_BENCH_SCENARIO=worker-death \
 PGTASK_BENCH_TASKS=1 \
 PGTASK_BENCH_BATCH_SIZE=1 \
@@ -57,6 +65,12 @@ fi
 if PGTASK_BENCH_SCENARIO=worker-death PGTASK_BENCH_WORKERS=1 target/debug/pgtask-bench >/dev/null 2>&1; then
     exit 1
 fi
+if PGTASK_BENCH_TASKS=2 PGTASK_BENCH_QUEUE_CAPACITY=1 target/debug/pgtask-bench >/dev/null 2>&1; then
+    exit 1
+fi
+if PGTASK_BENCH_QUEUE_CAPACITY=0 target/debug/pgtask-bench >/dev/null 2>&1; then
+    exit 1
+fi
 if uv run --project sdks/python --no-sync python -c \
     'import os; env = os.environb.copy(); env[b"PGTASK_BENCH_SCENARIO"] = b"\xff"; os.execve(b"target/debug/pgtask-bench", [b"pgtask-bench"], env)' \
     >/dev/null 2>&1; then
@@ -64,6 +78,11 @@ if uv run --project sdks/python --no-sync python -c \
 fi
 if uv run --project sdks/python --no-sync python -c \
     'import os; env = os.environb.copy(); env[b"PGTASK_BENCH_TASKS"] = b"\xff"; os.execve(b"target/debug/pgtask-bench", [b"pgtask-bench"], env)' \
+    >/dev/null 2>&1; then
+    exit 1
+fi
+if uv run --project sdks/python --no-sync python -c \
+    'import os; env = os.environb.copy(); env[b"PGTASK_BENCH_QUEUE_CAPACITY"] = b"\xff"; os.execve(b"target/debug/pgtask-bench", [b"pgtask-bench"], env)' \
     >/dev/null 2>&1; then
     exit 1
 fi

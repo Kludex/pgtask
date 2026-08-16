@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -76,17 +78,22 @@ func (row protocolRow) Scan(destinations ...any) error {
 	return nil
 }
 
-type cancelAfterQuery struct {
+type cancelBeforeListen struct {
 	cancel context.CancelFunc
 }
 
-func (cancelAfterQuery) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+func (tracer cancelBeforeListen) TraceQueryStart(
+	ctx context.Context,
+	_ *pgx.Conn,
+	data pgx.TraceQueryStartData,
+) context.Context {
+	if strings.HasPrefix(data.SQL, "LISTEN ") {
+		tracer.cancel()
+	}
 	return ctx
 }
 
-func (tracer cancelAfterQuery) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
-	tracer.cancel()
-}
+func (cancelBeforeListen) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 func TestTaskDefinitions(t *testing.T) {
 	t.Parallel()
@@ -360,13 +367,66 @@ func TestClientErrors(t *testing.T) {
 		t.Fatal("expected connection error")
 	}
 	databaseURL := os.Getenv("PGTASK_DATABASE_URL")
+	ownerPool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ownerPool.Close)
+	restrictedRole := fmt.Sprintf("pgtask_go_no_protocol_%d", time.Now().UnixNano())
+	restrictedIdentifier := pgx.Identifier{restrictedRole}.Sanitize()
+	if _, err := ownerPool.Exec(ctx, "CREATE ROLE "+restrictedIdentifier); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerPool.Exec(ctx, "GRANT "+restrictedIdentifier+" TO CURRENT_USER"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if _, err := ownerPool.Exec(ctx, "REVOKE "+restrictedIdentifier+" FROM CURRENT_USER"); err != nil {
+			t.Error(err)
+		}
+		if _, err := ownerPool.Exec(ctx, "DROP ROLE "+restrictedIdentifier); err != nil {
+			t.Error(err)
+		}
+	})
+	restrictedURL, err := url.Parse(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restrictedQuery := restrictedURL.Query()
+	restrictedQuery.Set("options", "-c role="+restrictedRole)
+	restrictedURL.RawQuery = restrictedQuery.Encode()
+	if _, err := pgtask.Connect(ctx, restrictedURL.String()); err == nil {
+		t.Fatal("expected storage protocol connection error")
+	}
+	restrictedPool, err := pgxpool.New(ctx, restrictedURL.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(restrictedPool.Close)
+	restrictedClient := pgtask.NewClient(restrictedPool)
+	restrictedHandle := pgtask.Task[reportResult](
+		restrictedClient,
+		"00000000-0000-0000-0000-000000000000",
+	)
+	if _, err := restrictedHandle.Inspect(ctx); err == nil {
+		t.Fatal("expected inspect protocol error")
+	}
+	if _, err := restrictedHandle.Result(ctx); err == nil {
+		t.Fatal("expected result protocol error")
+	}
+	if _, err := restrictedHandle.Signal(ctx, "signal", 0, nil); err == nil {
+		t.Fatal("expected signal protocol error")
+	}
+	if _, err := restrictedHandle.Cancel(ctx); err == nil {
+		t.Fatal("expected cancel protocol error")
+	}
 	if _, err := pgtask.ConnectWithConfig(ctx, pgtask.ConnectConfig{
 		DatabaseURL: databaseURL,
 		ListenerURL: "://",
 	}); err == nil {
 		t.Fatal("expected listener configuration error")
 	}
-	listenerContext, cancelListener := context.WithTimeout(ctx, 20*time.Millisecond)
+	listenerContext, cancelListener := context.WithTimeout(ctx, 2*time.Second)
 	defer cancelListener()
 	if _, err := pgtask.ConnectWithConfig(listenerContext, pgtask.ConnectConfig{
 		DatabaseURL: databaseURL,
@@ -393,6 +453,9 @@ func TestClientErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := definition.Enqueue(ctx, restrictedClient, reportPayload{}, pgtask.EnqueueOptions{}); err == nil {
+		t.Fatal("expected enqueue protocol error")
+	}
 	if _, err := definition.Enqueue(ctx, client, reportPayload{}, pgtask.EnqueueOptions{}); err == nil {
 		t.Fatal("expected enqueue error")
 	}
@@ -417,14 +480,18 @@ func TestClientErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config.ConnConfig.Tracer = cancelAfterQuery{cancel: cancelListen}
+	config.ConnConfig.Tracer = cancelBeforeListen{cancel: cancelListen}
 	listenPool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(listenPool.Close)
 	listenClient := pgtask.NewClient(listenPool)
-	if _, err := pgtask.Task[reportResult](listenClient, "00000000-0000-0000-0000-000000000000").Result(listenContext); err == nil {
+	listenHandle := pgtask.Task[reportResult](listenClient, "00000000-0000-0000-0000-000000000000")
+	if result, err := listenHandle.Inspect(context.Background()); err != nil || result != nil {
+		t.Fatalf("prime listener client protocol: %#v %v", result, err)
+	}
+	if _, err := listenHandle.Result(listenContext); err == nil {
 		t.Fatal("expected LISTEN error")
 	}
 }
