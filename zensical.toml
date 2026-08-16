@@ -7,6 +7,8 @@ repo_url = "https://github.com/Kludex/pgtask"
 repo_name = "Kludex/pgtask"
 edit_uri = "edit/main/docs/"
 
+extra_css = ["stylesheets/extra.css"]
+
 nav = [
   { "Home" = "index.md" },
   { "Start here" = [
@@ -18,15 +20,13 @@ nav = [
     "architecture/index.md",
     "architecture/task-lifecycle.md",
     "architecture/durability.md",
-    "architecture/scheduling.md",
-    "architecture/storage.md",
-    "architecture/scaling.md",
     "failure-model.md",
   ] },
   { "Concepts" = [
     "concepts/queues.md",
     "concepts/retries.md",
     "concepts/idempotency.md",
+    "concepts/schedules.md",
     "durable-execution.md",
   ] },
   { "SDKs" = [
@@ -36,6 +36,7 @@ nav = [
   ] },
   { "Operations" = [
     "operations.md",
+    "scaling.md",
     "telemetry.md",
     "ui.md",
     "releases.md",
@@ -43,6 +44,7 @@ nav = [
   ] },
   { "Reference" = [
     "sql-protocol.md",
+    "storage-boundary.md",
     "schema-compatibility.md",
     "public-contracts.md",
   ] },

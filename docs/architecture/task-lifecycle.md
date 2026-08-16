@@ -1,7 +1,11 @@
 # How a task runs
 
-A task moves through six states. Every transition is a row change in PostgreSQL, so you can always ask the database what
-is true.
+Most queues hand a message to a consumer and wait to be told it is done. That works until the consumer stops answering,
+and then you have to decide whether it is slow, dead, or about to wake up and finish the job you already gave to someone
+else.
+
+`pgtask` never asks that question. A task is a row, and a worker holds a time-limited claim on it. If the claim lapses,
+the task is available again. Nobody has to decide whether the worker is dead, because nothing depends on knowing.
 
 ```mermaid
 stateDiagram-v2
@@ -18,8 +22,8 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-The `running` back to `pending` edge is the one you get for free: a lost worker returns its task without anyone
-intervening.
+The `running` back to `pending` edge is the interesting one. It is not an error path that someone has to trigger; it is
+what happens on its own when a lease is not renewed.
 
 ## The sequence
 
@@ -36,16 +40,26 @@ Six steps take a task from enqueued to finished:
 5. The worker completes, retries, or fails the task using its task ID, attempt number, and lease token.
 6. If the worker disappears, another worker recovers the task once the lease expires, as a new attempt with a new token.
 
-Step 3 is the one people get wrong when they build this by hand. Holding a transaction open for the duration of a
-handler ties your task throughput to your connection count and turns a slow handler into a database problem.
+Step 3 deserves more attention than it usually gets. The tempting design is to claim and run inside one transaction, so
+a crash rolls the claim back. It is simpler, and it is a trap: your task throughput becomes bound to your connection
+count, a slow handler becomes a long-running transaction, and a handler that blocks becomes a database problem rather
+than an application one. Committing the claim first costs you the guarantee that a crash undoes it, which is exactly the
+guarantee the lease gives back.
 
-## Leases instead of acknowledgements
+## The problem leases solve
 
-A claim does not remove the task. It stamps the row with a lease: an owner, an expiry, and a **lease token**, which is a
-fresh UUID for that attempt.
+Suppose a worker claims a task and then stops responding. There are two things that could be happening, and from the
+outside they look identical: the process has died, or it is about to carry on.
 
-Every state-changing call must present the task ID, the attempt number, **and** the lease token. PostgreSQL applies the
-change only if that exact lease still owns the task:
+Give the task to someone else and you risk running it twice concurrently. Wait, and a dead worker stalls the queue
+indefinitely. Neither answer is safe, and no amount of health checking makes the ambiguity go away - the worker can
+always come back one instant after you decided it was gone.
+
+The way out is not to detect death more accurately. It is to make the late writer harmless.
+
+A claim stamps the row with an owner, an expiry, and a **lease token**: a fresh UUID for that attempt. Every
+state-changing call must present the task ID, the attempt number, **and** that token. PostgreSQL applies the change only
+if the lease still owns the task:
 
 ```sql
 WHERE id = p_task_id
@@ -54,21 +68,70 @@ WHERE id = p_task_id
   AND lease_token = p_lease_token
 ```
 
-That `WHERE` clause is the fencing. Consider the case it exists for:
+That token is a **fencing token**, the same device you find in distributed lock designs, and the `WHERE` clause is the
+fence. Watch what it does to the ambiguous case:
 
-1. Worker A claims the task and gets token `abc`.
-2. Worker A stalls, through a long garbage collection pause, a network partition, or a suspended VM.
-3. The lease expires. Worker B claims the same task, as attempt 2 with token `def`.
-4. Worker A wakes up and confidently reports success with token `abc`.
+<figure class="sequence" markdown="0">
+<svg viewBox="0 0 700 250" role="img" aria-label="Worker A claims a task, stalls, and its later write is rejected because worker B now holds the lease.">
+  <line class="rule" x1="60" y1="40" x2="660" y2="40" />
+  <line class="rule" x1="60" y1="110" x2="660" y2="110" />
+  <line class="rule" x1="60" y1="180" x2="660" y2="180" />
 
-Worker A's write matches zero rows. It is told it no longer owns the task. Without the token, a delayed write from a
-zombie worker would silently overwrite the work of the live one.
+  <text class="lane" x="0" y="34">Worker A</text>
+  <text class="lane" x="0" y="104">Worker B</text>
+  <text class="lane" x="0" y="174">Lease</text>
+
+  <g class="step-1">
+    <rect class="work grow" x="60" y="18" width="150" height="16" rx="4" />
+    <text class="note" x="60" y="12">claims, token abc</text>
+  </g>
+
+  <g class="step-2">
+    <rect class="work-stalled" x="210" y="18" width="150" height="16" rx="4" />
+    <text class="note" x="214" y="12">stalls</text>
+  </g>
+
+  <g class="step-1">
+    <rect class="token" x="60" y="160" width="150" height="18" rx="4" />
+    <text class="token-text" x="70" y="173">abc</text>
+  </g>
+
+  <g class="step-3">
+    <text class="note" x="366" y="173">lease expires</text>
+    <line class="rule" x1="360" y1="150" x2="360" y2="190" />
+  </g>
+
+  <g class="step-4">
+    <rect class="token" x="360" y="160" width="200" height="18" rx="4" />
+    <text class="token-text" x="370" y="173">def</text>
+  </g>
+
+  <g class="step-4">
+    <rect class="work grow-late" x="360" y="88" width="200" height="16" rx="4" />
+    <text class="note" x="360" y="82">claims, token def</text>
+  </g>
+
+  <g class="step-5">
+    <text class="note" x="470" y="12">A returns, writes with abc</text>
+    <line class="reject" x1="566" y1="16" x2="586" y2="36" />
+    <line class="reject" x1="586" y1="16" x2="566" y2="36" />
+    <text class="reject-text" x="596" y="31">0 rows</text>
+  </g>
+
+  <line class="playhead" x1="60" y1="6" x2="60" y2="200" />
+</svg>
+<figcaption>Worker A is not detected, blocked, or fenced off by a lock. Its write simply matches nothing.</figcaption>
+</figure>
+
+Worker A is never told to stop. It is not paused, killed, or coordinated with. It comes back, does what it intended, and
+finds it changed nothing - and it learns that synchronously, from the row count, so it can log the loss rather than
+report a success that never happened.
 
 !!! note "This is why renewal is not optional"
 
-    Lease renewal is a background loop, not something your handler does. If renewal stops, because the database is
-    unreachable, the lease expires and another worker takes over. That is the correct outcome, and it is why a handler
-    should be safe to run again.
+    Lease renewal is a background loop, not something your handler does. If renewal stops because the database is
+    unreachable, the lease expires and another worker takes over. That is the correct outcome, and it is the reason a
+    handler must be safe to run again.
 
 ## Capabilities: unknown work is left alone
 
@@ -77,8 +140,9 @@ A worker registers the `(task_name, handler_version)` pairs it can run, and the 
 A task whose name your deployment does not know stays `pending`. It is not claimed, not failed, and does not burn an
 attempt.
 
-This makes deploys safe in the direction that usually hurts. You can enqueue a new task type before the code that
-handles it finishes rolling out. The work waits instead of failing.
+The alternative - claim first, discover you cannot handle it, fail it - fails in the worst direction during a rollout.
+It burns attempts on work that was never broken, at exactly the moment when half your fleet is old and half is new.
+Filtering in the claim means you can deploy a producer before its consumer and the work simply waits.
 
 `pgtask.queue_overview` separates the counts so you can tell the two situations apart:
 
@@ -95,22 +159,23 @@ consumer.
 
 Claims normally use the priority index: highest priority first, then oldest `run_at`.
 
-Pure priority ordering starves low-priority work whenever high-priority work keeps arriving. So once an eligible task
-has waited past the queue's `starvation_timeout_seconds`, one slot in each claim batch is filled from the oldest-ready
-index instead.
+Strict priority has a well-known failure. If high-priority work keeps arriving, low-priority work never runs, and the
+system is behaving exactly as designed while a customer waits forever.
 
-Priority still decides the ordinary case. Old work gets a bounded, guaranteed path to execution rather than an
-indefinite wait.
+So once an eligible task has waited past the queue's `starvation_timeout_seconds`, one slot in each claim batch is
+filled from the oldest-ready index instead. Priority still decides the ordinary case; the escape hatch bounds the worst
+case. It is a deliberate compromise, and one slot is the whole of it - old work gets a guaranteed trickle, not a
+takeover.
 
 ## Retry policies are immutable per handler version
 
 A worker registers one retry policy for each `(queue, task_name, handler_version)`, and PostgreSQL rejects a different
-policy under the same identity.
+policy under the same identity. A task snapshots the policy when it is enqueued if the definition is already registered,
+or when it is first claimed.
 
-A task snapshots the policy when it is enqueued if the definition is already registered, or when it is first claimed.
+The reason is what happens during an incident. If a policy applied at retry time rather than claim time, a deploy in the
+middle of a backlog would change the behaviour of work already queued, and the timeline you reconstruct afterwards would
+not match what actually ran. Freezing the policy to a handler version means the retry behaviour you observe is the
+behaviour that was in force when the work was created.
 
-This means a deploy cannot change the retry behaviour of tasks already in flight. If you want different retries, publish
-a new handler version. The alternative, a policy that changes underneath queued work, makes incidents impossible to
-reason about after the fact.
-
-See [Retries](../concepts/retries.md) for the policy shapes.
+To change retries, publish a new handler version. See [Retries](../concepts/retries.md).

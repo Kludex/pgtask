@@ -54,7 +54,7 @@ Being honest about the edges is more useful than a feature list.
 - **It does not scale past your database.** Queue traffic, retention, and your application queries share one PostgreSQL
   instance. That is the trade you make in exchange for transactional enqueue.
 - **It does not work through a transaction-pooling proxy alone.** Workers need one session-capable connection for
-  `LISTEN`. See [Scaling and deployment](../architecture/scaling.md).
+  `LISTEN`. See [Scaling and deployment](../scaling.md).
 - **It has no global rate limiter.** Concurrency is per worker and per queue.
 
 ## Why PostgreSQL only

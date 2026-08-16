@@ -1,0 +1,120 @@
+/* Sequence animation used to explain lease fencing. */
+
+.sequence {
+  margin: 2rem 0;
+  overflow-x: auto;
+}
+
+.sequence svg {
+  display: block;
+  min-width: 34rem;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.sequence figcaption {
+  margin-top: 0.75rem;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.sequence .lane {
+  fill: var(--md-default-fg-color--light);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sequence .note {
+  fill: var(--md-default-fg-color--light);
+  font-size: 11px;
+}
+
+.sequence .rule {
+  stroke: var(--md-default-fg-color--lightest);
+  stroke-width: 1;
+}
+
+.sequence .work {
+  fill: var(--md-primary-fg-color);
+  opacity: 0.85;
+}
+
+.sequence .work-stalled {
+  fill: var(--md-default-fg-color--lightest);
+}
+
+.sequence .token {
+  fill: var(--md-default-bg-color);
+  stroke: var(--md-primary-fg-color);
+  stroke-width: 1.5;
+}
+
+.sequence .token-text {
+  fill: var(--md-default-fg-color);
+  font-size: 11px;
+  font-family: var(--md-code-font-family, monospace);
+}
+
+.sequence .reject {
+  fill: none;
+  stroke: #d3455b;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.sequence .reject-text {
+  fill: #d3455b;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.sequence .playhead {
+  stroke: var(--md-primary-fg-color);
+  stroke-width: 1.5;
+  opacity: 0.5;
+}
+
+/* One 14s cycle. Each step reveals itself in its own slice of the cycle. */
+@keyframes sequence-playhead {
+  from { transform: translateX(0); }
+  to { transform: translateX(600px); }
+}
+
+@keyframes sequence-step-1 { 0%, 4% { opacity: 0; } 8%, 100% { opacity: 1; } }
+@keyframes sequence-step-2 { 0%, 24% { opacity: 0; } 28%, 100% { opacity: 1; } }
+@keyframes sequence-step-3 { 0%, 44% { opacity: 0; } 48%, 100% { opacity: 1; } }
+@keyframes sequence-step-4 { 0%, 62% { opacity: 0; } 66%, 100% { opacity: 1; } }
+@keyframes sequence-step-5 { 0%, 80% { opacity: 0; } 84%, 100% { opacity: 1; } }
+
+@keyframes sequence-grow { 0%, 4% { transform: scaleX(0); } 20%, 100% { transform: scaleX(1); } }
+@keyframes sequence-grow-late { 0%, 62% { transform: scaleX(0); } 78%, 100% { transform: scaleX(1); } }
+
+.sequence .playhead { animation: sequence-playhead 14s linear infinite; }
+.sequence .step-1 { animation: sequence-step-1 14s linear infinite; }
+.sequence .step-2 { animation: sequence-step-2 14s linear infinite; }
+.sequence .step-3 { animation: sequence-step-3 14s linear infinite; }
+.sequence .step-4 { animation: sequence-step-4 14s linear infinite; }
+.sequence .step-5 { animation: sequence-step-5 14s linear infinite; }
+.sequence .grow { transform-origin: left center; animation: sequence-grow 14s linear infinite; }
+.sequence .grow-late { transform-origin: left center; animation: sequence-grow-late 14s linear infinite; }
+
+/* Motion is an explanation, never a requirement. Show the finished state instead. */
+@media (prefers-reduced-motion: reduce) {
+  .sequence .playhead {
+    display: none;
+  }
+
+  .sequence .step-1,
+  .sequence .step-2,
+  .sequence .step-3,
+  .sequence .step-4,
+  .sequence .step-5,
+  .sequence .grow,
+  .sequence .grow-late {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
