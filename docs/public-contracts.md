@@ -112,6 +112,9 @@ Workers and normal SDK clients reject a database whose range does not overlap th
 
 Queue configuration includes independent terminal-history and idempotency-retention windows. Idempotency reservations are not exposed to observer roles because keys may contain application identifiers.
 
+Queue configuration also includes optional outstanding-task capacity and a starvation timeout. Capacity rejection uses
+the stable SQLSTATE `PT001`. The observer overview exposes the limit and current outstanding count.
+
 Additive SQL changes may keep the same protocol. A removed value, changed predicate, changed result shape, or incompatible authorization rule increments the protocol and requires an expand-and-contract migration.
 
 ## CLI

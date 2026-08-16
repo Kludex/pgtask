@@ -19,14 +19,23 @@ pgtask --database-url postgresql://postgres@localhost/pgtask_restore health
 
 Back up the schema with the application data needed by handlers. A queue-only restore can re-run a task whose external side effect happened after the backup, so handlers must retain their external idempotency keys. Test restoration into an isolated database before treating a backup as usable.
 
-## Configure retention
+## Configure a queue
 
 ```console
 pgtask queue put default \
   --terminal-retention-seconds 604800 \
-  --idempotency-retention-seconds 2592000
+  --idempotency-retention-seconds 2592000 \
+  --max-outstanding-tasks 100000 \
+  --starvation-timeout-seconds 300
 pgtask retention default --limit 1000
 ```
+
+Omit `--max-outstanding-tasks` for an unlimited queue. A limited queue rejects new tasks with SQLSTATE `PT001` when its
+pending, running, and waiting task count reaches the limit. Size workflow queues for their running parents and child
+fan-out, or place child work on another queue. Existing idempotency keys continue to return their original task.
+
+The starvation timeout reserves one claim slot for the oldest eligible task after it has waited that long. Set it to
+zero for oldest-first rescue on every claim. Priority ordering fills the other slots.
 
 Terminal history and idempotency reservations have separate per-queue retention windows. Keep idempotency retention at least as long as producers may retry a logical request. Cleanup uses bounded transactions. Run it repeatedly until it reports zero when reclaiming a backlog. Check autovacuum progress after a large cleanup. Do not use an unbounded `DELETE` against the task table.
 
@@ -64,7 +73,10 @@ WHERE queue_name = 'default'
 ORDER BY heartbeat_at DESC;
 ```
 
-If `unroutable_count` is nonzero, deploy a worker with the missing task name and handler version. `ready_count` excludes delayed and paused tasks. If `run_at` is in the future, check PostgreSQL time before changing task rows. If workers are live but readiness fails, inspect database, listener, and lease-renewal telemetry.
+If `unroutable_count` is nonzero, deploy a worker with the missing task name and handler version. Compare
+`outstanding_count` with `max_outstanding_tasks` when producers report `PT001`. `ready_count` excludes delayed and
+paused tasks. If `run_at` is in the future, check PostgreSQL time before changing task rows. If workers are live but
+readiness fails, inspect database, listener, and lease-renewal telemetry.
 
 ## Respond to PostgreSQL loss
 

@@ -285,7 +285,9 @@ The CLI applies migrations and manages queues:
 ```console
 cargo run -p pgtask-cli --bin pgtask -- --database-url "$PGTASK_DATABASE_URL" migrate
 cargo run -p pgtask-cli --bin pgtask -- --database-url "$PGTASK_DATABASE_URL" health
-cargo run -p pgtask-cli --bin pgtask -- --database-url "$PGTASK_DATABASE_URL" queue put reports
+cargo run -p pgtask-cli --bin pgtask -- --database-url "$PGTASK_DATABASE_URL" queue put reports \
+  --max-outstanding-tasks 100000 \
+  --starvation-timeout-seconds 300
 ```
 
 Production deployments should use separate database roles for the schema owner, producers, workers, observers, and

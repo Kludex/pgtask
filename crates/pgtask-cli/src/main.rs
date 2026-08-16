@@ -1,4 +1,4 @@
-use std::{error::Error, time::Duration};
+use std::{error::Error, num::NonZeroU64, time::Duration};
 
 use clap::{Parser, Subcommand};
 use pgtask::{
@@ -53,6 +53,10 @@ enum QueueCommand {
         terminal_retention_seconds: u64,
         #[arg(long, default_value_t = 2_592_000)]
         idempotency_retention_seconds: u64,
+        #[arg(long)]
+        max_outstanding_tasks: Option<NonZeroU64>,
+        #[arg(long, default_value_t = 300)]
+        starvation_timeout_seconds: u64,
     },
     Pause {
         name: String,
@@ -111,10 +115,14 @@ async fn run_queue_command(store: &Store, command: QueueCommand) -> Result<(), B
             name,
             terminal_retention_seconds,
             idempotency_retention_seconds,
+            max_outstanding_tasks,
+            starvation_timeout_seconds,
         } => {
             let mut config = QueueConfig::new(QueueName::new(name)?);
             config.terminal_retention = Duration::from_secs(terminal_retention_seconds);
             config.idempotency_retention = Duration::from_secs(idempotency_retention_seconds);
+            config.max_outstanding_tasks = max_outstanding_tasks;
+            config.starvation_timeout = Duration::from_secs(starvation_timeout_seconds);
             let queue = store.put_queue(&config).await?;
             println!("queue {} configured", queue.name);
         }

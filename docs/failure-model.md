@@ -87,3 +87,9 @@ Materialization and advancement share one transaction. A unique schedule occurre
 ## Retention failures
 
 Task-history and idempotency retention are independent. Task retention deletes terminal workflow leaves before parents. Idempotency retention deletes expired reservations in separate bounded batches. Deleting task history does not release an unexpired key. A failed pass leaves rows for a later pass and does not block claiming pending tasks.
+
+## Admission failures
+
+Queue capacity is backpressure, not task loss. A producer receives SQLSTATE `PT001` and may retry later. Scheduled
+occurrences remain at the schedule cursor until space is available. Capacity-limited enqueue operations serialize on
+that queue's configuration row. Unlimited queues do not use this lock.

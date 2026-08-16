@@ -13,13 +13,17 @@ pub struct QueueSummary {
     pub running_count: i64,
     pub waiting_count: i64,
     pub terminal_count: i64,
+    pub outstanding_count: i64,
+    pub max_outstanding_tasks: Option<i64>,
+    pub starvation_timeout_seconds: i64,
 }
 
 impl QueueSummary {
     async fn all(pool: &PgPool) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as(
             "SELECT name, paused_at, pending_count, ready_count, routable_count, unroutable_count, \
-             running_count, waiting_count, terminal_count \
+             running_count, waiting_count, terminal_count, outstanding_count, max_outstanding_tasks, \
+             starvation_timeout_seconds \
              FROM pgtask.queue_overview ORDER BY name",
         )
         .fetch_all(pool)

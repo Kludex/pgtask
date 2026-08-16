@@ -9,6 +9,8 @@ pub struct QueueConfig {
     pub name: QueueName,
     pub terminal_retention: std::time::Duration,
     pub idempotency_retention: std::time::Duration,
+    pub max_outstanding_tasks: Option<std::num::NonZeroU64>,
+    pub starvation_timeout: std::time::Duration,
 }
 
 impl QueueConfig {
@@ -17,6 +19,8 @@ impl QueueConfig {
             name,
             terminal_retention: std::time::Duration::from_hours(7 * 24),
             idempotency_retention: std::time::Duration::from_hours(30 * 24),
+            max_outstanding_tasks: None,
+            starvation_timeout: std::time::Duration::from_mins(5),
         }
     }
 }
@@ -26,6 +30,8 @@ pub struct Queue {
     pub name: QueueName,
     pub terminal_retention: std::time::Duration,
     pub idempotency_retention: std::time::Duration,
+    pub max_outstanding_tasks: Option<std::num::NonZeroU64>,
+    pub starvation_timeout: std::time::Duration,
     pub paused_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

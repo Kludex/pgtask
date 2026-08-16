@@ -125,6 +125,14 @@ deduplication semantics independent from observability retention.
 Administrator audit rows keep their task or schedule identifier after the target is deleted. The identifier is durable
 audit data rather than a foreign key.
 
+Queues may set a hard outstanding-task capacity. New admission locks only a capacity-limited queue, counts its indexed
+nonterminal tasks, and rejects the insert with SQLSTATE `PT001` when full. Unlimited queues avoid this coordination
+point. Scheduled catch-up materializes only the available number of occurrences and leaves the rest due.
+
+Claims normally use the priority index. Once an eligible task has waited past the queue's starvation timeout, one slot
+in the claim batch uses the oldest-ready index. This preserves priority while giving old low-priority work a bounded
+path to execution.
+
 Clients mutate state through `SECURITY DEFINER` functions. Lease-owned transitions also require the current attempt and
 lease token. Runtime roles do not need direct table access. Observer roles read security-barrier views instead. This SQL
 surface is the cross-language protocol described in

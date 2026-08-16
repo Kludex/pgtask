@@ -54,6 +54,10 @@ The operation returns the stable task identifier and whether this call created i
 
 Idempotency keys are scoped to a queue. Their reservations remain active for the entire nonterminal lifetime of a task and for the queue's `idempotency_retention_seconds` after completion. A retained reservation still returns its original task identifier after task history has been deleted. `pgtask.delete_expired_idempotency_keys` removes expired reservations in bounded batches. An expired key can be reused safely before maintenance removes its old reservation.
 
+`max_outstanding_tasks` is an optional queue admission limit over pending, running, and waiting tasks. A new task above
+the limit fails with SQLSTATE `PT001`. An active idempotency reservation is resolved before admission and still returns
+its original identifier while the queue is full. Scheduled occurrences that do not fit remain due.
+
 ### Batch enqueue
 
 The batch operation accepts arrays or a JSON array and inserts all tasks in one transaction. It returns one result per requested item in request order. A malformed item aborts the batch.
@@ -70,7 +74,10 @@ Signal identity is `(task_id, signal_name, occurrence)`. The first committed pay
 
 ### Claim
 
-The caller provides one queue, a bounded limit, its worker identifier, lease duration, and registered handler capabilities. The operation returns only supported tasks. It creates an attempt and lease token atomically.
+The caller provides one queue, a bounded limit, its worker identifier, lease duration, and registered handler
+capabilities. The operation returns only supported tasks. It creates an attempt and lease token atomically. Priority
+orders normal candidates. If the oldest eligible task exceeds `starvation_timeout_seconds`, one claim slot is reserved
+for it.
 
 ### Renew leases
 
@@ -114,7 +121,7 @@ The policy-aware `pgtask.register_worker` overload durably registers one retry p
 
 ## Observer operations
 
-The observer reads `queue_overview`, `task_view`, `attempt_view`, `worker_view`, `worker_capability_view`, `checkpoint_view`, `signal_view`, `wait_view`, `result_wait_view`, `schedule_view`, and `schedule_occurrence_view`. `queue_overview` separates pending, due, routable, and unroutable tasks. The observer cannot read the underlying tables or invoke mutation functions.
+The observer reads `queue_overview`, `task_view`, `attempt_view`, `worker_view`, `worker_capability_view`, `checkpoint_view`, `signal_view`, `wait_view`, `result_wait_view`, `schedule_view`, and `schedule_occurrence_view`. `queue_overview` separates pending, due, routable, unroutable, and outstanding tasks and exposes the admission settings. The observer cannot read the underlying tables or invoke mutation functions.
 
 ## Value limits
 

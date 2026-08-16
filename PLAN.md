@@ -115,7 +115,10 @@ Task names are stable protocol identifiers. Long-lived workflows include an expl
 
 - A worker runtime drains one queue with one concurrency budget.
 - A process may host several runtimes, but each queue keeps its own semaphore and claim loop.
-- Strict priority is supported within a queue. Queue separation is the mechanism for workload isolation.
+- Priority ordering applies until the oldest eligible task reaches the queue's starvation timeout. Each claim batch then
+  reserves one slot for the oldest task. Queue separation remains the mechanism for workload isolation.
+- An optional queue capacity rejects new tasks when the configured number of outstanding tasks is reached. Existing
+  idempotency reservations still replay. Scheduled occurrences remain due until capacity becomes available.
 - Claim batches never exceed currently available concurrency.
 - Retry policies support fixed and exponential delay with full jitter.
 - Final failures remain queryable and may be retried administratively.

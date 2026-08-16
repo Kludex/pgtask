@@ -38,7 +38,10 @@ Telemetry excludes payloads, results, errors, task identifiers, and idempotency 
 
 ## Resource limits
 
-The database rejects values above the configured payload, result, error, and checkpoint limits. Claims, recovery, schedule catch-up, lease renewal, and retention use bounded batches. These limits reduce accidental amplification but do not replace PostgreSQL statement timeouts, connection limits, workload isolation, or Kubernetes resource limits.
+The database rejects values above the configured payload, result, error, and checkpoint limits. Claims, recovery,
+schedule catch-up, lease renewal, and retention use bounded batches. Optional queue admission limits bound nonterminal
+task growth. These limits reduce accidental amplification but do not replace PostgreSQL statement timeouts, connection
+limits, workload isolation, or Kubernetes resource limits.
 
 ## Supply chain
 

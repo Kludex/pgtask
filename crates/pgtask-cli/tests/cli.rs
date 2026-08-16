@@ -66,6 +66,10 @@ async fn configures_a_queue_through_the_cli() {
             "60",
             "--idempotency-retention-seconds",
             "120",
+            "--max-outstanding-tasks",
+            "25",
+            "--starvation-timeout-seconds",
+            "45",
         ])
         .env("PGTASK_DATABASE_URL", &database_url)
         .output()
@@ -92,6 +96,9 @@ async fn configures_a_queue_through_the_cli() {
             .as_secs(),
         120
     );
+    let queue = store.get_queue(&queue_name).await.unwrap().unwrap();
+    assert_eq!(queue.max_outstanding_tasks.unwrap().get(), 25);
+    assert_eq!(queue.starvation_timeout.as_secs(), 45);
 }
 
 #[tokio::test]

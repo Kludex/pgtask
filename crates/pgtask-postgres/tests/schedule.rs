@@ -1,8 +1,13 @@
-use std::{num::NonZeroU16, sync::OnceLock, time::Duration};
+use std::{
+    num::{NonZeroU16, NonZeroU64},
+    sync::OnceLock,
+    time::Duration,
+};
 
-use chrono::{TimeDelta, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use pgtask_core::{
-    EnqueueRequest, HandlerVersion, MisfirePolicy, ScheduleConfig, ScheduleDefinition, ScheduleName, TaskName, WorkerId,
+    EnqueueRequest, HandlerVersion, MisfirePolicy, QueueConfig, QueueName, ScheduleConfig, ScheduleDefinition,
+    ScheduleId, ScheduleName, TaskName, WorkerId,
 };
 use pgtask_postgres::Store;
 use serde_json::json;
@@ -15,6 +20,17 @@ fn database_url() -> Option<String> {
 async fn schedule_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
     static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     GUARD.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+}
+
+async fn materialize_two_intervals(store: &Store, schedule_id: ScheduleId, expected: DateTime<Utc>) -> i64 {
+    sqlx::query_scalar("SELECT pgtask.materialize_schedule($1, $2, $3, $4)")
+        .bind(schedule_id.as_uuid())
+        .bind(expected)
+        .bind([expected, expected + TimeDelta::seconds(10)])
+        .bind(expected + TimeDelta::seconds(20))
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -109,6 +125,92 @@ async fn skip_misfire_policy_round_trips() {
 
     let schedule = store.put_schedule(&config).await.unwrap();
     assert_eq!(schedule.config.misfire_policy, MisfirePolicy::Skip);
+    assert!(store.delete_schedule(schedule.config.id).await.unwrap());
+}
+
+#[tokio::test]
+async fn schedule_backpressure_preserves_occurrences_at_queue_capacity() {
+    let _guard = schedule_test_guard().await;
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("schedule-capacity-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("schedule-capacity-{suffix}")).unwrap();
+    let mut queue = QueueConfig::new(queue_name.clone());
+    queue.max_outstanding_tasks = NonZeroU64::new(1);
+    store.put_queue(&queue).await.unwrap();
+
+    let mut blocker = EnqueueRequest::new(task_name.clone(), json!({"blocker": true}));
+    blocker.queue_name = queue_name.clone();
+    let blocker_id = store.enqueue(&blocker).await.unwrap().task_id;
+    let mut scheduled_request = EnqueueRequest::new(task_name.clone(), json!({"scheduled": true}));
+    scheduled_request.queue_name = queue_name.clone();
+    let mut config = ScheduleConfig::new(
+        ScheduleName::new(format!("schedule-capacity-{suffix}")).unwrap(),
+        ScheduleDefinition::interval(Duration::from_secs(10)).unwrap(),
+        scheduled_request,
+    );
+    config.start_at = Some(Utc::now() - TimeDelta::seconds(20));
+    config.misfire_policy = MisfirePolicy::CatchUp {
+        limit: NonZeroU16::new(2).unwrap(),
+    };
+    let schedule = store.put_schedule(&config).await.unwrap();
+
+    assert_eq!(
+        materialize_two_intervals(&store, schedule.config.id, schedule.next_run_at).await,
+        0
+    );
+    assert_eq!(
+        store
+            .get_schedule(schedule.config.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .next_run_at,
+        schedule.next_run_at
+    );
+    assert!(store.cancel(blocker_id).await.unwrap());
+    assert_eq!(
+        materialize_two_intervals(&store, schedule.config.id, schedule.next_run_at).await,
+        1
+    );
+    let deferred = store.get_schedule(schedule.config.id).await.unwrap().unwrap();
+    assert_eq!(deferred.next_run_at, schedule.next_run_at + TimeDelta::seconds(10));
+    assert_eq!(
+        materialize_two_intervals(&store, schedule.config.id, deferred.next_run_at).await,
+        0
+    );
+    assert_eq!(
+        store
+            .get_schedule(schedule.config.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .next_run_at,
+        deferred.next_run_at
+    );
+
+    let claimed = store
+        .claim(
+            &queue_name,
+            WorkerId::new(),
+            &[(task_name, HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(store.cancel(claimed.id).await.unwrap());
+    assert_eq!(
+        materialize_two_intervals(&store, schedule.config.id, deferred.next_run_at).await,
+        1
+    );
     assert!(store.delete_schedule(schedule.config.id).await.unwrap());
 }
 

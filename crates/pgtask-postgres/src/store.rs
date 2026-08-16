@@ -611,12 +611,22 @@ impl Store {
         let idempotency_retention_seconds = i64::try_from(config.idempotency_retention.as_secs()).map_err(|_| {
             PostgresError::InvalidTask("idempotency retention exceeds the Postgres bigint range".to_owned())
         })?;
+        let max_outstanding_tasks = config
+            .max_outstanding_tasks
+            .map(|maximum| i64::try_from(maximum.get()))
+            .transpose()
+            .map_err(|_| PostgresError::InvalidTask("queue capacity exceeds the Postgres bigint range".to_owned()))?;
+        let starvation_timeout_seconds = i64::try_from(config.starvation_timeout.as_secs()).map_err(|_| {
+            PostgresError::InvalidTask("starvation timeout exceeds the Postgres bigint range".to_owned())
+        })?;
         let row: QueueRow = sqlx::query_as(
-            "SELECT name, terminal_retention_seconds, idempotency_retention_seconds, paused_at, created_at, updated_at FROM pgtask.put_queue($1, $2, $3)",
+            "SELECT name, terminal_retention_seconds, idempotency_retention_seconds, max_outstanding_tasks, starvation_timeout_seconds, paused_at, created_at, updated_at FROM pgtask.put_queue($1, $2, $3, $4, $5)",
         )
         .bind(config.name.as_str())
         .bind(retention_seconds)
         .bind(idempotency_retention_seconds)
+        .bind(max_outstanding_tasks)
+        .bind(starvation_timeout_seconds)
         .fetch_one(&self.pool)
         .await?;
         Queue::try_from(row)
@@ -625,7 +635,8 @@ impl Store {
     pub async fn get_queue(&self, queue_name: &QueueName) -> Result<Option<Queue>, PostgresError> {
         let row: Option<QueueRow> = sqlx::query_as(
             r"
-            SELECT name, terminal_retention_seconds, idempotency_retention_seconds, paused_at, created_at, updated_at
+            SELECT name, terminal_retention_seconds, idempotency_retention_seconds, max_outstanding_tasks,
+                starvation_timeout_seconds, paused_at, created_at, updated_at
             FROM pgtask.queues
             WHERE name = $1
             ",
@@ -664,7 +675,7 @@ impl Store {
 
     pub async fn set_queue_paused(&self, queue_name: &QueueName, paused: bool) -> Result<Option<Queue>, PostgresError> {
         let row: Option<QueueRow> = sqlx::query_as(
-            "SELECT name, terminal_retention_seconds, idempotency_retention_seconds, paused_at, created_at, updated_at FROM pgtask.set_queue_paused($1, $2)",
+            "SELECT name, terminal_retention_seconds, idempotency_retention_seconds, max_outstanding_tasks, starvation_timeout_seconds, paused_at, created_at, updated_at FROM pgtask.set_queue_paused($1, $2)",
         )
         .bind(queue_name.as_str())
         .bind(paused)
@@ -1592,6 +1603,8 @@ struct QueueRow {
     name: String,
     terminal_retention_seconds: i64,
     idempotency_retention_seconds: i64,
+    max_outstanding_tasks: Option<i64>,
+    starvation_timeout_seconds: i64,
     paused_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -1784,6 +1797,17 @@ impl TryFrom<QueueRow> for Queue {
             ),
             idempotency_retention: Duration::from_secs(
                 u64::try_from(row.idempotency_retention_seconds).map_err(invalid_number)?,
+            ),
+            max_outstanding_tasks: row
+                .max_outstanding_tasks
+                .map(|maximum| {
+                    u64::try_from(maximum)
+                        .map_err(invalid_number)
+                        .and_then(|maximum| std::num::NonZeroU64::new(maximum).ok_or_else(|| invalid_number(maximum)))
+                })
+                .transpose()?,
+            starvation_timeout: Duration::from_secs(
+                u64::try_from(row.starvation_timeout_seconds).map_err(invalid_number)?,
             ),
             paused_at: row.paused_at,
             created_at: row.created_at,

@@ -1,5 +1,9 @@
 use std::time::Duration;
-use std::{collections::HashSet, num::NonZeroU32, sync::Arc};
+use std::{
+    collections::HashSet,
+    num::{NonZeroU32, NonZeroU64},
+    sync::Arc,
+};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use pgtask_core::{
@@ -104,6 +108,14 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
     .await
     .unwrap();
     assert_eq!(maintenance_grants, (true, true, true, true, true, true));
+}
+
+async fn can_execute(connection: &mut PgConnection, function: &str) -> bool {
+    sqlx::query_scalar("SELECT has_function_privilege(current_user, $1, 'EXECUTE')")
+        .bind(function)
+        .fetch_one(connection)
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -406,6 +418,18 @@ async fn invalid_task_and_lease_values_fail_before_mutating_storage() {
     ));
     queue.terminal_retention = Duration::ZERO;
     queue.idempotency_retention = Duration::from_secs(u64::MAX);
+    assert!(matches!(
+        store.put_queue(&queue).await,
+        Err(PostgresError::InvalidTask(_))
+    ));
+    queue.idempotency_retention = Duration::ZERO;
+    queue.max_outstanding_tasks = NonZeroU64::new(u64::MAX);
+    assert!(matches!(
+        store.put_queue(&queue).await,
+        Err(PostgresError::InvalidTask(_))
+    ));
+    queue.max_outstanding_tasks = None;
+    queue.starvation_timeout = Duration::from_secs(u64::MAX);
     assert!(matches!(
         store.put_queue(&queue).await,
         Err(PostgresError::InvalidTask(_))
@@ -833,6 +857,145 @@ async fn claim_orders_due_tasks_by_priority_then_run_time() {
 }
 
 #[tokio::test]
+async fn starvation_timeout_rescues_the_oldest_due_task() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let queue_name = QueueName::new(format!("starvation-{}", Uuid::new_v4())).unwrap();
+    let task_name = TaskName::new("starvation-task").unwrap();
+    let mut queue = QueueConfig::new(queue_name.clone());
+    queue.starvation_timeout = Duration::ZERO;
+    store.put_queue(&queue).await.unwrap();
+    let now = Utc::now() - ChronoDuration::minutes(1);
+    let requests: Vec<_> = [("old-low", -10, 0), ("new-high", 10, 30)]
+        .into_iter()
+        .map(|(name, priority, seconds)| {
+            let mut request = EnqueueRequest::new(task_name.clone(), json!({"name": name}));
+            request.queue_name = queue_name.clone();
+            request.priority = priority;
+            request.run_at = Some(now + ChronoDuration::seconds(seconds));
+            request
+        })
+        .collect();
+    store.enqueue_many(&requests).await.unwrap();
+
+    let claimed = store
+        .claim(
+            &queue_name,
+            WorkerId::new(),
+            &[(task_name, HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(claimed[0].payload["name"], "old-low");
+}
+
+#[tokio::test]
+async fn queue_capacity_is_atomic_under_concurrent_producers() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let queue_name = QueueName::new(format!("capacity-{}", Uuid::new_v4())).unwrap();
+    let task_name = TaskName::new("capacity-task").unwrap();
+    let mut queue = QueueConfig::new(queue_name.clone());
+    queue.max_outstanding_tasks = NonZeroU64::new(4);
+    store.put_queue(&queue).await.unwrap();
+
+    let oversized_batch: Vec<_> = (0..5)
+        .map(|sequence| {
+            let mut request = EnqueueRequest::new(task_name.clone(), json!({"batch": sequence}));
+            request.queue_name = queue_name.clone();
+            request
+        })
+        .collect();
+    let error = store.enqueue_many(&oversized_batch).await.unwrap_err();
+    let PostgresError::Database(sqlx::Error::Database(error)) = error else {
+        panic!("unexpected batch enqueue error: {error}");
+    };
+    assert_eq!(error.code().as_deref(), Some("PT001"));
+    assert_eq!(
+        store
+            .task_count_by_state(&queue_name, TaskState::Pending)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let mut producers = tokio::task::JoinSet::new();
+    for sequence in 0..16 {
+        let store = store.clone();
+        let queue_name = queue_name.clone();
+        let task_name = task_name.clone();
+        producers.spawn(async move {
+            let mut request = EnqueueRequest::new(task_name, json!({"sequence": sequence}));
+            request.queue_name = queue_name;
+            store.enqueue(&request).await
+        });
+    }
+    let mut created = Vec::new();
+    let mut rejected = 0;
+    while let Some(result) = producers.join_next().await {
+        match result.unwrap() {
+            Ok(result) => created.push(result.task_id),
+            Err(PostgresError::Database(sqlx::Error::Database(error))) => {
+                assert_eq!(error.code().as_deref(), Some("PT001"));
+                rejected += 1;
+            }
+            Err(error) => panic!("unexpected enqueue error: {error}"),
+        }
+    }
+    assert_eq!(created.len(), 4);
+    assert_eq!(rejected, 12);
+    let overview: (i64, Option<i64>, i64) = sqlx::query_as(
+        "SELECT outstanding_count, max_outstanding_tasks, starvation_timeout_seconds \
+         FROM pgtask.queue_overview WHERE name = $1",
+    )
+    .bind(queue_name.as_str())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(overview, (4, Some(4), 300));
+
+    let duplicate_key = format!("capacity-{}", Uuid::new_v4());
+    assert!(store.cancel(created[0]).await.unwrap());
+    let mut keyed = EnqueueRequest::new(task_name.clone(), json!({}));
+    keyed.queue_name = queue_name.clone();
+    keyed.idempotency_key = Some(duplicate_key);
+    let first = store.enqueue(&keyed).await.unwrap();
+    assert!(!store.enqueue(&keyed).await.unwrap().created);
+    let running = store
+        .claim(
+            &queue_name,
+            WorkerId::new(),
+            &[(task_name.clone(), HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(store.cancel(running.id).await.unwrap());
+    assert_ne!(first.task_id, running.id);
+    store
+        .enqueue(&EnqueueRequest {
+            queue_name,
+            ..EnqueueRequest::new(task_name, json!({"replacement": true}))
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn queue_configuration_pauses_and_resumes_claiming() {
     let Some(database_url) = database_url() else {
         return;
@@ -849,12 +1012,18 @@ async fn queue_configuration_pauses_and_resumes_claiming() {
     let implicit = store.get_queue(&queue_name).await.unwrap().unwrap();
     assert_eq!(implicit.terminal_retention, Duration::from_hours(7 * 24));
     assert_eq!(implicit.idempotency_retention, Duration::from_hours(30 * 24));
+    assert_eq!(implicit.max_outstanding_tasks, None);
+    assert_eq!(implicit.starvation_timeout, Duration::from_mins(5));
     let mut config = QueueConfig::new(queue_name.clone());
     config.terminal_retention = Duration::from_mins(1);
     config.idempotency_retention = Duration::from_hours(1);
+    config.max_outstanding_tasks = NonZeroU64::new(100);
+    config.starvation_timeout = Duration::from_secs(45);
     let configured = store.put_queue(&config).await.unwrap();
     assert_eq!(configured.terminal_retention, Duration::from_mins(1));
     assert_eq!(configured.idempotency_retention, Duration::from_hours(1));
+    assert_eq!(configured.max_outstanding_tasks.unwrap().get(), 100);
+    assert_eq!(configured.starvation_timeout, Duration::from_secs(45));
     assert!(
         store
             .set_queue_paused(&queue_name, true)
@@ -1570,6 +1739,7 @@ async fn runtime_roles_only_receive_their_protocol_capabilities() {
         .await
         .unwrap();
     assert_eq!(producer_protocol, (1, 1));
+    assert!(!can_execute(&mut producer, "pgtask.put_queue(text, bigint, bigint, bigint, bigint)").await);
     let task_id: Uuid =
         sqlx::query_scalar("SELECT task_id FROM pgtask.enqueue('role-task', '{}'::jsonb, $1) WHERE created")
             .bind(&queue_name)
@@ -1637,6 +1807,13 @@ async fn runtime_roles_only_receive_their_protocol_capabilities() {
         .execute(&mut *administrator)
         .await
         .unwrap();
+    assert!(
+        can_execute(
+            &mut administrator,
+            "pgtask.put_queue(text, bigint, bigint, bigint, bigint)"
+        )
+        .await
+    );
     let cancelled: Option<String> = sqlx::query_scalar("SELECT task_name FROM pgtask.cancel_task($1)")
         .bind(task_id)
         .fetch_optional(&mut *administrator)

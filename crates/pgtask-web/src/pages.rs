@@ -37,10 +37,14 @@ fn queue_rows(queues: &[QueueSummary]) -> String {
     let mut rows = String::new();
     for queue in queues {
         let status = if queue.paused_at.is_some() { "paused" } else { "active" };
+        let capacity = queue.max_outstanding_tasks.map_or_else(
+            || format!("{}/unlimited", queue.outstanding_count),
+            |maximum| format!("{}/{maximum}", queue.outstanding_count),
+        );
         write!(
             rows,
             "<tr><td>{}</td><td class=\"state\">{status}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
-             <td>{}</td><td>{}</td><td>{}</td></tr>",
+             <td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}s</td></tr>",
             encode_text(&queue.name),
             queue.pending_count,
             queue.ready_count,
@@ -49,6 +53,8 @@ fn queue_rows(queues: &[QueueSummary]) -> String {
             queue.running_count,
             queue.waiting_count,
             queue.terminal_count,
+            capacity,
+            queue.starvation_timeout_seconds,
         )
         .unwrap();
     }
@@ -124,7 +130,8 @@ fn worker_rows(workers: &[WorkerSummary]) -> String {
 pub fn dashboard(data: &Dashboard) -> String {
     let body = format!(
         "<h1>Queues</h1><table><thead><tr><th>Queue</th><th>Status</th><th>Pending</th><th>Ready</th>\
-         <th>Routable</th><th>Unroutable</th><th>Running</th><th>Waiting</th><th>Terminal</th></tr></thead>\
+         <th>Routable</th><th>Unroutable</th><th>Running</th><th>Waiting</th><th>Terminal</th>\
+         <th>Capacity</th><th>Starvation rescue</th></tr></thead>\
          <tbody>{}</tbody></table>\
          <div class=\"grid\"><div class=\"card\"><h2>Recent tasks</h2><p>{} visible</p><a href=\"/tasks\">Inspect tasks</a></div>\
          <div class=\"card\"><h2>Schedules</h2><p>{} configured</p><a href=\"/schedules\">Inspect schedules</a></div>\
