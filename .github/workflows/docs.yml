@@ -4,7 +4,8 @@ on:
   push:
     branches: ["main"]
     paths:
-      - "website/**"
+      - "docs/**"
+      - "zensical.toml"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -21,21 +22,15 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: website
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v7
+      - uses: astral-sh/setup-uv@v7
         with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: website/package-lock.json
-      - run: npm ci
-      - run: npm run build
+          python-version: "3.13"
+      - run: uvx zensical@0.0.55 build --clean
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: website/dist
+          path: site
 
   deploy:
     needs: build

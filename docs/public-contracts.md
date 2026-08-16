@@ -9,6 +9,8 @@ same engine version. The Helm chart has its own package version and declares the
 
 ## Rust
 
+The Rust facade re-exports the core, storage, worker, and telemetry crates:
+
 ```rust
 use pgtask::{core, postgres::Store, worker};
 
@@ -29,6 +31,8 @@ The Rust contract includes:
 - OpenTelemetry propagation and metric recording functions.
 
 ## Python
+
+The Python package pairs a typed async API with the native Rust runtime:
 
 ```python
 from __future__ import annotations
@@ -64,6 +68,8 @@ The retry policy is immutable within a queue, task name, and handler version. Po
 
 ## TypeScript
 
+The TypeScript client is a producer. It defines tasks and enqueues them:
+
 ```typescript
 const render = defineTask<{ reportId: string }, { rendered: string }>("reports.render");
 const task = await client.enqueue(render.request({ reportId: "report-123" }));
@@ -74,6 +80,8 @@ The supported entry point is `@pgtask/client`. Its public surface is `Client`, `
 `TaskHandle`, `defineTask`, and their exported JSON, option, request, and result types.
 
 ## Go
+
+The Go client is a producer with generic task definitions:
 
 ```go
 render, err := pgtask.DefineTask[renderRequest, renderResult]("reports.render", pgtask.DefinitionOptions{})
@@ -90,6 +98,8 @@ TypeScript and Go are producer SDKs. They enqueue, inspect, wait, signal, cancel
 join application transactions. Handler execution remains in the Rust and Python runtimes.
 
 ## SQL
+
+Every SDK calls this surface, and so can you:
 
 ```sql
 SELECT *
@@ -119,6 +129,8 @@ Additive SQL changes may keep the same protocol. A removed value, changed predic
 
 ## CLI
 
+The CLI covers migration, health, and administrative operations:
+
 ```console
 pgtask --database-url "$PGTASK_DATABASE_URL" health
 pgtask --database-url "$PGTASK_DATABASE_URL" migrate
@@ -128,6 +140,8 @@ pgtask --database-url "$PGTASK_DATABASE_URL" queue put emails
 The command names, option names, exit status, and documented stdout are public. Human-readable database errors on stderr may gain detail without a breaking release.
 
 ## OpenTelemetry
+
+Trace context travels in task headers once propagation is configured:
 
 ```rust
 fn configure() {

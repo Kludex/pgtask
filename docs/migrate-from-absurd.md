@@ -2,6 +2,8 @@
 
 ## Define durable boundaries
 
+Absurd workflows become handlers whose durable points are named steps:
+
 ```python
 from __future__ import annotations
 

@@ -2,6 +2,8 @@
 
 ## Checkpoint a step
 
+A step runs once and stores its result. On replay it returns the stored value instead of executing again:
+
 ```rust
 use std::error::Error;
 
@@ -47,6 +49,8 @@ Checkpoints are scoped by handler version. Bump the handler version when a deplo
 
 ## Sleep without occupying a worker
 
+A durable sleep releases the lease and sets a database deadline, so a long wait costs a row rather than a worker slot:
+
 ```rust
 context
     .sleep_for(
@@ -62,6 +66,8 @@ The first call commits the sleep checkpoint, changes the task back to `pending`,
 `sleep_until` accepts an absolute UTC timestamp. `sleep_for` calculates its timestamp inside PostgreSQL, so worker clock skew does not change the delay.
 
 ## Wait for an external signal
+
+A signal wait suspends the task until something outside the handler resolves it, or the timeout does:
 
 ```rust
 use pgtask::core::{SignalName, StepName};
@@ -88,6 +94,8 @@ Signal identity is `(task_id, signal_name, occurrence)`. The first committed JSO
 Use a stable occurrence when a workflow waits for the same named signal more than once. The signal occurrence and step occurrence are independent: the first identifies the external event, and the second identifies the durable checkpoint in the handler.
 
 ## Spawn a child and wait for its result
+
+Spawning inserts the child and checkpoints its identifier in one transaction, so a replay adopts the existing child rather than creating a second one:
 
 ```rust
 use pgtask::core::{EnqueueRequest, StepName, TaskName};
@@ -126,6 +134,8 @@ A result timeout returns a checkpoint with `state` set to `timeout`. It cancels 
 For a client that is not inside a task handler, use `Store::task_result` for inspection or `Store::wait_for_task_result` for notification-driven waiting. The latter establishes `LISTEN pgtask_result` before checking task state, so completion cannot be lost between subscription and inspection.
 
 ## Write replay-safe handlers
+
+The rule is that anything with a side effect belongs inside a step. Everything outside one runs again on every replay:
 
 ```rust
 use pgtask::core::{StepName, TaskId};

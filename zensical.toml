@@ -1,0 +1,133 @@
+[project]
+site_url = "https://kludex.github.io/pgtask/"
+site_name = "pgtask"
+site_description = "A durable task and workflow engine for PostgreSQL."
+
+repo_url = "https://github.com/Kludex/pgtask"
+repo_name = "Kludex/pgtask"
+edit_uri = "edit/main/docs/"
+
+nav = [
+  { "Home" = "index.md" },
+  { "Start here" = [
+    "start/what-pgtask-is.md",
+    "start/install.md",
+    "start/first-task.md",
+  ] },
+  { "Architecture" = [
+    "architecture/index.md",
+    "architecture/task-lifecycle.md",
+    "architecture/durability.md",
+    "architecture/scheduling.md",
+    "architecture/storage.md",
+    "architecture/scaling.md",
+    "failure-model.md",
+  ] },
+  { "Concepts" = [
+    "concepts/queues.md",
+    "concepts/retries.md",
+    "concepts/idempotency.md",
+    "durable-execution.md",
+  ] },
+  { "SDKs" = [
+    "sdk/python.md",
+    "sdk/typescript.md",
+    "sdk/go.md",
+  ] },
+  { "Operations" = [
+    "operations.md",
+    "telemetry.md",
+    "ui.md",
+    "releases.md",
+    "security-review.md",
+  ] },
+  { "Reference" = [
+    "sql-protocol.md",
+    "schema-compatibility.md",
+    "public-contracts.md",
+  ] },
+  { "Migrating" = [
+    "migrate-from-arq.md",
+    "migrate-from-absurd.md",
+  ] },
+  { "Decisions" = [
+    "adr/0001-postgresql-only.md",
+    "adr/0002-at-least-once-leases.md",
+    "adr/0003-embedded-scheduler.md",
+    "adr/0004-shared-task-table.md",
+    "adr/0005-required-listen-notify.md",
+  ] },
+  { "Benchmarks" = [
+    "benchmarks/README.md",
+    "benchmarks/2026-08-15-local-kernel.md",
+    "benchmarks/2026-08-15-retention.md",
+    "benchmarks/2026-08-16-bounded-admission.md",
+  ] },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.action.edit",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.tooltips",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "green"
+accent = "green"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "green"
+accent = "green"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/Kludex/pgtask"
+
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.betterem = {}
+pymdownx.details = {}
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.magiclink = {}
+pymdownx.smartsymbols = {}
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tasklist.custom_checkbox = true

@@ -27,6 +27,8 @@ The completion path deliberately uses one database round trip per task. This est
 
 ## Command
 
+The run is reproducible from a clean database with the bench binary:
+
 ```console
 PGTASK_DATABASE_URL=postgresql://marcelotryle@localhost/pgtask_test \
 PGTASK_BENCH_TASKS=1000 \

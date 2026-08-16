@@ -20,6 +20,18 @@ export PGTASK_DATABASE_URL=postgresql://pgtask:pgtask@localhost:54329/pgtask
 Tilt installs `charts/pgtask` with disposable PostgreSQL storage and forwards PostgreSQL to port `54329`. Run
 `tilt down` to remove the Helm release.
 
+## Documentation
+
+The site is built with [Zensical](https://zensical.org). Preview it with a live-reloading server:
+
+```console
+uvx zensical serve
+```
+
+`uvx zensical build` writes the static site to `site/`. Content lives in `docs/` and the navigation is declared in
+`zensical.toml`. A heading is always followed by a sentence before any code block, so a reader never lands on a snippet
+with no idea what it does.
+
 ## Checks
 
 Run these commands before submitting a change:

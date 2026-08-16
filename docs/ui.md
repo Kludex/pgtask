@@ -2,6 +2,8 @@
 
 ## Run the observer service
 
+The service reads observer views only, so give it a role with no mutation rights:
+
 ```console
 PGTASK_DATABASE_URL=postgresql://pgtask_observer:secret@localhost/pgtask \
     PGTASK_WEB_ADDRESS=127.0.0.1:8080 \

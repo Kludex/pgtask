@@ -16,3 +16,6 @@ sdks/python/python/pgtask/_native.*.so
 /sdks/typescript/coverage/
 /sdks/typescript/dist/
 /sdks/go/coverage.out
+
+# Zensical build output
+/site/

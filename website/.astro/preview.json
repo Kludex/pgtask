@@ -1,0 +1,14 @@
+{
+	"pid": 33698,
+	"port": 4321,
+	"url": "http://localhost:4321",
+	"urls": {
+		"local": [
+			"http://localhost:4321/pgtask"
+		],
+		"network": [],
+		"networkInterfaceNames": []
+	},
+	"background": true,
+	"startedAt": "2026-08-16T15:46:17.147Z"
+}

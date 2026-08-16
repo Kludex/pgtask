@@ -2,6 +2,8 @@
 
 ## Enqueue a task
 
+Define the task with its payload and result types, then enqueue it:
+
 ```typescript
 import { Client, defineTask } from "@pgtask/client";
 
@@ -50,6 +52,8 @@ lost between subscription and inspection. A transaction-pooling proxy cannot pro
 
 ## Enqueue in a transaction
 
+Pass a `pg` client that is already inside a transaction:
+
 ```typescript
 import { Client, defineTask } from "@pgtask/client";
 import { Pool } from "pg";
@@ -93,6 +97,8 @@ OpenTelemetry SDK in your application before enqueueing. The package does not in
 backend.
 
 ## Signals and cancellation
+
+A producer can resolve a waiting task or cancel it:
 
 ```typescript
 const task = client.task<{ rendered: string }>(taskId);

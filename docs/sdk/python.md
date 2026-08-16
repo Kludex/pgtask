@@ -2,6 +2,8 @@
 
 ## Run a worker
 
+A worker registers handlers and serves one queue:
+
 ```python
 from __future__ import annotations
 
@@ -48,6 +50,8 @@ Set `handler_version` when a long-lived task changes its durable protocol. An ex
 
 ## Enqueue and wait
 
+The producer enqueues a task and waits on a notification rather than polling:
+
 ```python
 from __future__ import annotations
 
@@ -86,6 +90,8 @@ The query and listener endpoints default to the same URL. Set `listener_url` whe
 The client injects the active Python OpenTelemetry context into task headers. The worker restores that context around the Python handler. Database cancellation cancels the Python coroutine and runs its `finally` blocks.
 
 ## Run a durable workflow
+
+Durable operations suspend the task into the database, so the handler resumes after a restart:
 
 ```python
 from __future__ import annotations
@@ -152,6 +158,8 @@ Keep names and occurrences stable. Code outside a completed `step` can run again
 
 ## Enqueue in an application transaction
 
+Pass your Psycopg connection and the task commits with your data:
+
 ```python
 from __future__ import annotations
 
@@ -189,6 +197,8 @@ asyncio.run(main())
 Use it only after the application has established a compatible normal client during startup.
 
 ## Migrate from ARQ
+
+The shape stays familiar, with types and a transactional enqueue added:
 
 ```python
 from __future__ import annotations

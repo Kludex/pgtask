@@ -2,6 +2,8 @@
 
 ## Apply migrations
 
+Migrations are forward-only and serialized by an advisory lock, so any process can run them:
+
 ```console
 PGTASK_DATABASE_URL=postgresql://pgtask_owner:secret@postgres/pgtask pgtask migrate
 ```
@@ -9,6 +11,8 @@ PGTASK_DATABASE_URL=postgresql://pgtask_owner:secret@postgres/pgtask pgtask migr
 Run one migration command before workers start. The migrator takes an advisory lock, so overlapping release jobs serialize. Keep the previous worker version available during a rolling release.
 
 ## Back up and restore
+
+The schema is ordinary PostgreSQL data, so your existing backup tooling covers it:
 
 ```console
 pg_dump --format=custom --schema=pgtask --file=pgtask.dump "$PGTASK_DATABASE_URL"
@@ -20,6 +24,8 @@ pgtask --database-url postgresql://postgres@localhost/pgtask_restore health
 Back up the schema with the application data needed by handlers. A queue-only restore can re-run a task whose external side effect happened after the backup, so handlers must retain their external idempotency keys. Test restoration into an isolated database before treating a backup as usable.
 
 ## Configure a queue
+
+Queue settings control retention, admission, and how long old work waits before it bypasses priority:
 
 ```console
 pgtask queue put default \
@@ -47,6 +53,8 @@ Stop new producers or route them to the replacement queue. Stop claim admission 
 
 ## Read health
 
+Workers expose two endpoints that answer different questions, so probe them separately:
+
 ```console
 curl --fail http://127.0.0.1:8081/livez
 curl --fail http://127.0.0.1:8081/readyz
@@ -55,6 +63,8 @@ curl --fail http://127.0.0.1:8081/readyz
 `/livez` proves the dedicated supervisor is progressing. `/readyz` additionally requires claim admission, PostgreSQL connectivity, a healthy `LISTEN` session, and safe lease renewal. A database outage should fail readiness without failing liveness.
 
 ## Investigate a stuck queue
+
+Start with the overview, because it separates work nobody can run from work that is merely queued:
 
 ```sql
 SELECT *

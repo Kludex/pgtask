@@ -39,6 +39,8 @@ corresponding `sdks/go/v1.0.0` tag at the same commit so the Go module proxy res
 
 ## Test local artifacts
 
+Build and verify every artifact locally before tagging a release:
+
 ```console
 ./scripts/build-release-artifacts.sh
 ./scripts/test-release-artifacts.sh

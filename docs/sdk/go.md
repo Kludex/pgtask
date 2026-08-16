@@ -2,6 +2,8 @@
 
 ## Enqueue a task
 
+Define the task once, then enqueue it with a typed payload:
+
 ```go
 package main
 
@@ -71,6 +73,8 @@ listener URL defaults to the query URL. Use a direct PostgreSQL endpoint or a Pg
 
 ## Enqueue in a transaction
 
+Pass an existing transaction and the task commits with your application writes:
+
 ```go
 package producer
 
@@ -133,6 +137,8 @@ OpenTelemetry SDK or OTLP exporter in your application before enqueueing. The pa
 choose a telemetry backend.
 
 ## Signals and cancellation
+
+A producer can resolve a waiting task or cancel it outright:
 
 ```go
 task := pgtask.Task[renderResult](client, taskID)

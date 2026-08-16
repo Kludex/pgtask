@@ -2,6 +2,8 @@
 
 ## Define the task
 
+An ARQ task function becomes a registered handler with a typed payload:
+
 ```python
 from __future__ import annotations
 
@@ -27,6 +29,8 @@ Import the returned `TaskDefinition` from producers. Do not reproduce ARQ's stri
 
 ## Translate enqueue calls
 
+`enqueue_job` becomes `enqueue`, which returns a handle you can await a result on:
+
 ```python
 handle = await client.enqueue(
     generate_report.request(
@@ -49,6 +53,8 @@ handle = await client.enqueue(
 | ARQ cron | interval or six-field UTC schedule |
 
 ## Preserve an application transaction
+
+This is the part ARQ cannot do. Pass your connection and the task commits with your data:
 
 ```python
 async with connection.transaction():
