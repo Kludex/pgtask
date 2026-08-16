@@ -47,6 +47,6 @@ On an Apple Silicon development machine with PostgreSQL 17, 100 tasks, and concu
 
 The queue-isolation run drains a small no-op queue while a separate retry-storm queue is busy. It preserves both JSON reports so you can compare the fast queue with the unloaded baseline.
 
-The local result is a development diagnostic. Publishable comparisons require the managed PostgreSQL environment, fixed resource limits, repeated trials, and the database measurements defined in [`PLAN.md`](https://github.com/Kludex/pgtask/blob/main/PLAN.md).
+The local result is a development diagnostic. Publishable comparisons require the managed PostgreSQL environment, fixed resource limits, repeated trials, and the database measurements defined in [`PLAN.md`](../PLAN.md).
 
 See [the bounded-admission diagnostic](2026-08-16-bounded-admission.md) for the measured cost of a hard queue limit.

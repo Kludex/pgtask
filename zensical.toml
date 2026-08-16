@@ -52,19 +52,6 @@ nav = [
     "migrate-from-arq.md",
     "migrate-from-absurd.md",
   ] },
-  { "Decisions" = [
-    "adr/0001-postgresql-only.md",
-    "adr/0002-at-least-once-leases.md",
-    "adr/0003-embedded-scheduler.md",
-    "adr/0004-shared-task-table.md",
-    "adr/0005-required-listen-notify.md",
-  ] },
-  { "Benchmarks" = [
-    "benchmarks/README.md",
-    "benchmarks/2026-08-15-local-kernel.md",
-    "benchmarks/2026-08-15-retention.md",
-    "benchmarks/2026-08-16-bounded-admission.md",
-  ] },
 ]
 
 [project.theme]
