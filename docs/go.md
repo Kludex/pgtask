@@ -121,8 +121,8 @@ func saveAndEnqueue(ctx context.Context, pool *pgxpool.Pool) error {
 ## OpenTelemetry
 
 The client injects the active OpenTelemetry context into task headers with the global text-map propagator. Configure an
-OpenTelemetry SDK or OpenTelemetry-compatible OTLP exporter in your application before enqueueing. The package does not install
-an exporter or choose a telemetry backend.
+OpenTelemetry SDK or OTLP exporter in your application before enqueueing. The package does not install an exporter or
+choose a telemetry backend.
 
 ## Signals and cancellation
 

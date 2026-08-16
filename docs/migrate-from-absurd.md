@@ -22,8 +22,8 @@ async def build_export(task: Task, request: ExportRequest) -> JSONValue:
     async def load_export() -> JSONValue:
         return await exports.load(request["export_id"])
 
-    proposal = await task.step("load-proposal", load_export)
-    child_id = await task.spawn("render-export", render_export.request(proposal))
+    export = await task.step("load-export", load_export)
+    child_id = await task.spawn("render-export", render_export.request(export))
     result = await task.wait_for_result("wait-for-render", child_id)
     return await task.step("record-result", lambda: exports.complete(request["export_id"], result))
 ```

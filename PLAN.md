@@ -271,7 +271,7 @@ The release publishes the chart to an OCI registry alongside signed container im
 
 ## Migration strategy
 
-The adopter pilot validates both halves of the product:
+An adopter pilot validates both halves of the product:
 
 1. Move one low-risk ARQ queue while leaving its old worker registered for draining and rollback.
 2. Move one Absurd workflow and validate checkpoint replay after forced termination.
@@ -325,7 +325,7 @@ Exit gate: every logical schedule occurrence produces at most one task.
 - Document how ARQ task names, deferred execution, job identifiers, attempts, and retries map to the new API.
 - Publish wheels through `maturin`.
 
-Exit gate: a Python producer and worker integration runs without Redis through the public Python API.
+Exit gate: a Python producer and worker complete a task without Redis through the public API.
 
 ### Milestone 5: Durable execution
 

@@ -12,7 +12,7 @@ fn main() {
 
 `pgtask` uses the global OpenTelemetry providers. It does not select an exporter or telemetry backend. This keeps the engine compatible with OTLP collectors, managed observability services, and application-specific sampling.
 
-Set `service.name`, `service.version`, `deployment.environment`, and a unique `service.instance.id` on the OpenTelemetry resource before you start a worker. If your application uses the Rust OpenTelemetry SDK, configure it before constructing `Worker` and call its shutdown handler when the process exits. The existing `tracing` spans and OpenTelemetry metrics are exported without a pgtask-specific OpenTelemetry dependency.
+Set `service.name`, `service.version`, `deployment.environment`, and a unique `service.instance.id` on the OpenTelemetry resource before you start a worker. Configure your tracer and meter providers before constructing `Worker`, and shut them down when the process exits.
 
 ## Traces
 

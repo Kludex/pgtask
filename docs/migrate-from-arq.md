@@ -11,16 +11,16 @@ from pgtask import Task, TaskRegistry
 
 
 class ReportRequest(TypedDict):
-    user_id: str
+    account_id: str
     period: str
 
 
-tasks = TaskRegistry(queue_name="ops")
+tasks = TaskRegistry(queue_name="reports")
 
 
 @tasks.task("reports.generate")
 async def generate_report(task: Task, request: ReportRequest) -> None:
-    await generate_report(request["user_id"], request["period"])
+    await reports.generate(request["account_id"], request["period"])
 ```
 
 Import the returned `TaskDefinition` from producers. Do not reproduce ARQ's string lookup, positional payloads, global registry, or underscore-prefixed enqueue options.
@@ -30,8 +30,8 @@ Import the returned `TaskDefinition` from producers. Do not reproduce ARQ's stri
 ```python
 handle = await client.enqueue(
     generate_report.request(
-        {"user_id": str(user_id), "period": period},
-        idempotency_key=f"report:{user_id}:{period}",
+        {"account_id": str(account_id), "period": period},
+        idempotency_key=f"report:{account_id}:{period}",
     )
 )
 ```
@@ -52,12 +52,15 @@ handle = await client.enqueue(
 
 ```python
 async with connection.transaction():
-    await connection.execute("INSERT INTO report_requests (user_id) VALUES (%s)", (user_id,))
+    await connection.execute(
+        "INSERT INTO report_requests (account_id, period) VALUES (%s, %s)",
+        (account_id, period),
+    )
     await Client.enqueue_on(
         connection,
         generate_report.request(
-            {"user_id": str(user_id), "period": period},
-            idempotency_key=f"report:{user_id}:{period}",
+            {"account_id": str(account_id), "period": period},
+            idempotency_key=f"report:{account_id}:{period}",
         ),
     )
 ```

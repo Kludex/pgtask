@@ -85,8 +85,8 @@ try {
 ## OpenTelemetry
 
 The client injects the active OpenTelemetry context into task headers with the global text-map propagator. Configure an
-OpenTelemetry SDK or OpenTelemetry in your application before enqueueing. The package does not install an exporter or choose a
-telemetry backend.
+OpenTelemetry SDK in your application before enqueueing. The package does not install an exporter or choose a telemetry
+backend.
 
 ## Signals and cancellation
 
