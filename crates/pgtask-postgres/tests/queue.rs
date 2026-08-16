@@ -228,24 +228,6 @@ async fn invalid_runtime_limits_fail_before_mutating_storage() {
                 worker_id,
                 &queue_name,
                 "test",
-                &[(task_name.clone(), HandlerVersion::default())],
-                Duration::ZERO,
-            )
-            .await,
-        Err(PostgresError::InvalidLeaseDuration)
-    ));
-    assert!(matches!(
-        store
-            .register_worker_with_policies(worker_id, &queue_name, "test", &[], Duration::from_secs(1))
-            .await,
-        Err(PostgresError::MissingCapabilities)
-    ));
-    assert!(matches!(
-        store
-            .register_worker_with_policies(
-                worker_id,
-                &queue_name,
-                "test",
                 &[(task_name, HandlerVersion::default(), RetryPolicy::Never)],
                 Duration::ZERO,
             )
@@ -298,6 +280,9 @@ async fn queue_demand_separates_capable_and_unroutable_ready_tasks() {
     let supported = TaskName::new(format!("supported-{suffix}")).unwrap();
     let unsupported = TaskName::new(format!("unsupported-{suffix}")).unwrap();
     let capabilities = [(supported.clone(), HandlerVersion::default())];
+    let registrations = capabilities
+        .clone()
+        .map(|(task_name, handler_version)| (task_name, handler_version, RetryPolicy::Never));
     let mut requests = Vec::new();
     for task_name in [supported.clone(), unsupported] {
         let mut request = EnqueueRequest::new(task_name, json!({}));
@@ -311,7 +296,7 @@ async fn queue_demand_separates_capable_and_unroutable_ready_tasks() {
     store.enqueue_many(&requests).await.unwrap();
     let worker_id = WorkerId::new();
     store
-        .register_worker(worker_id, &queue_name, "test", &capabilities, Duration::from_secs(30))
+        .register_worker(worker_id, &queue_name, "test", &registrations, Duration::from_secs(30))
         .await
         .unwrap();
 
@@ -1358,12 +1343,15 @@ async fn worker_registration_reports_versioned_capabilities_and_expiry() {
             HandlerVersion::new(std::num::NonZeroU32::new(2).unwrap()),
         ),
     ];
+    let registrations = capabilities
+        .clone()
+        .map(|(task_name, handler_version)| (task_name, handler_version, RetryPolicy::Never));
     store
         .register_worker(
             worker_id,
             &queue_name,
             "test-version",
-            &capabilities,
+            &registrations,
             Duration::from_secs(30),
         )
         .await
@@ -1403,7 +1391,7 @@ async fn retry_policies_are_immutable_per_handler_version_and_snapshotted_on_tas
         delay: Duration::from_secs(3),
     };
     store
-        .register_worker_with_policies(
+        .register_worker(
             WorkerId::new(),
             &queue_name,
             "fixed",
@@ -1434,7 +1422,7 @@ async fn retry_policies_are_immutable_per_handler_version_and_snapshotted_on_tas
         max_delay: Duration::from_secs(20),
     };
     store
-        .register_worker_with_policies(
+        .register_worker(
             WorkerId::new(),
             &queue_name,
             "exponential",
@@ -1459,7 +1447,7 @@ async fn retry_policies_are_immutable_per_handler_version_and_snapshotted_on_tas
     assert_eq!(claimed.retry_policy, Some(exponential));
 
     let conflict = store
-        .register_worker_with_policies(
+        .register_worker(
             WorkerId::new(),
             &queue_name,
             "conflict",

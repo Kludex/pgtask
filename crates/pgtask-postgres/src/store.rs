@@ -445,40 +445,6 @@ impl Store {
         worker_id: WorkerId,
         queue_name: &QueueName,
         version: &str,
-        capabilities: &[(TaskName, HandlerVersion)],
-        ttl: Duration,
-    ) -> Result<(), PostgresError> {
-        if capabilities.is_empty() {
-            return Err(PostgresError::MissingCapabilities);
-        }
-        let ttl_milliseconds = i64::try_from(ttl.as_millis()).map_err(|_| PostgresError::InvalidLeaseDuration)?;
-        if ttl_milliseconds == 0 {
-            return Err(PostgresError::InvalidLeaseDuration);
-        }
-        let task_names: Vec<_> = capabilities.iter().map(|(name, _)| name.as_str()).collect();
-        let handler_versions: Vec<_> = capabilities
-            .iter()
-            .map(|(_, handler_version)| {
-                i32::try_from(handler_version.get()).map_err(|_| PostgresError::InvalidHandlerVersion)
-            })
-            .collect::<Result<_, _>>()?;
-        sqlx::query("SELECT pgtask.register_worker($1, $2, $3, $4, $5, $6)")
-            .bind(worker_id.as_uuid())
-            .bind(queue_name.as_str())
-            .bind(version)
-            .bind(&task_names)
-            .bind(&handler_versions)
-            .bind(ttl_milliseconds)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn register_worker_with_policies(
-        &self,
-        worker_id: WorkerId,
-        queue_name: &QueueName,
-        version: &str,
         capabilities: &[(TaskName, HandlerVersion, RetryPolicy)],
         ttl: Duration,
     ) -> Result<(), PostgresError> {

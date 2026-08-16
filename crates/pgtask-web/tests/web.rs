@@ -8,8 +8,8 @@ use axum::{
 use chrono::{TimeDelta, Utc};
 use pgtask::{
     core::{
-        EnqueueRequest, HandlerVersion, QueueName, ScheduleConfig, ScheduleDefinition, ScheduleName, SignalName,
-        StepName, TaskName, WorkerId,
+        EnqueueRequest, HandlerVersion, QueueName, RetryPolicy, ScheduleConfig, ScheduleDefinition, ScheduleName,
+        SignalName, StepName, TaskName, WorkerId,
     },
     postgres::Store,
 };
@@ -172,7 +172,7 @@ async fn seeded_application(database_url: &str) -> (Router, Store, Uuid, Uuid, U
             worker_id,
             &queue_name,
             "test-version",
-            &[(task_name, HandlerVersion::default())],
+            &[(task_name, HandlerVersion::default(), RetryPolicy::Never)],
             Duration::from_secs(30),
         )
         .await

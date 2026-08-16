@@ -1144,52 +1144,6 @@ CREATE FUNCTION pgtask.register_worker(
     p_version text,
     p_task_names text[],
     p_handler_versions integer[],
-    p_ttl_milliseconds bigint
-)
-RETURNS void
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, pgtask
-AS $$
-BEGIN
-    IF cardinality(p_task_names) = 0 OR cardinality(p_task_names) <> cardinality(p_handler_versions) THEN
-        RAISE EXCEPTION 'worker capabilities must be nonempty and aligned' USING ERRCODE = '22023';
-    END IF;
-    IF p_ttl_milliseconds <= 0 THEN
-        RAISE EXCEPTION 'worker ttl must be positive' USING ERRCODE = '22023';
-    END IF;
-
-    INSERT INTO pgtask.queues (name)
-    VALUES (p_queue_name)
-    ON CONFLICT DO NOTHING;
-
-    INSERT INTO pgtask.workers (id, queue_name, version, expires_at)
-    VALUES (
-        p_worker_id,
-        p_queue_name,
-        p_version,
-        statement_timestamp() + (p_ttl_milliseconds * interval '1 millisecond')
-    )
-    ON CONFLICT (id) DO UPDATE
-    SET queue_name = EXCLUDED.queue_name,
-        version = EXCLUDED.version,
-        draining = false,
-        heartbeat_at = statement_timestamp(),
-        expires_at = EXCLUDED.expires_at;
-
-    DELETE FROM pgtask.worker_capabilities WHERE worker_id = p_worker_id;
-    INSERT INTO pgtask.worker_capabilities (worker_id, task_name, handler_version)
-    SELECT p_worker_id, capabilities.task_name, capabilities.handler_version
-    FROM unnest(p_task_names, p_handler_versions) AS capabilities(task_name, handler_version);
-END;
-$$;
-
-CREATE FUNCTION pgtask.register_worker(
-    p_worker_id uuid,
-    p_queue_name text,
-    p_version text,
-    p_task_names text[],
-    p_handler_versions integer[],
     p_retry_kinds text[],
     p_retry_base_delay_milliseconds bigint[],
     p_retry_factors integer[],
@@ -1220,15 +1174,32 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'worker capabilities must be unique' USING ERRCODE = '22023';
     END IF;
+    IF p_ttl_milliseconds <= 0 THEN
+        RAISE EXCEPTION 'worker ttl must be positive' USING ERRCODE = '22023';
+    END IF;
 
-    PERFORM pgtask.register_worker(
+    INSERT INTO pgtask.queues (name)
+    VALUES (p_queue_name)
+    ON CONFLICT DO NOTHING;
+
+    INSERT INTO pgtask.workers (id, queue_name, version, expires_at)
+    VALUES (
         p_worker_id,
         p_queue_name,
         p_version,
-        p_task_names,
-        p_handler_versions,
-        p_ttl_milliseconds
-    );
+        statement_timestamp() + (p_ttl_milliseconds * interval '1 millisecond')
+    )
+    ON CONFLICT (id) DO UPDATE
+    SET queue_name = EXCLUDED.queue_name,
+        version = EXCLUDED.version,
+        draining = false,
+        heartbeat_at = statement_timestamp(),
+        expires_at = EXCLUDED.expires_at;
+
+    DELETE FROM pgtask.worker_capabilities WHERE worker_id = p_worker_id;
+    INSERT INTO pgtask.worker_capabilities (worker_id, task_name, handler_version)
+    SELECT p_worker_id, capabilities.task_name, capabilities.handler_version
+    FROM unnest(p_task_names, p_handler_versions) AS capabilities(task_name, handler_version);
 
     IF EXISTS (
         SELECT 1
@@ -2766,10 +2737,6 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.complete_task(uuid, integer, uuid, jsonb) TO %s', p_worker);
     EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.fail_task(uuid, integer, uuid, jsonb, bigint) TO %s', p_worker);
     EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.recover_expired(text, integer) TO %s', p_worker);
-    EXECUTE format(
-        'GRANT EXECUTE ON FUNCTION pgtask.register_worker(uuid, text, text, text[], integer[], bigint) TO %s',
-        p_worker
-    );
     EXECUTE format(
         'GRANT EXECUTE ON FUNCTION pgtask.register_worker(uuid, text, text, text[], integer[], text[], bigint[], integer[], bigint[], bigint) TO %s',
         p_worker

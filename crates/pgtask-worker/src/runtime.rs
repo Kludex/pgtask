@@ -312,7 +312,7 @@ impl Worker {
             self.store.put_schedule(schedule).await?;
         }
         self.store
-            .register_worker_with_policies(
+            .register_worker(
                 self.id,
                 &self.config.queue_name,
                 env!("CARGO_PKG_VERSION"),
