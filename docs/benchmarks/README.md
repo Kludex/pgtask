@@ -16,6 +16,10 @@ The sweep runs the real Rust worker runtime with 1, 2, 4, 8, 16, and 32 replicas
 
 Set `PGTASK_BENCH_TASKS`, `PGTASK_BENCH_BATCH_SIZE`, `PGTASK_BENCH_CONCURRENCY`, or `PGTASK_BENCH_TIMEOUT_SECONDS` to change the workload. Every run uses a new logical queue so retained history does not enter the claim path.
 
+Set `PGTASK_BENCH_QUEUE_CAPACITY` to measure bounded admission. Use a value at least as large as
+`PGTASK_BENCH_TASKS` for the standard enqueue-then-drain scenarios. This exercises the capacity-limited queue counter
+without intentionally rejecting the benchmark workload.
+
 `PGTASK_BENCH_SCENARIO` accepts `noop`, `cpu-bound`, `io-bound`, `rate-limited`, `delayed-burst`, `retry-storm`, `retained-history`, `worker-death`, `database-disconnect`, or `multi-scheduler`. The retry storm defaults to three handler attempts per task. Change it with `PGTASK_BENCH_RETRY_ATTEMPTS`.
 
 The CPU-bound profile performs computation on the handler runtime. The I/O-bound profile suspends each handler independently. The rate-limited profile shares one paced downstream boundary across every worker in the benchmark process. Run them as separate queues with independent concurrency values.
@@ -41,3 +45,5 @@ On an Apple Silicon development machine with PostgreSQL 17, 100 tasks, and concu
 The queue-isolation run drains a small no-op queue while a separate retry-storm queue is busy. It preserves both JSON reports so you can compare the fast queue with the unloaded baseline.
 
 The local result is a development diagnostic. Publishable comparisons require the managed PostgreSQL environment, fixed resource limits, repeated trials, and the database measurements defined in [`PLAN.md`](../../PLAN.md).
+
+See [the bounded-admission diagnostic](2026-08-16-bounded-admission.md) for the measured cost of a hard queue limit.

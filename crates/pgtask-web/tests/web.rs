@@ -154,8 +154,17 @@ async fn seeded_application(database_url: &str) -> (Router, Store, Uuid, Uuid, U
         scheduled_request,
     );
     schedule.start_at = Some(Utc::now() - TimeDelta::minutes(1));
-    let schedule_id = store.put_schedule(&schedule).await.unwrap().config.id;
-    assert_eq!(store.materialize_due_schedules(1).await.unwrap(), 1);
+    let schedule = store.put_schedule(&schedule).await.unwrap();
+    let schedule_id = schedule.config.id;
+    let materialized: i64 = sqlx::query_scalar("SELECT pgtask.materialize_schedule($1, $2, $3, $4)")
+        .bind(schedule_id.as_uuid())
+        .bind(schedule.next_run_at)
+        .bind([schedule.next_run_at])
+        .bind(schedule.next_run_at + TimeDelta::minutes(1))
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(materialized, 1);
 
     let worker_id = WorkerId::new();
     store

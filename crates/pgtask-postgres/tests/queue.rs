@@ -996,6 +996,114 @@ async fn queue_capacity_is_atomic_under_concurrent_producers() {
 }
 
 #[tokio::test]
+async fn queue_capacity_counts_administrative_retries() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("retry-capacity-{suffix}")).unwrap();
+    let task_name = TaskName::new("retry-capacity-task").unwrap();
+    let mut queue = QueueConfig::new(queue_name.clone());
+    queue.max_outstanding_tasks = NonZeroU64::MIN.into();
+    store.put_queue(&queue).await.unwrap();
+    let mut request = EnqueueRequest::new(task_name, json!({}));
+    request.queue_name = queue_name;
+    let retry_id = store.enqueue(&request).await.unwrap().task_id;
+    assert!(store.cancel(retry_id).await.unwrap());
+    let blocker_id = store.enqueue(&request).await.unwrap().task_id;
+
+    let error = sqlx::query_scalar::<_, bool>("SELECT pgtask.admin_retry_task($1, $2)")
+        .bind(retry_id.as_uuid())
+        .bind(format!("capacity-full-{suffix}"))
+        .fetch_one(store.pool())
+        .await
+        .unwrap_err();
+    assert_eq!(error.as_database_error().unwrap().code().as_deref(), Some("PT001"));
+    assert!(store.cancel(blocker_id).await.unwrap());
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT pgtask.admin_retry_task($1, $2)")
+            .bind(retry_id.as_uuid())
+            .bind(format!("capacity-retry-{suffix}"))
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn bounded_queue_reconfiguration_preserves_concurrent_admission() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let queue_name = QueueName::new(format!("reconfigure-capacity-{}", Uuid::new_v4())).unwrap();
+    let task_name = TaskName::new("reconfigure-capacity-task").unwrap();
+    let mut queue = QueueConfig::new(queue_name.clone());
+    queue.max_outstanding_tasks = NonZeroU64::new(2);
+    store.put_queue(&queue).await.unwrap();
+
+    let mut blocker = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM pgtask.queues WHERE name = $1 FOR UPDATE")
+        .bind(queue_name.as_str())
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+
+    let mut reconfigure_connection = store.pool().acquire().await.unwrap();
+    let reconfigure_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *reconfigure_connection)
+        .await
+        .unwrap();
+    let reconfigure_name = queue_name.clone();
+    let reconfigure = tokio::spawn(async move {
+        sqlx::query("SELECT * FROM pgtask.put_queue($1, $2, $3, $4, $5)")
+            .bind(reconfigure_name.as_str())
+            .bind(60_i64)
+            .bind(3_600_i64)
+            .bind(2_i64)
+            .bind(45_i64)
+            .execute(&mut *reconfigure_connection)
+            .await
+            .unwrap();
+    });
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting: bool =
+                sqlx::query_scalar("SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = $1")
+                    .bind(reconfigure_pid)
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let mut request = EnqueueRequest::new(task_name, json!({}));
+    request.queue_name = queue_name;
+    Store::enqueue_on(&mut blocker, &request).await.unwrap();
+    blocker.commit().await.unwrap();
+    reconfigure.await.unwrap();
+
+    store.enqueue(&request).await.unwrap();
+    let error = store.enqueue(&request).await.unwrap_err();
+    let PostgresError::Database(sqlx::Error::Database(error)) = error else {
+        panic!("unexpected enqueue error: {error}");
+    };
+    assert_eq!(error.code().as_deref(), Some("PT001"));
+}
+
+#[tokio::test]
 async fn queue_configuration_pauses_and_resumes_claiming() {
     let Some(database_url) = database_url() else {
         return;

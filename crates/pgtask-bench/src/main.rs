@@ -1,6 +1,6 @@
 use std::{
     error::Error,
-    num::NonZeroU16,
+    num::{NonZeroU16, NonZeroU64},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -29,6 +29,7 @@ struct Report {
     batch_size: usize,
     workers: usize,
     concurrency_per_worker: u16,
+    queue_capacity: Option<u64>,
     handler_invocations: usize,
     enqueue_seconds: f64,
     enqueue_tasks_per_second: f64,
@@ -60,6 +61,7 @@ struct Configuration {
     timeout: Duration,
     scenario: Scenario,
     retry_attempts: u16,
+    queue_capacity: Option<NonZeroU64>,
 }
 
 struct Progress {
@@ -86,6 +88,7 @@ impl Configuration {
             timeout: Duration::from_secs(u64::try_from(environment_usize("PGTASK_BENCH_TIMEOUT_SECONDS", 300)?)?),
             scenario: Scenario::from_environment()?,
             retry_attempts: u16::try_from(environment_usize("PGTASK_BENCH_RETRY_ATTEMPTS", 3)?)?,
+            queue_capacity: environment_optional_nonzero_u64("PGTASK_BENCH_QUEUE_CAPACITY")?,
         };
         if config.task_count == 0
             || config.batch_size == 0
@@ -100,6 +103,12 @@ impl Configuration {
         }
         if matches!(config.scenario, Scenario::WorkerDeath) && config.worker_count < 2 {
             return Err("worker death requires at least two workers".into());
+        }
+        if config
+            .queue_capacity
+            .is_some_and(|capacity| capacity.get() < u64::try_from(config.task_count).unwrap_or(u64::MAX))
+        {
+            return Err("queue capacity must be at least the benchmark task count".into());
         }
         Ok(config)
     }
@@ -148,9 +157,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let store = Store::connect(&database_url).await?;
     store.migrate().await?;
     let queue_name = QueueName::new(format!("bench-{}", Uuid::new_v4()))?;
-    if matches!(config.scenario, Scenario::RetainedHistory) {
+    if matches!(config.scenario, Scenario::RetainedHistory) || config.queue_capacity.is_some() {
         let mut queue = QueueConfig::new(queue_name.clone());
-        queue.terminal_retention = Duration::ZERO;
+        queue.max_outstanding_tasks = config.queue_capacity;
+        if matches!(config.scenario, Scenario::RetainedHistory) {
+            queue.terminal_retention = Duration::ZERO;
+        }
         store.put_queue(&queue).await?;
     }
     let task_name = TaskName::new("benchmark.noop")?;
@@ -222,6 +234,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         batch_size: config.batch_size,
         workers: config.worker_count,
         concurrency_per_worker: config.concurrency,
+        queue_capacity: config.queue_capacity.map(NonZeroU64::get),
         handler_invocations: progress.handler_invocations.load(Ordering::Relaxed),
         enqueue_seconds: enqueue_elapsed.as_secs_f64(),
         enqueue_tasks_per_second: task_count_float / enqueue_elapsed.as_secs_f64(),
@@ -232,6 +245,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+fn environment_optional_nonzero_u64(name: &str) -> Result<Option<NonZeroU64>, Box<dyn Error>> {
+    let value = match std::env::var(name) {
+        Ok(value) => value.parse()?,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Some(
+        NonZeroU64::new(value).ok_or_else(|| format!("{name} must be greater than zero"))?,
+    ))
 }
 
 async fn cleanup_history(
