@@ -1,0 +1,47 @@
+---
+title: pgtask
+description: A durable task and workflow engine for PostgreSQL.
+template: splash
+hero:
+  tagline: Run background tasks, schedules, and durable workflows with PostgreSQL as the only service you need.
+  actions:
+    - text: Your first task
+      link: /pgtask/start/first-task/
+      icon: right-arrow
+    - text: How it works
+      link: /pgtask/architecture/
+      variant: minimal
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+`pgtask` stores tasks in your database and runs them from your own processes. There is no broker, no coordinator, and no
+PostgreSQL extension.
+
+You enqueue a task in the same transaction that writes your application data. If the transaction rolls back, the task
+never existed. That single property removes most of the consistency problems that queues usually introduce.
+
+```python
+async with connection.transaction():
+    await create_report(connection, report_id)
+    await client.enqueue_in(connection, render.request({"report_id": report_id}))
+```
+
+<CardGrid>
+  <Card title="One dependency" icon="seti:db">
+    PostgreSQL owns every durable transition. Workers are ordinary processes you deploy and scale yourself.
+  </Card>
+  <Card title="Leases, not acknowledgements" icon="approve-check">
+    A worker holds a fenced lease while it runs your handler. If it disappears, the task returns automatically.
+  </Card>
+  <Card title="Durable workflows" icon="random">
+    Steps, sleeps, signals, and child tasks are database transitions, so a workflow survives a process restart.
+  </Card>
+  <Card title="One protocol, many languages" icon="setting">
+    Rust, Python, TypeScript, Go, and plain SQL speak the same versioned set of database functions.
+  </Card>
+</CardGrid>
+
+:::caution[Not ready for production]
+`pgtask` is under active development. The contracts described here are still changing.
+:::
