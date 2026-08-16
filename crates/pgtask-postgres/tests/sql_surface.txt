@@ -1,0 +1,239 @@
+schema pgtask
+  grants: pgtask_surface_administrator=U/{owner}, pgtask_surface_observer=U/{owner}, pgtask_surface_producer=U/{owner}, pgtask_surface_worker=U/{owner}, {owner}=UC/{owner}
+
+function admin_cancel_task(p_task_id uuid, p_actor text) -> boolean VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, {owner}=X/{owner}
+
+function admin_retry_task(p_task_id uuid, p_actor text) -> boolean VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, {owner}=X/{owner}
+
+function admin_set_schedule_paused(p_schedule_id uuid, p_paused boolean, p_actor text) -> boolean VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, {owner}=X/{owner}
+
+function cancel_owned_children() -> trigger VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: {owner}=X/{owner}
+
+function cancel_task(p_task_id uuid) -> TABLE(queue_name text, task_name text) VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, {owner}=X/{owner}
+
+function claim(p_queue_name text, p_worker_id uuid, p_task_names text[], p_handler_versions integer[], p_limit integer, p_lease_milliseconds bigint) -> SETOF pgtask.tasks VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function claim_due_schedules(p_limit integer) -> SETOF pgtask.schedules VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function commit_checkpoint(p_task_id uuid, p_attempt integer, p_lease_token uuid, p_step_name text, p_occurrence integer, p_value jsonb) -> SETOF pgtask.checkpoints VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function complete_task(p_task_id uuid, p_attempt integer, p_lease_token uuid, p_result jsonb) -> boolean VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function configure_grants(p_owner regrole, p_producer regrole, p_worker regrole, p_observer regrole, p_administrator regrole) -> void VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: {owner}=X/{owner}
+
+function delete_expired_idempotency_keys(p_queue_name text, p_limit integer) -> bigint VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function delete_expired_terminal(p_queue_name text, p_limit integer) -> bigint VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function delete_schedule(p_id uuid) -> boolean VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, {owner}=X/{owner}
+
+function emit_signal(p_task_id uuid, p_signal_name text, p_occurrence integer, p_value jsonb) -> SETOF pgtask.signals VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_producer=X/{owner}, {owner}=X/{owner}
+
+function enforce_queue_capacity() -> trigger VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: {owner}=X/{owner}
+
+function enqueue(p_task_name text, p_payload jsonb, p_queue_name text, p_handler_version integer, p_run_at timestamp with time zone, p_priority smallint, p_max_attempts integer, p_idempotency_key text, p_headers jsonb) -> TABLE(task_id uuid, created boolean) VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_producer=X/{owner}, {owner}=X/{owner}
+
+function enqueue_many(p_tasks jsonb) -> TABLE(request_index bigint, task_id uuid, created boolean) VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_producer=X/{owner}, {owner}=X/{owner}
+
+function ensure_queue_for_task() -> trigger VOLATILE
+  grants: {owner}=X/{owner}
+
+function fail_task(p_task_id uuid, p_attempt integer, p_lease_token uuid, p_error jsonb, p_retry_milliseconds bigint) -> text VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function get_checkpoint(p_task_id uuid, p_handler_version integer, p_step_name text, p_occurrence integer) -> SETOF pgtask.checkpoints STABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function get_schedule(p_id uuid) -> SETOF pgtask.schedules STABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, {owner}=X/{owner}
+
+function get_task(p_task_id uuid) -> SETOF pgtask.tasks STABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function heartbeat_worker(p_worker_id uuid, p_ttl_milliseconds bigint, p_draining boolean) -> boolean VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function manage_idempotency_key() -> trigger VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: {owner}=X/{owner}
+
+function materialize_schedule(p_id uuid, p_expected_next_run_at timestamp with time zone, p_occurrences timestamp with time zone[], p_next_run_at timestamp with time zone) -> bigint VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function next_schedule_delay_milliseconds() -> bigint STABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function next_task_delay_milliseconds(p_queue_name text, p_task_names text[], p_handler_versions integer[]) -> bigint STABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function next_wait_delay_milliseconds() -> bigint STABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function notify_ready_shard() -> trigger VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: {owner}=X/{owner}
+
+function notify_result_shard() -> trigger VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: {owner}=X/{owner}
+
+function notify_resumed_queue_shard() -> trigger VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: {owner}=X/{owner}
+
+function preserve_deleted_idempotency_key() -> trigger VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: {owner}=X/{owner}
+
+function put_queue(p_name text, p_terminal_retention_seconds bigint, p_idempotency_retention_seconds bigint, p_max_outstanding_tasks bigint, p_starvation_timeout_seconds bigint) -> SETOF pgtask.queues VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, {owner}=X/{owner}
+
+function put_schedule(p_id uuid, p_name text, p_kind text, p_interval_milliseconds bigint, p_cron_expression text, p_misfire_policy text, p_catch_up_limit integer, p_queue_name text, p_task_name text, p_handler_version integer, p_payload jsonb, p_headers jsonb, p_priority smallint, p_max_attempts integer, p_next_run_at timestamp with time zone) -> SETOF pgtask.schedules VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function queue_demand(p_queue_name text, p_task_names text[], p_handler_versions integer[]) -> TABLE(ready_tasks bigint, capable_tasks bigint, unroutable_tasks bigint) STABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function ready_channel(p_queue_name text) -> text IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function recover_expired(p_queue_name text, p_limit integer) -> bigint VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function recover_result_wait_timeouts(p_limit integer) -> bigint VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function recover_wait_timeouts(p_limit integer) -> bigint VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function register_worker(p_worker_id uuid, p_queue_name text, p_version text, p_task_names text[], p_handler_versions integer[], p_retry_kinds text[], p_retry_base_delay_milliseconds bigint[], p_retry_factors integer[], p_retry_max_delay_milliseconds bigint[], p_ttl_milliseconds bigint) -> void VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function renew_leases(p_task_ids uuid[], p_attempts integer[], p_lease_tokens uuid[], p_lease_milliseconds bigint) -> SETOF uuid VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function resolve_task_result() -> trigger VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: {owner}=X/{owner}
+
+function result_channel(p_task_id uuid) -> text IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_producer=X/{owner}, {owner}=X/{owner}
+
+function set_queue_paused(p_name text, p_paused boolean) -> SETOF pgtask.queues VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, {owner}=X/{owner}
+
+function set_schedule_paused(p_id uuid, p_paused boolean) -> SETOF pgtask.schedules VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, {owner}=X/{owner}
+
+function snapshot_task_retry_policy() -> trigger VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: {owner}=X/{owner}
+
+function spawn_task(p_parent_task_id uuid, p_parent_attempt integer, p_parent_lease_token uuid, p_step_name text, p_occurrence integer, p_task_name text, p_payload jsonb, p_queue_name text, p_handler_version integer, p_run_at timestamp with time zone, p_priority smallint, p_max_attempts integer, p_headers jsonb) -> TABLE(task_id uuid, created boolean) VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function storage_protocol_range() -> TABLE(minimum integer, maximum integer) IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_observer=X/{owner}, pgtask_surface_producer=X/{owner}, pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function storage_protocol_version() -> integer IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function suspend_task(p_task_id uuid, p_attempt integer, p_lease_token uuid, p_step_name text, p_occurrence integer, p_wake_at timestamp with time zone, p_delay_milliseconds bigint) -> timestamp with time zone VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function task_result(p_task_id uuid) -> TABLE(state text, result jsonb, error jsonb, completed_at timestamp with time zone) STABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_producer=X/{owner}, {owner}=X/{owner}
+
+function wait_for_result(p_task_id uuid, p_attempt integer, p_lease_token uuid, p_step_name text, p_occurrence integer, p_result_task_id uuid, p_timeout_milliseconds bigint) -> TABLE(status text, checkpoint jsonb) VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function wait_for_signal(p_task_id uuid, p_attempt integer, p_lease_token uuid, p_step_name text, p_occurrence integer, p_signal_name text, p_signal_occurrence integer, p_timeout_milliseconds bigint) -> TABLE(status text, checkpoint jsonb) VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+table administrator_audit
+  grants: {owner}=arwdDxtm/{owner}
+
+table attempts
+  grants: {owner}=arwdDxtm/{owner}
+
+table checkpoints
+  grants: {owner}=arwdDxtm/{owner}
+
+table handler_policies
+  grants: {owner}=arwdDxtm/{owner}
+
+table idempotency_keys
+  grants: {owner}=arwdDxtm/{owner}
+
+table queues
+  grants: {owner}=arwdDxtm/{owner}
+
+table result_waits
+  grants: {owner}=arwdDxtm/{owner}
+
+table schedules
+  grants: {owner}=arwdDxtm/{owner}
+
+table signals
+  grants: {owner}=arwdDxtm/{owner}
+
+table tasks
+  grants: {owner}=arwdDxtm/{owner}
+
+table waits
+  grants: {owner}=arwdDxtm/{owner}
+
+table worker_capabilities
+  grants: {owner}=arwdDxtm/{owner}
+
+table workers
+  grants: {owner}=arwdDxtm/{owner}
+
+view administrator_audit_view(id bigint, actor text, action text, task_id uuid, schedule_id uuid, occurred_at timestamp with time zone)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view attempt_view(task_id uuid, attempt integer, lease_token uuid, worker_id uuid, state text, started_at timestamp with time zone, finished_at timestamp with time zone, error jsonb)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view checkpoint_view(task_id uuid, handler_version integer, step_name text, occurrence integer, value jsonb, created_at timestamp with time zone)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view handler_policy_view(queue_name text, task_name text, handler_version integer, retry_kind text, retry_base_delay_milliseconds bigint, retry_factor integer, retry_max_delay_milliseconds bigint, created_at timestamp with time zone)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view queue_overview(name text, terminal_retention_seconds bigint, paused_at timestamp with time zone, created_at timestamp with time zone, updated_at timestamp with time zone, pending_count bigint, running_count bigint, waiting_count bigint, terminal_count bigint, ready_count bigint, routable_count bigint, unroutable_count bigint, idempotency_retention_seconds bigint, max_outstanding_tasks bigint, starvation_timeout_seconds bigint, outstanding_count bigint)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view result_wait_view(task_id uuid, handler_version integer, step_name text, occurrence integer, result_task_id uuid, created_at timestamp with time zone, resolved_at timestamp with time zone, outcome text, timeout_at timestamp with time zone)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view schedule_occurrence_view(schedule_id uuid, scheduled_for timestamp with time zone, task_id uuid, state text, created_at timestamp with time zone, completed_at timestamp with time zone)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view schedule_view(id uuid, name text, kind text, interval_milliseconds bigint, cron_expression text, misfire_policy text, catch_up_limit integer, queue_name text, task_name text, handler_version integer, payload jsonb, headers jsonb, priority smallint, max_attempts integer, next_run_at timestamp with time zone, paused_at timestamp with time zone, created_at timestamp with time zone, updated_at timestamp with time zone)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view signal_view(task_id uuid, signal_name text, occurrence integer, value jsonb, created_at timestamp with time zone)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view task_view(id uuid, queue_name text, task_name text, handler_version integer, payload jsonb, headers jsonb, state text, priority smallint, run_at timestamp with time zone, attempt integer, max_attempts integer, lease_token uuid, lease_owner uuid, lease_expires_at timestamp with time zone, cancel_requested_at timestamp with time zone, idempotency_key text, created_at timestamp with time zone, updated_at timestamp with time zone, completed_at timestamp with time zone, result jsonb, error jsonb, schedule_id uuid, scheduled_for timestamp with time zone, parent_task_id uuid, retry_kind text, retry_base_delay_milliseconds bigint, retry_factor integer, retry_max_delay_milliseconds bigint)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view wait_view(task_id uuid, handler_version integer, step_name text, occurrence integer, signal_name text, signal_occurrence integer, timeout_at timestamp with time zone, created_at timestamp with time zone, resolved_at timestamp with time zone, outcome text)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view worker_capability_view(worker_id uuid, task_name text, handler_version integer)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
+
+view worker_view(id uuid, queue_name text, version text, draining boolean, started_at timestamp with time zone, heartbeat_at timestamp with time zone, expires_at timestamp with time zone, live boolean)
+  grants: pgtask_surface_administrator=r/{owner}, pgtask_surface_observer=r/{owner}, {owner}=arwdDxtm/{owner}
