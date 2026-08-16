@@ -225,8 +225,22 @@ class Client:
         self._native = native
 
     @classmethod
-    async def connect(cls, database_url: str) -> Client:
-        return cls(await _native.Client.connect(database_url))
+    async def connect(
+        cls,
+        database_url: str,
+        *,
+        listener_url: str | None = None,
+        max_query_connections: int = 10,
+        max_listener_connections: int = 1,
+    ) -> Client:
+        return cls(
+            await _native.Client.connect(
+                database_url,
+                listener_url=listener_url,
+                max_query_connections=max_query_connections,
+                max_listener_connections=max_listener_connections,
+            )
+        )
 
     async def migrate(self) -> None:
         await self._native.migrate()
@@ -292,14 +306,22 @@ class Worker:
         poll_interval: float = 30.0,
         lease_duration: float = 30.0,
         health_address: str | None = None,
+        listener_url: str | None = None,
+        max_query_connections: int = 10,
+        max_listener_connections: int = 1,
     ) -> None:
         self._native = _native.Worker(
             database_url,
             registry.queue_name,
-            concurrency,
-            poll_interval,
-            lease_duration,
-            health_address,
+            {
+                "concurrency": concurrency,
+                "poll_interval": poll_interval,
+                "lease_duration": lease_duration,
+                "health_address": health_address,
+                "listener_url": listener_url,
+                "max_query_connections": max_query_connections,
+                "max_listener_connections": max_listener_connections,
+            },
         )
         for definition in registry.definitions:
 

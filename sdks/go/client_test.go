@@ -56,6 +56,18 @@ func (errorRow) Scan(...any) error {
 	return errors.New("database unavailable")
 }
 
+type cancelAfterQuery struct {
+	cancel context.CancelFunc
+}
+
+func (cancelAfterQuery) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	return ctx
+}
+
+func (tracer cancelAfterQuery) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
+	tracer.cancel()
+}
+
 func TestTaskDefinitions(t *testing.T) {
 	t.Parallel()
 	invalid := []struct {
@@ -136,6 +148,8 @@ func TestClient(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 	client := pgtask.NewClient(pool)
+	separateClient := pgtask.NewClientWithListener(pool, pool)
+	separateClient.Close()
 	client.Close()
 	if err := pool.Ping(ctx); err != nil {
 		t.Fatal(err)
@@ -209,8 +223,15 @@ func TestClient(t *testing.T) {
 		resultChannel <- result
 		errorChannel <- err
 	}()
+	var unrelatedChannel string
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT pgtask.result_channel('00000000-0000-0000-0000-000000000000'::uuid)",
+	).Scan(&unrelatedChannel); err != nil {
+		t.Fatal(err)
+	}
 	for range 5 {
-		if _, err := pool.Exec(ctx, "SELECT pg_notify('pgtask_result', '00000000-0000-0000-0000-000000000000')"); err != nil {
+		if _, err := pool.Exec(ctx, "SELECT pg_notify($1, $2)", unrelatedChannel, "00000000-0000-0000-0000-000000000000"); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -293,6 +314,9 @@ func TestClient(t *testing.T) {
 
 func TestClientErrors(t *testing.T) {
 	ctx := context.Background()
+	if _, err := pgtask.ConnectWithConfig(ctx, pgtask.ConnectConfig{DatabaseURL: "://", MaxQueryConnections: -1}); err == nil {
+		t.Fatal("expected connection limit error")
+	}
 	if _, err := pgtask.Connect(ctx, "://"); err == nil {
 		t.Fatal("expected configuration error")
 	}
@@ -302,9 +326,31 @@ func TestClientErrors(t *testing.T) {
 		t.Fatal("expected connection error")
 	}
 	databaseURL := os.Getenv("PGTASK_DATABASE_URL")
-	client, err := pgtask.Connect(ctx, databaseURL)
+	if _, err := pgtask.ConnectWithConfig(ctx, pgtask.ConnectConfig{
+		DatabaseURL: databaseURL,
+		ListenerURL: "://",
+	}); err == nil {
+		t.Fatal("expected listener configuration error")
+	}
+	listenerContext, cancelListener := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancelListener()
+	if _, err := pgtask.ConnectWithConfig(listenerContext, pgtask.ConnectConfig{
+		DatabaseURL: databaseURL,
+		ListenerURL: "postgres://127.0.0.1:1/pgtask",
+	}); err == nil {
+		t.Fatal("expected listener connection error")
+	}
+	client, err := pgtask.ConnectWithConfig(ctx, pgtask.ConnectConfig{
+		DatabaseURL:            databaseURL,
+		ListenerURL:            databaseURL,
+		MaxQueryConnections:    2,
+		MaxListenerConnections: 1,
+	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := pgtask.Task[reportResult](client, "not-a-uuid").Result(ctx); err == nil {
+		t.Fatal("expected result channel error")
 	}
 	client.Close()
 	client.Close()
@@ -337,10 +383,7 @@ func TestClientErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	config.PrepareConn = func(context.Context, *pgx.Conn) (bool, error) {
-		cancelListen()
-		return true, nil
-	}
+	config.ConnConfig.Tracer = cancelAfterQuery{cancel: cancelListen}
 	listenPool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
 		t.Fatal(err)

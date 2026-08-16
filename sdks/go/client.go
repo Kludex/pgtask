@@ -15,32 +15,80 @@ import (
 
 // Client connects producer APIs to pgtask's PostgreSQL protocol.
 type Client struct {
-	pool  *pgxpool.Pool
-	owned bool
+	pool         *pgxpool.Pool
+	listenerPool *pgxpool.Pool
+	owned        bool
+}
+
+// ConnectConfig configures separate query and session-listener connection pools.
+type ConnectConfig struct {
+	DatabaseURL            string
+	ListenerURL            string
+	MaxQueryConnections    int32
+	MaxListenerConnections int32
 }
 
 // Connect creates and verifies a client-owned connection pool.
 func Connect(ctx context.Context, databaseURL string) (*Client, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
-	if err != nil {
-		return nil, fmt.Errorf("create PostgreSQL pool: %w", err)
+	return ConnectWithConfig(ctx, ConnectConfig{DatabaseURL: databaseURL})
+}
+
+// ConnectWithConfig creates query and listener pools with explicit connection budgets.
+func ConnectWithConfig(ctx context.Context, config ConnectConfig) (*Client, error) {
+	if config.ListenerURL == "" {
+		config.ListenerURL = config.DatabaseURL
 	}
+	if config.MaxQueryConnections == 0 {
+		config.MaxQueryConnections = 10
+	}
+	if config.MaxListenerConnections == 0 {
+		config.MaxListenerConnections = 4
+	}
+	if config.MaxQueryConnections < 1 || config.MaxListenerConnections < 1 {
+		return nil, errors.New("PostgreSQL connection limits must be positive")
+	}
+	poolConfig, err := pgxpool.ParseConfig(config.DatabaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse PostgreSQL query pool: %w", err)
+	}
+	poolConfig.MaxConns = config.MaxQueryConnections
+	// A positive MaxConns is the constructor's only error invariant.
+	pool, _ := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("connect to PostgreSQL: %w", err)
+		return nil, fmt.Errorf("connect PostgreSQL query pool: %w", err)
 	}
-	return &Client{pool: pool, owned: true}, nil
+	listenerConfig, err := pgxpool.ParseConfig(config.ListenerURL)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("parse PostgreSQL listener pool: %w", err)
+	}
+	listenerConfig.MaxConns = config.MaxListenerConnections
+	// A positive MaxConns is the constructor's only error invariant.
+	listenerPool, _ := pgxpool.NewWithConfig(ctx, listenerConfig)
+	if err := listenerPool.Ping(ctx); err != nil {
+		listenerPool.Close()
+		pool.Close()
+		return nil, fmt.Errorf("connect PostgreSQL listener pool: %w", err)
+	}
+	return &Client{pool: pool, listenerPool: listenerPool, owned: true}, nil
 }
 
 // NewClient uses an existing pool without taking ownership of it.
 func NewClient(pool *pgxpool.Pool) *Client {
-	return &Client{pool: pool}
+	return NewClientWithListener(pool, pool)
+}
+
+// NewClientWithListener uses separate existing query and listener pools without taking ownership.
+func NewClientWithListener(pool *pgxpool.Pool, listenerPool *pgxpool.Pool) *Client {
+	return &Client{pool: pool, listenerPool: listenerPool}
 }
 
 // Close closes a pool created by Connect.
 func (client *Client) Close() {
 	if client.owned {
 		client.pool.Close()
+		client.listenerPool.Close()
 	}
 }
 
@@ -70,16 +118,20 @@ func (handle TaskHandle[Result]) Inspect(ctx context.Context) (*TaskResult[Resul
 
 // Result waits for completion using PostgreSQL LISTEN notifications.
 func (handle TaskHandle[Result]) Result(ctx context.Context) (*TaskResult[Result], error) {
-	connection, err := handle.client.pool.Acquire(ctx)
+	connection, err := handle.client.listenerPool.Acquire(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire result listener: %w", err)
 	}
 	defer connection.Release()
-	if _, err := connection.Exec(ctx, "LISTEN pgtask_result"); err != nil {
+	var channel string
+	if err := connection.QueryRow(ctx, "SELECT pgtask.result_channel($1::uuid)", handle.ID).Scan(&channel); err != nil {
+		return nil, fmt.Errorf("resolve task result channel: %w", err)
+	}
+	if _, err := connection.Exec(ctx, "LISTEN "+pgx.Identifier{channel}.Sanitize()); err != nil {
 		return nil, fmt.Errorf("listen for task result: %w", err)
 	}
 	defer func() {
-		_, _ = connection.Exec(context.Background(), "UNLISTEN pgtask_result")
+		_, _ = connection.Exec(context.Background(), "UNLISTEN *")
 	}()
 	for {
 		result, err := readTaskResult[Result](ctx, connection, handle.ID)
@@ -91,7 +143,7 @@ func (handle TaskHandle[Result]) Result(ctx context.Context) (*TaskResult[Result
 			if err != nil {
 				return nil, fmt.Errorf("wait for task result: %w", err)
 			}
-			if notification.Channel == "pgtask_result" && notification.Payload == handle.ID {
+			if notification.Channel == channel && notification.Payload == handle.ID {
 				break
 			}
 		}

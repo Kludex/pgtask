@@ -6,9 +6,9 @@ use pgtask_core::{
     EnqueueRequest, HandlerVersion, LeaseRenewal, QueueConfig, QueueName, STORAGE_PROTOCOL_VERSION, StepName, TaskName,
     TaskState, WorkerId,
 };
-use pgtask_postgres::{PostgresError, Store};
+use pgtask_postgres::{PostgresError, Store, StoreConfig};
 use serde_json::json;
-use sqlx::Acquire;
+use sqlx::{Acquire, postgres::PgPoolOptions};
 use tokio::sync::Barrier;
 use uuid::Uuid;
 
@@ -63,6 +63,73 @@ async fn reports_the_supported_storage_protocol() {
         store.storage_protocol_version().await.unwrap(),
         STORAGE_PROTOCOL_VERSION
     );
+}
+
+#[tokio::test]
+async fn query_and_listener_connections_have_independent_endpoints_and_budgets() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect_with_config(
+        &StoreConfig::new(&database_url)
+            .with_query_connections(NonZeroU32::MIN)
+            .with_listener_connections(NonZeroU32::MIN),
+    )
+    .await
+    .unwrap();
+    assert_eq!(store.pool().options().get_max_connections(), 1);
+    store.health().await.unwrap();
+
+    assert!(
+        Store::connect_with_config(&StoreConfig::new(&database_url).with_listener_url("://"))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn queue_subscriptions_share_one_listener_and_filter_payloads() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let query_pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let listener_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let store = Store::from_pools(query_pool, listener_pool);
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let first_queue = QueueName::new(format!("ready-first-{suffix}")).unwrap();
+    let second_queue = QueueName::new(format!("ready-second-{suffix}")).unwrap();
+    let mut first_listener = store.ready_listener(&first_queue).await.unwrap();
+    let mut second_listener = tokio::time::timeout(Duration::from_secs(1), store.ready_listener(&second_queue))
+        .await
+        .expect("a shared listener does not need a second database connection")
+        .unwrap();
+
+    let mut first_request = EnqueueRequest::new(TaskName::new("ready-first").unwrap(), json!({}));
+    first_request.queue_name = first_queue.clone();
+    let mut second_request = EnqueueRequest::new(TaskName::new("ready-second").unwrap(), json!({}));
+    second_request.queue_name = second_queue.clone();
+    store.enqueue(&second_request).await.unwrap();
+    store.enqueue(&first_request).await.unwrap();
+
+    let first_notification = tokio::time::timeout(Duration::from_secs(1), first_listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second_notification = tokio::time::timeout(Duration::from_secs(1), second_listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_notification.payload(), first_queue.as_str());
+    assert_eq!(second_notification.payload(), second_queue.as_str());
 }
 
 #[tokio::test]
@@ -1125,6 +1192,12 @@ async fn runtime_roles_only_receive_their_protocol_capabilities() {
             .fetch_one(&mut *producer)
             .await
             .unwrap();
+    let result_channel: String = sqlx::query_scalar("SELECT pgtask.result_channel($1)")
+        .bind(task_id)
+        .fetch_one(&mut *producer)
+        .await
+        .unwrap();
+    assert!(result_channel.starts_with("pgtask_result_"));
     let error = sqlx::query("SELECT count(*) FROM pgtask.tasks")
         .execute(&mut *producer)
         .await
@@ -1143,6 +1216,12 @@ async fn runtime_roles_only_receive_their_protocol_capabilities() {
         .await
         .unwrap();
     assert_eq!(storage_protocol, i32::try_from(STORAGE_PROTOCOL_VERSION).unwrap());
+    let ready_channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
+        .bind(&queue_name)
+        .fetch_one(&mut *worker)
+        .await
+        .unwrap();
+    assert!(ready_channel.starts_with("pgtask_ready_"));
     let claimed_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM pgtask.claim($1, gen_random_uuid(), ARRAY['role-task'], ARRAY[1], 1, 30000)",
     )

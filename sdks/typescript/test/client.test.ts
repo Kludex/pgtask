@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 
 import { propagation, type TextMapPropagator } from "@opentelemetry/api";
@@ -88,9 +89,12 @@ test("client operations use PostgreSQL transactions, notifications, and trace pr
   propagation.disable();
   assert.equal(propagation.setGlobalPropagator(propagator), true);
   const pool = new Pool({ connectionString: databaseUrl });
-  const client = Client.fromPool(pool);
+  const listenerPool = new Pool({ connectionString: databaseUrl, max: 1 });
+  const client = Client.fromPool(pool, listenerPool);
   t.after(async () => {
     propagation.disable();
+    await client.close();
+    await listenerPool.end();
     await pool.end();
   });
   await client.close();
@@ -108,6 +112,12 @@ test("client operations use PostgreSQL transactions, notifications, and trace pr
   assert.equal(pending?.state, "pending");
   assert.equal(pending?.completedAt, null);
   assert.equal(await handle.result({ timeoutMs: 1 }), null);
+  const channel = await pool.query<{ channel: string }>(
+    "SELECT pgtask.result_channel($1) AS channel",
+    [handle.id],
+  );
+  await pool.query("SELECT pg_notify($1, $2)", [channel.rows[0]!.channel, randomUUID()]);
+  await new Promise((resolve) => setImmediate(resolve));
 
   const stored = await pool.query<{ headers: Record<string, JSONValue> }>(
     "SELECT headers FROM pgtask.task_view WHERE id = $1",
@@ -172,6 +182,18 @@ test("client operations use PostgreSQL transactions, notifications, and trace pr
   );
   await assert.rejects(client.task(first.taskId).result({ timeoutMs: -1 }), /timeoutMs/);
   await assert.rejects(client.task(first.taskId).result({ timeoutMs: Number.NaN }), /timeoutMs/);
+
+  const multiplexed = await Promise.all([
+    client.enqueue(definition.request({ reportId: "multiplexed-one" })),
+    client.enqueue(definition.request({ reportId: "multiplexed-two" })),
+  ]);
+  const multiplexedResults = multiplexed.map((task) => task.result({ timeoutMs: 2_000 }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(await Promise.all(multiplexed.map((task) => task.cancel())), [true, true]);
+  assert.deepEqual(
+    (await Promise.all(multiplexedResults)).map((result) => result?.state),
+    ["cancelled", "cancelled"],
+  );
 });
 
 test("owned clients close their pools and failed connections reject", async () => {
@@ -206,4 +228,68 @@ test("database boundary failures remain explicit", async () => {
   await assert.rejects(client.emitSignal(randomUUID(), "empty", null), /returned no result/);
   assert.equal(await client.cancel(randomUUID()), false);
   await client.close();
+
+  for (const rows of [[], [{ channel: "invalid" }]]) {
+    const invalidConnection = {
+      async query(sql: string): Promise<QueryResult> {
+        return {
+          rows: sql.startsWith("SELECT pgtask.result_channel") ? rows : [],
+          rowCount: 0,
+          command: "SELECT",
+          oid: 0,
+          fields: [],
+        };
+      },
+      on() {},
+      off() {},
+      release() {},
+    };
+    const invalidChannelPool = {
+      query: invalidConnection.query,
+      async connect() {
+        return invalidConnection;
+      },
+    } as unknown as Pool;
+    await assert.rejects(
+      Client.fromPool(invalidChannelPool).waitResult(randomUUID()),
+      /invalid channel/,
+    );
+  }
+
+  const connection = new EventEmitter() as EventEmitter & {
+    query(sql: string): Promise<QueryResult>;
+    release(error?: Error): void;
+  };
+  connection.query = async () => ({
+    rows: [],
+    rowCount: 0,
+    command: "LISTEN",
+    oid: 0,
+    fields: [],
+  });
+  connection.release = () => {};
+  const pendingPool = {
+    async query(sql: string): Promise<QueryResult> {
+      return {
+        rows: sql.startsWith("SELECT pgtask.result_channel")
+          ? [{ channel: "pgtask_result_00" }]
+          : [{ state: "pending", result: null, error: null, completed_at: null }],
+        rowCount: 1,
+        command: "SELECT",
+        oid: 0,
+        fields: [],
+      };
+    },
+  } as unknown as Pool;
+  const listenerPool = {
+    async connect() {
+      return connection;
+    },
+  } as unknown as Pool;
+  const disconnected = Client.fromPool(pendingPool, listenerPool);
+  const waiting = disconnected.waitResult(randomUUID());
+  await new Promise((resolve) => setImmediate(resolve));
+  connection.emit("error", new Error("listener disconnected"));
+  await assert.rejects(waiting, /listener disconnected/);
+  await disconnected.close();
 });

@@ -55,8 +55,8 @@ Python API with the native Rust worker and storage implementation.
 
 ## Task execution
 
-1. A producer calls `pgtask.enqueue`. The function inserts a `pending` task and sends a `pgtask_ready` notification.
-   Both actions commit with the producer's transaction.
+1. A producer calls `pgtask.enqueue`. The function inserts a `pending` task and notifies one of 64 deterministic
+   `pgtask_ready_*` channels. Both actions commit with the producer's transaction.
 2. A worker listening for notifications wakes and calls `pgtask.claim` for one logical queue. The claim uses
    `FOR NO KEY UPDATE ... SKIP LOCKED`, filters by the worker's registered task names and handler versions, creates an
    attempt, and assigns a lease token.
@@ -125,9 +125,15 @@ Each worker serves one logical queue and advertises its registered `(task_name, 
 scale execution by adding workers or increasing per-worker concurrency. You isolate workloads that need different
 scaling, resources, or concurrency by assigning them to separate queues.
 
-Workers use an ordinary connection pool for short state transitions and a session-capable connection for `LISTEN`.
-Transaction-pooling proxies cannot provide the listener connection. PostgreSQL remains the only component required for
-correctness, so queue traffic, retention, and application queries share its capacity.
+Workers use an ordinary connection pool for short state transitions and a separate session-capable endpoint for
+`LISTEN`. One listener connection multiplexes the queue, scheduler, wait, and result channels used by a process.
+Transaction-pooling proxies cannot provide this listener connection. Configure a direct PostgreSQL endpoint or a
+PgBouncer session pool for it. PostgreSQL remains the only component required for correctness, so queue traffic,
+retention, and application queries share its capacity.
+
+Ready and result notifications use 64 deterministic shards each. A queue runtime only receives its queue payload. A
+result waiter only receives its task payload. Notifications remain hints: every wake-up is followed by a state read,
+and bounded reconciliation polling covers disconnects and missed notifications.
 
 See [Failure model](failure-model.md) for recovery behavior and [Operations](operations.md) for production roles,
 retention, draining, health checks, and incident response.

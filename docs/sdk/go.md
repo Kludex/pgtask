@@ -62,9 +62,12 @@ func main() {
 Install the producer client with `go get github.com/Kludex/pgtask/sdks/go`. Run migrations with the `pgtask` CLI before
 enqueueing. The Rust and Python runtimes execute handlers. The Go package is a typed producer and result client.
 
-`TaskHandle.Result()` uses a dedicated PostgreSQL session. It commits `LISTEN pgtask_result` before reading task state.
+`TaskHandle.Result()` uses a dedicated PostgreSQL session. It subscribes to a deterministic result shard before reading task state.
 This ordering prevents a completion from being lost between subscription and inspection. A transaction-pooling proxy
 cannot provide this session.
+
+Use `ConnectWithConfig` to set a separate `ListenerURL`, `MaxQueryConnections`, and `MaxListenerConnections`. The
+listener URL defaults to the query URL. Use a direct PostgreSQL endpoint or a PgBouncer session pool for listeners.
 
 ## Enqueue in a transaction
 

@@ -4,10 +4,70 @@ use pgtask_core::{EnqueueRequest, HandlerVersion, QueueName, StepName, TaskId, T
 use pgtask_postgres::{PostgresError, ResultWait, ResultWaitRequest, Store, TaskResultWait};
 use serde_json::json;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use tokio::time::timeout;
 use uuid::Uuid;
 
 fn database_url() -> Option<String> {
     std::env::var("PGTASK_DATABASE_URL").ok()
+}
+
+#[tokio::test]
+async fn result_waiters_share_one_listener_connection() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let query_pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let listener_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .unwrap();
+    let store = Store::from_pools(query_pool, listener_pool);
+    store.migrate().await.unwrap();
+
+    let first = store
+        .enqueue(&EnqueueRequest::new(
+            TaskName::new("result-multiplex-first").unwrap(),
+            json!({}),
+        ))
+        .await
+        .unwrap()
+        .task_id;
+    let second = store
+        .enqueue(&EnqueueRequest::new(
+            TaskName::new("result-multiplex-second").unwrap(),
+            json!({}),
+        ))
+        .await
+        .unwrap()
+        .task_id;
+    let mut first_listener = store.result_listener(first).await.unwrap();
+    let mut second_listener = timeout(Duration::from_secs(1), store.result_listener(second))
+        .await
+        .expect("a shared listener does not need a second database connection")
+        .unwrap();
+
+    sqlx::query("UPDATE pgtask.tasks SET state = 'cancelled', completed_at = statement_timestamp() WHERE id = ANY($1)")
+        .bind([first.as_uuid(), second.as_uuid()])
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let first_notification = timeout(Duration::from_secs(1), first_listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second_notification = timeout(Duration::from_secs(1), second_listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_notification.payload(), first.to_string());
+    assert_eq!(second_notification.payload(), second.to_string());
+    assert!(first_notification.channel().starts_with("pgtask_result_"));
+    assert!(second_notification.channel().starts_with("pgtask_result_"));
 }
 
 #[tokio::test]
@@ -381,8 +441,8 @@ async fn external_result_wait_reports_timeout_and_absence() {
         .execute(store.pool())
         .await
         .unwrap();
-    sqlx::query("SELECT pg_notify('pgtask_result', $1)")
-        .bind(disappeared_id.to_string())
+    sqlx::query("SELECT pg_notify(pgtask.result_channel($1), $1::text)")
+        .bind(disappeared_id.as_uuid())
         .execute(store.pool())
         .await
         .unwrap();

@@ -17,7 +17,9 @@ const render = defineTask<RenderRequest, RenderResult>("reports.render", {
   queueName: "reports",
 });
 
-const client = await Client.connect(process.env.PGTASK_DATABASE_URL!);
+const client = await Client.connect(process.env.PGTASK_DATABASE_URL!, {
+  listenerConnectionString: process.env.PGTASK_LISTENER_DATABASE_URL,
+});
 try {
   const task = await client.enqueue(
     render.request(
@@ -41,9 +43,10 @@ try {
 Install the producer client with `npm install @pgtask/client`. Run migrations with the `pgtask` CLI before enqueueing.
 The Rust and Python runtimes execute handlers. The TypeScript package is a typed producer and result client.
 
-`task.result()` uses a dedicated PostgreSQL session. It commits `LISTEN pgtask_result` before reading task state. This
-ordering prevents a completion from being lost between subscription and inspection. A transaction-pooling proxy cannot
-provide this session.
+`task.result()` subscribes to the task's deterministic result channel before reading task state. One dedicated
+PostgreSQL session multiplexes every result wait owned by the client. This ordering prevents a completion from being
+lost between subscription and inspection. A transaction-pooling proxy cannot provide this session. Pass
+`listenerConnectionString` when the query URL uses transaction pooling.
 
 ## Enqueue in a transaction
 

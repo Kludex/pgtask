@@ -12,7 +12,7 @@ use pgtask::{
         EnqueueRequest, HandlerVersion, QueueName, RetryPolicy, SignalName, StepName, Task, TaskId, TaskName,
         TaskResult,
     },
-    postgres::{Store, TaskResultWait},
+    postgres::{Store, StoreConfig, TaskResultWait},
     worker::{HandlerError, HandlerRegistry, TaskContext, Worker, WorkerConfig},
 };
 use pyo3::{
@@ -22,6 +22,7 @@ use pyo3::{
     types::{PyAny, PyDict, PyModule},
 };
 use pythonize::{depythonize, pythonize};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -31,7 +32,7 @@ create_exception!(_native, TaskSuspended, PyException);
 
 #[pyclass(name = "Client")]
 struct PythonClient {
-    database_url: String,
+    config: StoreConfig,
     store: Store,
 }
 
@@ -46,13 +47,24 @@ struct PythonHandler {
 #[pyclass(name = "Worker")]
 struct PythonWorker {
     concurrency: NonZeroU16,
-    database_url: String,
+    config: StoreConfig,
     handlers: Mutex<Vec<PythonHandler>>,
     lease_duration: Duration,
     poll_interval: Duration,
     health_address: Option<SocketAddr>,
     queue_name: QueueName,
     shutdown: CancellationToken,
+}
+
+#[derive(Deserialize)]
+struct PythonWorkerOptions {
+    concurrency: u16,
+    poll_interval: f64,
+    lease_duration: f64,
+    health_address: Option<String>,
+    listener_url: Option<String>,
+    max_query_connections: u32,
+    max_listener_connections: u32,
 }
 
 struct PythonFutureGuard {
@@ -75,15 +87,28 @@ impl Drop for PythonFutureGuard {
 #[pymethods]
 impl PythonClient {
     #[staticmethod]
-    fn connect(py: Python<'_>, database_url: String) -> PyResult<Bound<'_, PyAny>> {
+    #[pyo3(signature = (database_url, *, listener_url=None, max_query_connections=10, max_listener_connections=1))]
+    fn connect(
+        py: Python<'_>,
+        database_url: String,
+        listener_url: Option<String>,
+        max_query_connections: u32,
+        max_listener_connections: u32,
+    ) -> PyResult<Bound<'_, PyAny>> {
+        let config = store_config(
+            database_url,
+            listener_url,
+            max_query_connections,
+            max_listener_connections,
+        )?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let store = Store::connect(&database_url).await.map_err(runtime_error)?;
-            Ok(Self { database_url, store })
+            let store = Store::connect_with_config(&config).await.map_err(runtime_error)?;
+            Ok(Self { config, store })
         })
     }
 
     fn migrate<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let database_url = self.database_url.clone();
+        let config = self.config.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             tokio::task::spawn_blocking(move || {
                 tokio::runtime::Builder::new_current_thread()
@@ -91,7 +116,7 @@ impl PythonClient {
                     .build()
                     .map_err(runtime_error)?
                     .block_on(async move {
-                        let store = Store::connect(&database_url).await.map_err(runtime_error)?;
+                        let store = Store::connect_with_config(&config).await.map_err(runtime_error)?;
                         store.migrate().await.map_err(runtime_error)
                     })
             })
@@ -295,30 +320,25 @@ impl PythonTaskContext {
 #[pymethods]
 impl PythonWorker {
     #[new]
-    #[pyo3(signature = (
-        database_url,
-        queue_name="default",
-        concurrency=100,
-        poll_interval=30.0,
-        lease_duration=30.0,
-        health_address=None
-    ))]
-    fn new(
-        database_url: String,
-        queue_name: &str,
-        concurrency: u16,
-        poll_interval: f64,
-        lease_duration: f64,
-        health_address: Option<&str>,
-    ) -> PyResult<Self> {
+    fn new(database_url: String, queue_name: &str, options: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let options: PythonWorkerOptions = depythonize(options).map_err(value_error)?;
         Ok(Self {
-            concurrency: NonZeroU16::new(concurrency)
+            concurrency: NonZeroU16::new(options.concurrency)
                 .ok_or_else(|| PyValueError::new_err("concurrency must be positive"))?,
-            database_url,
+            config: store_config(
+                database_url,
+                options.listener_url,
+                options.max_query_connections,
+                options.max_listener_connections,
+            )?,
             handlers: Mutex::new(Vec::new()),
-            lease_duration: Duration::try_from_secs_f64(lease_duration).map_err(value_error)?,
-            poll_interval: Duration::try_from_secs_f64(poll_interval).map_err(value_error)?,
-            health_address: health_address.map(str::parse).transpose().map_err(value_error)?,
+            lease_duration: Duration::try_from_secs_f64(options.lease_duration).map_err(value_error)?,
+            poll_interval: Duration::try_from_secs_f64(options.poll_interval).map_err(value_error)?,
+            health_address: options
+                .health_address
+                .map(|value| value.parse())
+                .transpose()
+                .map_err(value_error)?,
             queue_name: QueueName::new(queue_name).map_err(value_error)?,
             shutdown: CancellationToken::new(),
         })
@@ -362,7 +382,7 @@ impl PythonWorker {
             return Err(PyValueError::new_err("at least one handler must be registered"));
         }
         let locals = pyo3_async_runtimes::TaskLocals::with_running_loop(py)?.copy_context(py)?;
-        let database_url = self.database_url.clone();
+        let store_config = self.config.clone();
         let queue_name = self.queue_name.clone();
         let concurrency = self.concurrency;
         let lease_duration = self.lease_duration;
@@ -370,7 +390,7 @@ impl PythonWorker {
         let health_address = self.health_address;
         let shutdown = self.shutdown.clone();
         pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals.clone(), async move {
-            let store = Store::connect(&database_url).await.map_err(runtime_error)?;
+            let store = Store::connect_with_config(&store_config).await.map_err(runtime_error)?;
             let mut registry = HandlerRegistry::new();
             for handler in handlers {
                 let function = Arc::clone(&handler.function);
@@ -400,6 +420,27 @@ impl PythonWorker {
     fn shutdown(&self) {
         self.shutdown.cancel();
     }
+}
+
+fn store_config(
+    database_url: String,
+    listener_url: Option<String>,
+    max_query_connections: u32,
+    max_listener_connections: u32,
+) -> PyResult<StoreConfig> {
+    let mut config = StoreConfig::new(database_url)
+        .with_query_connections(
+            NonZeroU32::new(max_query_connections)
+                .ok_or_else(|| PyValueError::new_err("max_query_connections must be positive"))?,
+        )
+        .with_listener_connections(
+            NonZeroU32::new(max_listener_connections)
+                .ok_or_else(|| PyValueError::new_err("max_listener_connections must be positive"))?,
+        );
+    if let Some(listener_url) = listener_url {
+        config = config.with_listener_url(listener_url);
+    }
+    Ok(config)
 }
 
 async fn run_python_handler(

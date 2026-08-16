@@ -35,6 +35,7 @@ asyncio.run(
         os.environ["PGTASK_DATABASE_URL"],
         tasks,
         health_address=os.getenv("PGTASK_HEALTH_ADDRESS"),
+        listener_url=os.getenv("PGTASK_LISTENER_DATABASE_URL"),
     ).run()
 )
 ```
@@ -58,7 +59,10 @@ from worker import render
 
 
 async def main() -> None:
-    client = await Client.connect(os.environ["PGTASK_DATABASE_URL"])
+    client = await Client.connect(
+        os.environ["PGTASK_DATABASE_URL"],
+        listener_url=os.getenv("PGTASK_LISTENER_DATABASE_URL"),
+    )
     task = await client.enqueue(
         render.request(
             {"report_id": "report-123"},
@@ -75,7 +79,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`TaskHandle.result` establishes `LISTEN pgtask_result` before it reads task state. Completion cannot be lost between the subscription and the read. A timeout returns `None` without changing the task. The handle also exposes `inspect`, `signal`, and `cancel`.
+`TaskHandle.result` subscribes to the task's deterministic result channel before it reads task state. Completion cannot be lost between the subscription and the read. One Rust listener connection multiplexes all result waits. A timeout returns `None` without changing the task. The handle also exposes `inspect`, `signal`, and `cancel`.
+
+The query and listener endpoints default to the same URL. Set `listener_url` when queries use a transaction-pooling proxy. The listener endpoint must support PostgreSQL sessions. `max_query_connections` defaults to 10. `max_listener_connections` defaults to 1 because the Rust engine multiplexes subscriptions.
 
 The client injects the active Python OpenTelemetry context into task headers. The worker restores that context around the Python handler. Database cancellation cancels the Python coroutine and runs its `finally` blocks.
 

@@ -47,7 +47,12 @@ def test_public_python_contract() -> None:
         "handler_version",
         "retry_delay",
     )
-    assert tuple(inspect.signature(Client.connect).parameters) == ("database_url",)
+    assert tuple(inspect.signature(Client.connect).parameters) == (
+        "database_url",
+        "listener_url",
+        "max_query_connections",
+        "max_listener_connections",
+    )
     assert tuple(inspect.signature(Worker).parameters) == (
         "database_url",
         "registry",
@@ -55,6 +60,9 @@ def test_public_python_contract() -> None:
         "poll_interval",
         "lease_duration",
         "health_address",
+        "listener_url",
+        "max_query_connections",
+        "max_listener_connections",
     )
 
 
@@ -146,9 +154,17 @@ async def test_worker_configuration_rejects_invalid_values() -> None:
     database_url = os.environ["PGTASK_DATABASE_URL"]
     with pytest.raises(RuntimeError):
         await Client.connect("not-a-database-url")
+    with pytest.raises(RuntimeError):
+        await Client.connect(database_url, listener_url="not-a-database-url")
+    with pytest.raises(ValueError, match="max_query_connections must be positive"):
+        await Client.connect(database_url, max_query_connections=0)
+    with pytest.raises(ValueError, match="max_listener_connections must be positive"):
+        await Client.connect(database_url, max_listener_connections=0)
     empty = TaskRegistry()
     with pytest.raises(ValueError, match="concurrency must be positive"):
         Worker(database_url, empty, concurrency=0)
+    with pytest.raises(ValueError, match="max_listener_connections must be positive"):
+        Worker(database_url, empty, max_listener_connections=0)
     with pytest.raises(ValueError, match="queue name must not be empty"):
         Worker(database_url, TaskRegistry(""))
     with pytest.raises(ValueError):

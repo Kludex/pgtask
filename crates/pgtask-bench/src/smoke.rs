@@ -1,8 +1,13 @@
-use std::{error::Error, net::SocketAddr, num::NonZeroU16, time::Duration};
+use std::{
+    error::Error,
+    net::SocketAddr,
+    num::{NonZeroU16, NonZeroU32},
+    time::Duration,
+};
 
 use pgtask::{
     core::{EnqueueRequest, HandlerVersion, QueueName, RetryPolicy, TaskName, TaskState},
-    postgres::Store,
+    postgres::{Store, StoreConfig},
     worker::{HandlerRegistry, Worker, WorkerConfig},
 };
 use serde_json::json;
@@ -13,8 +18,14 @@ const TASK_NAME: &str = "pgtask.smoke";
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let command = std::env::args().nth(1).ok_or("expected worker or enqueue")?;
-    let database_url = std::env::var("PGTASK_DATABASE_URL")?;
-    let store = Store::connect(&database_url).await?;
+    let mut store_config = StoreConfig::new(std::env::var("PGTASK_DATABASE_URL")?);
+    if let Ok(listener_url) = std::env::var("PGTASK_LISTENER_DATABASE_URL") {
+        store_config = store_config.with_listener_url(listener_url);
+    }
+    store_config = store_config
+        .with_query_connections(environment_nonzero_u32("PGTASK_MAX_QUERY_CONNECTIONS", 10)?)
+        .with_listener_connections(environment_nonzero_u32("PGTASK_MAX_LISTENER_CONNECTIONS", 1)?);
+    let store = Store::connect_with_config(&store_config).await?;
     match command.as_str() {
         "worker" => run_worker(store).await,
         "enqueue" => enqueue_and_wait(store).await,
@@ -101,6 +112,15 @@ fn environment_u16(name: &str, default: u16) -> Result<u16, Box<dyn Error>> {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(error.into()),
     }
+}
+
+fn environment_nonzero_u32(name: &str, default: u32) -> Result<NonZeroU32, Box<dyn Error>> {
+    let value = match std::env::var(name) {
+        Ok(value) => value.parse()?,
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => return Err(error.into()),
+    };
+    NonZeroU32::new(value).ok_or_else(|| format!("{name} must be greater than zero").into())
 }
 
 fn environment_bool(name: &str, default: bool) -> Result<bool, Box<dyn Error>> {

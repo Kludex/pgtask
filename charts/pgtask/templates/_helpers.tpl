@@ -39,6 +39,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "pgtask.listenerDatabaseSecretName" -}}
+{{- if .Values.developmentPostgres.enabled -}}
+{{- printf "%s-postgres" (include "pgtask.fullname" .) -}}
+{{- else -}}
+{{- default (include "pgtask.databaseSecretName" .) .Values.database.listenerExistingSecret.name -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "pgtask.image" -}}
 {{- $root := index . 0 -}}
 {{- $image := index . 1 -}}

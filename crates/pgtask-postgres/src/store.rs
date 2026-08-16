@@ -1,4 +1,9 @@
-use std::{num::NonZeroU32, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    num::NonZeroU32,
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use pgtask_core::{
@@ -12,12 +17,11 @@ use sqlx::{
     postgres::{PgListener, PgPoolOptions},
 };
 use thiserror::Error;
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{Instrument, info_span};
 use uuid::Uuid;
 
 static MIGRATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-pub type ReadyListener = PgListener;
 
 #[derive(Debug, Error)]
 pub enum PostgresError {
@@ -45,13 +49,115 @@ pub enum PostgresError {
     InvalidSleepDuration,
     #[error("wait recovery limit must be greater than zero")]
     InvalidWaitLimit,
+    #[error("notification listener failed: {0}")]
+    Notification(String),
     #[error(transparent)]
     Schedule(#[from] ScheduleError),
+}
+
+#[derive(Clone)]
+pub struct StoreConfig {
+    database_url: String,
+    listener_url: String,
+    query_connections: NonZeroU32,
+    listener_connections: NonZeroU32,
+}
+
+impl StoreConfig {
+    pub fn new(database_url: impl Into<String>) -> Self {
+        let database_url = database_url.into();
+        Self {
+            listener_url: database_url.clone(),
+            database_url,
+            query_connections: NonZeroU32::new(10).expect("10 is nonzero"),
+            listener_connections: NonZeroU32::MIN,
+        }
+    }
+
+    #[must_use]
+    pub fn with_listener_url(mut self, listener_url: impl Into<String>) -> Self {
+        self.listener_url = listener_url.into();
+        self
+    }
+
+    #[must_use]
+    pub const fn with_query_connections(mut self, connections: NonZeroU32) -> Self {
+        self.query_connections = connections;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_listener_connections(mut self, connections: NonZeroU32) -> Self {
+        self.listener_connections = connections;
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct Store {
     pool: PgPool,
+    notifications: Arc<NotificationHub>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notification {
+    channel: String,
+    payload: String,
+}
+
+impl Notification {
+    pub fn channel(&self) -> &str {
+        &self.channel
+    }
+
+    pub fn payload(&self) -> &str {
+        &self.payload
+    }
+}
+
+#[derive(Debug)]
+pub struct ReadyListener {
+    filters: HashMap<String, Option<String>>,
+    receiver: broadcast::Receiver<NotificationEvent>,
+}
+
+impl ReadyListener {
+    pub async fn recv(&mut self) -> Result<Notification, PostgresError> {
+        loop {
+            match self.receiver.recv().await {
+                Ok(NotificationEvent::Ready(notification))
+                    if self.filters.get(notification.channel()).is_some_and(|payload| {
+                        payload.as_ref().is_none_or(|payload| payload == notification.payload())
+                    }) =>
+                {
+                    return Ok(notification);
+                }
+                Ok(NotificationEvent::Ready(_)) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Ok(NotificationEvent::Disconnected(error)) => return Err(PostgresError::Notification(error)),
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(PostgresError::Notification("notification hub stopped".to_owned()));
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum NotificationEvent {
+    Ready(Notification),
+    Disconnected(String),
+}
+
+#[derive(Debug)]
+struct NotificationHub {
+    commands: mpsc::Sender<NotificationCommand>,
+    events: broadcast::Sender<NotificationEvent>,
+}
+
+#[derive(Debug)]
+struct NotificationCommand {
+    channels: Vec<String>,
+    ready: oneshot::Sender<Result<(), String>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,14 +221,128 @@ struct SuspendTaskRequest<'a> {
     delay_milliseconds: Option<i64>,
 }
 
-impl Store {
-    pub async fn connect(database_url: &str) -> Result<Self, PostgresError> {
-        let pool = PgPoolOptions::new().connect(database_url).await?;
-        Ok(Self { pool })
+impl NotificationHub {
+    fn start(pool: PgPool) -> Arc<Self> {
+        let (commands, receiver) = mpsc::channel(128);
+        let (events, _) = broadcast::channel(1_024);
+        let hub = Arc::new(Self { commands, events });
+        tokio::spawn(run_notification_hub(pool, receiver, hub.events.clone()));
+        hub
     }
 
-    pub const fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+    async fn subscribe(&self, filters: HashMap<String, Option<String>>) -> Result<ReadyListener, PostgresError> {
+        let channels = filters.keys().cloned().collect();
+        let receiver = self.events.subscribe();
+        let (ready, confirmation) = oneshot::channel();
+        self.commands
+            .send(NotificationCommand { channels, ready })
+            .await
+            .map_err(|_| PostgresError::Notification("notification hub stopped".to_owned()))?;
+        confirmation
+            .await
+            .map_err(|_| PostgresError::Notification("notification hub stopped".to_owned()))?
+            .map_err(PostgresError::Notification)?;
+        Ok(ReadyListener { filters, receiver })
+    }
+}
+
+async fn run_notification_hub(
+    pool: PgPool,
+    mut commands: mpsc::Receiver<NotificationCommand>,
+    events: broadcast::Sender<NotificationEvent>,
+) {
+    let mut channels = HashSet::new();
+    while let Some(command) = commands.recv().await {
+        channels.extend(command.channels);
+        let mut listener = match PgListener::connect_with(&pool).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = command.ready.send(Err(error.to_string()));
+                continue;
+            }
+        };
+        if let Err(error) = listen_to_channels(&mut listener, &channels).await {
+            let _ = command.ready.send(Err(error.to_string()));
+            continue;
+        }
+        let _ = command.ready.send(Ok(()));
+
+        'connected: loop {
+            tokio::select! {
+                command = commands.recv() => {
+                    let Some(command) = command else {
+                        return;
+                    };
+                    let new_channels: Vec<_> = command
+                        .channels
+                        .into_iter()
+                        .filter(|channel| channels.insert(channel.clone()))
+                        .collect();
+                    for channel in new_channels {
+                        if let Err(error) = listener.listen(&channel).await {
+                            let message = error.to_string();
+                            let _ = command.ready.send(Err(message.clone()));
+                            let _ = events.send(NotificationEvent::Disconnected(message));
+                            break 'connected;
+                        }
+                    }
+                    let _ = command.ready.send(Ok(()));
+                }
+                notification = listener.recv() => {
+                    match notification {
+                        Ok(notification) => {
+                            let _ = events.send(NotificationEvent::Ready(Notification {
+                                channel: notification.channel().to_owned(),
+                                payload: notification.payload().to_owned(),
+                            }));
+                        }
+                        Err(error) => {
+                            let _ = events.send(NotificationEvent::Disconnected(error.to_string()));
+                            break 'connected;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn listen_to_channels(listener: &mut PgListener, channels: &HashSet<String>) -> Result<(), sqlx::Error> {
+    for channel in channels {
+        listener.listen(channel).await?;
+    }
+    Ok(())
+}
+
+impl Store {
+    pub async fn connect(database_url: &str) -> Result<Self, PostgresError> {
+        Self::connect_with_config(&StoreConfig::new(database_url)).await
+    }
+
+    pub async fn connect_with_config(config: &StoreConfig) -> Result<Self, PostgresError> {
+        let pool = PgPoolOptions::new()
+            .max_connections(config.query_connections.get())
+            .connect(&config.database_url)
+            .await?;
+        let listener_pool = PgPoolOptions::new()
+            .max_connections(config.listener_connections.get())
+            .connect(&config.listener_url)
+            .await?;
+        Ok(Self {
+            pool,
+            notifications: NotificationHub::start(listener_pool),
+        })
+    }
+
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self::from_pools(pool.clone(), pool)
+    }
+
+    pub fn from_pools(pool: PgPool, listener_pool: PgPool) -> Self {
+        Self {
+            pool,
+            notifications: NotificationHub::start(listener_pool),
+        }
     }
 
     pub const fn pool(&self) -> &PgPool {
@@ -141,18 +361,28 @@ impl Store {
         u32::try_from(version).map_err(invalid_number)
     }
 
-    pub async fn ready_listener(&self) -> Result<ReadyListener, PostgresError> {
-        let mut listener = PgListener::connect_with(&self.pool).await?;
-        listener.listen("pgtask_ready").await?;
-        listener.listen("pgtask_schedule").await?;
-        listener.listen("pgtask_wait").await?;
-        Ok(listener)
+    pub async fn ready_listener(&self, queue_name: &QueueName) -> Result<ReadyListener, PostgresError> {
+        let channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
+            .bind(queue_name.as_str())
+            .fetch_one(&self.pool)
+            .await?;
+        self.notifications
+            .subscribe(HashMap::from([
+                (channel, Some(queue_name.to_string())),
+                ("pgtask_schedule".to_owned(), None),
+                ("pgtask_wait".to_owned(), None),
+            ]))
+            .await
     }
 
-    pub async fn result_listener(&self) -> Result<ReadyListener, PostgresError> {
-        let mut listener = PgListener::connect_with(&self.pool).await?;
-        listener.listen("pgtask_result").await?;
-        Ok(listener)
+    pub async fn result_listener(&self, task_id: TaskId) -> Result<ReadyListener, PostgresError> {
+        let channel: String = sqlx::query_scalar("SELECT pgtask.result_channel($1)")
+            .bind(task_id.as_uuid())
+            .fetch_one(&self.pool)
+            .await?;
+        self.notifications
+            .subscribe(HashMap::from([(channel, Some(task_id.to_string()))]))
+            .await
     }
 
     pub async fn register_worker(
@@ -996,7 +1226,7 @@ impl Store {
         task_id: TaskId,
         timeout: Option<Duration>,
     ) -> Result<TaskResultWait, PostgresError> {
-        let mut listener = self.result_listener().await?;
+        let mut listener = self.result_listener(task_id).await?;
         let Some(result) = self.task_result(task_id).await? else {
             return Ok(TaskResultWait::NotFound);
         };

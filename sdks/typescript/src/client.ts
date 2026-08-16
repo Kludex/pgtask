@@ -8,6 +8,7 @@ const TERMINAL_STATES = new Set<TaskState>(["succeeded", "failed", "cancelled"])
 type EnqueueRow = QueryResultRow & { task_id: string; created: boolean };
 type SignalRow = QueryResultRow & { value: JSONValue };
 type CancelRow = QueryResultRow & { cancelled: boolean };
+type ChannelRow = QueryResultRow & { channel: string };
 type ResultRow = QueryResultRow & {
   state: TaskState;
   result: unknown;
@@ -16,6 +17,11 @@ type ResultRow = QueryResultRow & {
 };
 
 export type QueryExecutor = Pick<PoolClient, "query">;
+
+export type ClientOptions = Omit<PoolConfig, "connectionString"> & {
+  listenerConnectionString?: string;
+  listener?: Omit<PoolConfig, "connectionString">;
+};
 
 export type EnqueueResult = {
   taskId: string;
@@ -62,34 +68,42 @@ export class TaskHandle<Result> {
 
 export class Client {
   readonly #pool: Pool;
+  readonly #listenerPool: Pool;
+  readonly #resultListener: ResultListener;
   readonly #ownsPool: boolean;
 
-  private constructor(pool: Pool, ownsPool: boolean) {
+  private constructor(pool: Pool, listenerPool: Pool, ownsPool: boolean) {
     this.#pool = pool;
+    this.#listenerPool = listenerPool;
+    this.#resultListener = new ResultListener(listenerPool);
     this.#ownsPool = ownsPool;
   }
 
-  static async connect(
-    connectionString: string,
-    options: Omit<PoolConfig, "connectionString"> = {},
-  ) {
-    const pool = new Pool({ ...options, connectionString });
+  static async connect(connectionString: string, options: ClientOptions = {}) {
+    const { listenerConnectionString = connectionString, listener = {}, ...queryOptions } = options;
+    const pool = new Pool({ ...queryOptions, connectionString });
+    const listenerPool = new Pool({
+      max: 1,
+      ...listener,
+      connectionString: listenerConnectionString,
+    });
     try {
-      await pool.query("SELECT 1");
+      await Promise.all([pool.query("SELECT 1"), listenerPool.query("SELECT 1")]);
     } catch (error) {
-      await pool.end();
+      await Promise.all([pool.end(), listenerPool.end()]);
       throw error;
     }
-    return new Client(pool, true);
+    return new Client(pool, listenerPool, true);
   }
 
-  static fromPool(pool: Pool): Client {
-    return new Client(pool, false);
+  static fromPool(pool: Pool, listenerPool = pool): Client {
+    return new Client(pool, listenerPool, false);
   }
 
   async close(): Promise<void> {
+    await this.#resultListener.close();
     if (this.#ownsPool) {
-      await this.#pool.end();
+      await Promise.all([this.#pool.end(), this.#listenerPool.end()]);
     }
   }
 
@@ -138,29 +152,24 @@ export class Client {
     options: ResultOptions = {},
   ): Promise<TaskResult<Result> | null> {
     validateResultOptions(options);
-    const connection = await this.#pool.connect();
-    let notification: ((value: void) => void) | undefined;
-    const notified = new Promise<void>((resolve) => {
-      notification = resolve;
-    });
-    const onNotification = (message: Notification): void => {
-      if (message.channel === "pgtask_result" && message.payload === taskId) {
-        notification?.();
-      }
-    };
-    connection.on("notification", onNotification);
+    const channelResult = await this.#pool.query<ChannelRow>(
+      "SELECT pgtask.result_channel($1) AS channel",
+      [taskId],
+    );
+    const channel = channelResult.rows[0]?.channel;
+    if (channel === undefined || !/^pgtask_result_[0-9]{2}$/.test(channel)) {
+      throw new Error("pgtask.result_channel returned an invalid channel");
+    }
+    const subscription = await this.#resultListener.subscribe(channel, taskId);
     try {
-      await connection.query("LISTEN pgtask_result");
-      const current = await readTaskResult<Result>(connection, taskId);
+      const current = await readTaskResult<Result>(this.#pool, taskId);
       if (current === null || TERMINAL_STATES.has(current.state)) {
         return current;
       }
-      const outcome = await waitForNotification(notified, options);
-      return outcome === "timeout" ? null : readTaskResult<Result>(connection, taskId);
+      const outcome = await waitForNotification(subscription.notified, options);
+      return outcome === "timeout" ? null : readTaskResult<Result>(this.#pool, taskId);
     } finally {
-      connection.off("notification", onNotification);
-      await connection.query("UNLISTEN pgtask_result");
-      connection.release();
+      subscription.unsubscribe();
     }
   }
 
@@ -187,6 +196,107 @@ export class Client {
       [taskId],
     );
     return result.rows[0]?.cancelled ?? false;
+  }
+}
+
+type ResultSubscription = {
+  notified: Promise<void>;
+  unsubscribe(): void;
+};
+
+type ResultWaiter = {
+  notify(): void;
+  reject(error: Error): void;
+};
+
+class ResultListener {
+  readonly #pool: Pool;
+  readonly #channels = new Set<string>();
+  readonly #waiters = new Map<string, Set<ResultWaiter>>();
+  #client: PoolClient | undefined;
+  #connecting: Promise<PoolClient> | undefined;
+
+  constructor(pool: Pool) {
+    this.#pool = pool;
+  }
+
+  async subscribe(channel: string, taskId: string): Promise<ResultSubscription> {
+    const client = await this.#connect();
+    if (!this.#channels.has(channel)) {
+      await client.query(`LISTEN ${channel}`);
+      this.#channels.add(channel);
+    }
+    let waiter!: ResultWaiter;
+    const notified = new Promise<void>((resolve, reject) => {
+      waiter = { notify: resolve, reject };
+    });
+    const waiters = this.#waiters.get(taskId) ?? new Set();
+    waiters.add(waiter);
+    this.#waiters.set(taskId, waiters);
+    return {
+      notified,
+      unsubscribe: () => {
+        waiters.delete(waiter);
+        if (waiters.size === 0) {
+          this.#waiters.delete(taskId);
+        }
+      },
+    };
+  }
+
+  async close(): Promise<void> {
+    const client = this.#client;
+    this.#client = undefined;
+    this.#channels.clear();
+    this.#waiters.clear();
+    if (client !== undefined) {
+      client.off("notification", this.#onNotification);
+      client.off("error", this.#onError);
+      await client.query("UNLISTEN *");
+      client.release();
+    }
+  }
+
+  readonly #onNotification = (message: Notification): void => {
+    if (message.channel.startsWith("pgtask_result_") && message.payload !== undefined) {
+      for (const waiter of this.#waiters.get(message.payload) ?? []) {
+        waiter.notify();
+      }
+    }
+  };
+
+  readonly #onError = (error: Error): void => {
+    for (const waiters of this.#waiters.values()) {
+      for (const waiter of waiters) {
+        waiter.reject(error);
+      }
+    }
+    this.#waiters.clear();
+    this.#channels.clear();
+    const client = this.#client;
+    this.#client = undefined;
+    if (client !== undefined) {
+      client.off("notification", this.#onNotification);
+      client.off("error", this.#onError);
+      client.release(error);
+    }
+  };
+
+  async #connect(): Promise<PoolClient> {
+    if (this.#client !== undefined) {
+      return this.#client;
+    }
+    this.#connecting ??= this.#pool.connect().then((client) => {
+      client.on("notification", this.#onNotification);
+      client.on("error", this.#onError);
+      this.#client = client;
+      return client;
+    });
+    try {
+      return await this.#connecting;
+    } finally {
+      this.#connecting = undefined;
+    }
   }
 }
 

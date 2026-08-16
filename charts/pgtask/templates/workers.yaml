@@ -85,6 +85,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "pgtask.databaseSecretName" $root }}
                   key: {{ $root.Values.database.existingSecret.key }}
+            - name: PGTASK_LISTENER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "pgtask.listenerDatabaseSecretName" $root }}
+                  key: {{ default $root.Values.database.existingSecret.key $root.Values.database.listenerExistingSecret.key }}
             - name: PGTASK_QUEUE
               value: {{ $worker.queue | quote }}
             - name: PGTASK_CONCURRENCY

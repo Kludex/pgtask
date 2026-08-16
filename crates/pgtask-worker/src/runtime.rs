@@ -277,7 +277,7 @@ impl Worker {
         let schedule_wakeup = Arc::new(Notify::new());
         let runtime_shutdown = CancellationToken::new();
         let capabilities = self.registry.capabilities();
-        let ready_listener = self.store.ready_listener().await?;
+        let ready_listener = self.store.ready_listener(&self.config.queue_name).await?;
         self.health.set_listener(true);
         for schedule in &self.config.declared_schedules {
             self.store.put_schedule(schedule).await?;
@@ -744,7 +744,8 @@ async fn listen_for_ready(
             };
             match notification {
                 Ok(notification)
-                    if notification.channel() == "pgtask_ready" && notification.payload() == queue_name.as_str() =>
+                    if notification.channel().starts_with("pgtask_ready_")
+                        && notification.payload() == queue_name.as_str() =>
                 {
                     task_wakeup.notify_one();
                 }
@@ -762,7 +763,7 @@ async fn listen_for_ready(
         loop {
             let reconnected = tokio::select! {
                 () = shutdown.cancelled() => return,
-                result = store.ready_listener() => result,
+                result = store.ready_listener(&queue_name) => result,
             };
             match reconnected {
                 Ok(reconnected) => {

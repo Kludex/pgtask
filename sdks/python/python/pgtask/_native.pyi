@@ -4,7 +4,13 @@ from typing import Any
 
 class Client:
     @staticmethod
-    async def connect(database_url: str) -> Client: ...
+    async def connect(
+        database_url: str,
+        *,
+        listener_url: str | None = None,
+        max_query_connections: int = 10,
+        max_listener_connections: int = 1,
+    ) -> Client: ...
     async def migrate(self) -> None: ...
     async def enqueue(self, request: dict[str, Any]) -> tuple[str, bool]: ...
     async def task_result(self, task_id: str) -> dict[str, Any] | None: ...
@@ -28,15 +34,7 @@ class TaskContext:
     async def wait_for_result(self, step_name: str, occurrence: int, task_id: str) -> Any: ...
 
 class Worker:
-    def __init__(
-        self,
-        database_url: str,
-        queue_name: str = "default",
-        concurrency: int = 100,
-        poll_interval: float = 30.0,
-        lease_duration: float = 30.0,
-        health_address: str | None = None,
-    ) -> None: ...
+    def __init__(self, database_url: str, queue_name: str, options: dict[str, Any]) -> None: ...
     def register(
         self,
         name: str,

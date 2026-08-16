@@ -1,6 +1,7 @@
 export {
   Client,
   TaskHandle,
+  type ClientOptions,
   type EnqueueResult,
   type QueryExecutor,
   type ResultOptions,

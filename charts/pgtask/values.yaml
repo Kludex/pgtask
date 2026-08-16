@@ -11,6 +11,9 @@ database:
   existingSecret:
     name: pgtask-database
     key: url
+  listenerExistingSecret:
+    name: ""
+    key: url
 
 serviceAccount:
   create: true
