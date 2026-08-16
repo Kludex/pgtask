@@ -45,6 +45,9 @@ pub struct WorkerConfig {
     pub schedule_batch_size: NonZeroU16,
     pub wait_batch_size: NonZeroU16,
     pub schedule_reconciliation_interval: Duration,
+    pub retention_enabled: bool,
+    pub retention_batch_size: NonZeroU16,
+    pub retention_interval: Duration,
     pub declared_schedules: Vec<ScheduleConfig>,
     pub health_address: Option<SocketAddr>,
     pub supervisor_interval: Duration,
@@ -89,6 +92,9 @@ impl WorkerConfig {
             schedule_batch_size: NonZeroU16::new(100).expect("100 is nonzero"),
             wait_batch_size: NonZeroU16::new(100).expect("100 is nonzero"),
             schedule_reconciliation_interval: Duration::from_secs(30),
+            retention_enabled: true,
+            retention_batch_size: NonZeroU16::new(100).expect("100 is nonzero"),
+            retention_interval: Duration::from_mins(1),
             declared_schedules: Vec::new(),
             health_address: None,
             supervisor_interval: Duration::from_secs(1),
@@ -109,6 +115,8 @@ pub enum WorkerError {
     InvalidWorkerHeartbeat,
     #[error("schedule reconciliation interval must be greater than zero")]
     InvalidScheduleReconciliationInterval,
+    #[error("retention interval must be greater than zero")]
+    InvalidRetentionInterval,
     #[error("supervisor interval must be greater than zero")]
     InvalidSupervisorInterval,
     #[error("overload protection minimum concurrency exceeds configured concurrency")]
@@ -216,6 +224,9 @@ impl Worker {
         if config.schedule_reconciliation_interval.is_zero() {
             return Err(WorkerError::InvalidScheduleReconciliationInterval);
         }
+        if config.retention_interval.is_zero() {
+            return Err(WorkerError::InvalidRetentionInterval);
+        }
         if config.supervisor_interval.is_zero() {
             return Err(WorkerError::InvalidSupervisorInterval);
         }
@@ -318,6 +329,14 @@ impl Worker {
             schedule_wakeup,
             runtime_shutdown.clone(),
         );
+        let retention = delete_expired_terminal(
+            self.store.clone(),
+            self.config.queue_name.clone(),
+            self.config.retention_enabled,
+            self.config.retention_batch_size,
+            self.config.retention_interval,
+            runtime_shutdown.clone(),
+        );
         let heartbeat = heartbeat_worker(
             self.store.clone(),
             self.id,
@@ -334,7 +353,7 @@ impl Worker {
             self.health.set_admission(false);
             result
         };
-        let ((), (), (), (), result) = tokio::join!(renewer, listener, scheduler, heartbeat, handlers);
+        let ((), (), (), (), (), result) = tokio::join!(renewer, listener, scheduler, retention, heartbeat, handlers);
         result
     }
 
@@ -828,6 +847,30 @@ async fn materialize_schedules(
             () = shutdown.cancelled() => return,
             () = wakeup.notified() => {}
             () = tokio::time::sleep(delay) => {}
+        }
+    }
+}
+
+async fn delete_expired_terminal(
+    store: Store,
+    queue_name: QueueName,
+    enabled: bool,
+    batch_size: NonZeroU16,
+    retention_interval: Duration,
+    shutdown: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(retention_interval);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            _ = interval.tick() => {
+                if enabled
+                    && let Err(error) = store.delete_expired_terminal(&queue_name, batch_size.get()).await
+                {
+                    warn!(%error, "could not delete expired terminal tasks");
+                }
+            }
         }
     }
 }

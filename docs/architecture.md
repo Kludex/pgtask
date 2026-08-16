@@ -100,7 +100,8 @@ or cron expression, then PostgreSQL advances `next_run_at` and inserts the tasks
 `(schedule_id, scheduled_for)` key prevents two workers from creating the same logical occurrence.
 
 The scheduler uses `pgtask_schedule` and `pgtask_wait` notifications for prompt changes and periodically reconciles the
-database. The worker runtime also recovers expired signal waits and wakes claim loops when delayed tasks become due.
+database. Every worker replica may claim schedule maintenance and wait recovery. `SKIP LOCKED` divides work without a
+leader. Workers also recover expired leases for their queue and delete expired terminal tasks in bounded batches.
 
 ## Storage and protocol boundaries
 

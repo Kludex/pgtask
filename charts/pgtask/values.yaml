@@ -50,6 +50,11 @@ workers:
     concurrency: 10
     scheduler:
       enabled: true
+    maintenance:
+      retention:
+        enabled: true
+        batchSize: 100
+        intervalSeconds: 60
     drainOnly: false
     health:
       enabled: true

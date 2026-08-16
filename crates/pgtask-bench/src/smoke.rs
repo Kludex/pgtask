@@ -51,6 +51,11 @@ async fn run_worker(store: Store) -> Result<(), Box<dyn Error>> {
         .ok_or("PGTASK_CONCURRENCY must be greater than zero")?;
     config.claim_batch_size = config.concurrency;
     config.scheduler_enabled = environment_bool("PGTASK_SCHEDULER_ENABLED", true)?;
+    config.retention_enabled = environment_bool("PGTASK_RETENTION_ENABLED", true)?;
+    config.retention_batch_size = NonZeroU16::new(environment_u16("PGTASK_RETENTION_BATCH_SIZE", 100)?)
+        .ok_or("PGTASK_RETENTION_BATCH_SIZE must be greater than zero")?;
+    config.retention_interval =
+        Duration::from_secs(u64::from(environment_u16("PGTASK_RETENTION_INTERVAL_SECONDS", 60)?));
     config.lease_duration = Duration::from_secs(u64::from(environment_u16("PGTASK_SMOKE_LEASE_SECONDS", 30)?));
     config.health_address = std::env::var("PGTASK_HEALTH_ADDRESS")
         .ok()

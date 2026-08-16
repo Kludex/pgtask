@@ -15,6 +15,8 @@ The chart never stores production PostgreSQL credentials in values. `database.ex
 
 Workers also receive `PGTASK_LISTENER_DATABASE_URL`. It uses the main database Secret by default. Set `database.listenerExistingSecret.name` and `database.listenerExistingSecret.key` when session listeners must use a separate PgBouncer session pool or direct PostgreSQL endpoint. Do not route `LISTEN` through transaction pooling.
 
+Every worker replica can run maintenance. PostgreSQL `SKIP LOCKED` claims divide schedule materialization, wait timeout recovery, expired lease recovery, and terminal retention without a leader. `workers.<name>.maintenance.retention` controls bounded retention batches for that worker's queue.
+
 The migration Job runs as a `pre-install` and `pre-upgrade` hook. The engine also takes a PostgreSQL advisory lock, so overlapping Helm operations cannot apply migrations concurrently.
 
 The chart does not start a worker by default. A worker image contains your registered handlers. The project image only

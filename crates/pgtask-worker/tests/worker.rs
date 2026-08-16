@@ -11,8 +11,8 @@ use std::{
 
 use chrono::{TimeDelta, Utc};
 use pgtask_core::{
-    EnqueueRequest, HandlerVersion, QueueName, RetryPolicy, ScheduleConfig, ScheduleDefinition, ScheduleName,
-    SignalName, StepName, TaskName, TaskState,
+    EnqueueRequest, HandlerVersion, QueueConfig, QueueName, RetryPolicy, ScheduleConfig, ScheduleDefinition,
+    ScheduleName, SignalName, StepName, TaskName, TaskState,
 };
 use pgtask_postgres::Store;
 use pgtask_worker::{HandlerError, HandlerRegistry, Worker, WorkerConfig, WorkerError};
@@ -278,6 +278,13 @@ async fn worker_configuration_rejects_every_invalid_invariant() {
     ));
 
     let mut config = WorkerConfig::new(queue_name.clone());
+    config.retention_interval = Duration::ZERO;
+    assert!(matches!(
+        Worker::new(store.clone(), successful_registry(&task_name), config),
+        Err(WorkerError::InvalidRetentionInterval)
+    ));
+
+    let mut config = WorkerConfig::new(queue_name.clone());
     config.supervisor_interval = Duration::ZERO;
     assert!(matches!(
         Worker::new(store.clone(), successful_registry(&task_name), config),
@@ -423,6 +430,7 @@ async fn worker_executes_registered_task_and_shuts_down() {
     config.claim_batch_size = NonZeroU16::new(1).unwrap();
     config.lease_duration = Duration::from_millis(30);
     config.poll_interval = Duration::from_millis(5);
+    config.retention_enabled = false;
     config.shutdown_grace = Duration::from_secs(1);
     let worker = Worker::new(store.clone(), registry, config).unwrap();
     let shutdown = CancellationToken::new();
@@ -1518,6 +1526,59 @@ async fn worker_reconciles_code_declared_schedules_before_starting() {
     tokio::time::timeout(TEST_TIMEOUT, executed.notified()).await.unwrap();
     assert!(store.get_schedule(schedule_id).await.unwrap().is_some());
     assert!(store.delete_schedule(schedule_id).await.unwrap());
+    shutdown.cancel();
+    worker_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn replicated_workers_delete_expired_terminal_tasks_in_bounded_batches() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("worker-retention-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("worker-retention-{suffix}")).unwrap();
+    let mut queue = QueueConfig::new(queue_name.clone());
+    queue.terminal_retention = Duration::ZERO;
+    store.put_queue(&queue).await.unwrap();
+    let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
+    request.queue_name = queue_name.clone();
+    let task_id = store.enqueue(&request).await.unwrap().task_id;
+    let task = store
+        .claim(
+            &queue_name,
+            pgtask_core::WorkerId::new(),
+            &[(task_name.clone(), HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(
+        store
+            .complete(task_id, task.attempt, task.lease_token.unwrap(), None)
+            .await
+            .unwrap()
+    );
+
+    let mut config = WorkerConfig::new(queue_name);
+    config.retention_batch_size = NonZeroU16::MIN;
+    config.retention_interval = Duration::from_millis(10);
+    let worker = Worker::new(store.clone(), successful_registry(&task_name), config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while store.get_task(task_id).await.unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     shutdown.cancel();
     worker_task.await.unwrap().unwrap();
 }

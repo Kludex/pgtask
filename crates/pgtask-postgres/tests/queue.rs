@@ -8,7 +8,7 @@ use pgtask_core::{
 };
 use pgtask_postgres::{PostgresError, Store, StoreConfig};
 use serde_json::json;
-use sqlx::{Acquire, postgres::PgPoolOptions};
+use sqlx::{Acquire, PgConnection, postgres::PgPoolOptions};
 use tokio::sync::Barrier;
 use uuid::Uuid;
 
@@ -48,6 +48,31 @@ async fn configure_test_roles(store: &Store) {
         )
         .await
         .unwrap();
+}
+
+async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name: &str) {
+    let storage_protocol: i32 = sqlx::query_scalar("SELECT pgtask.storage_protocol_version()")
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    assert_eq!(storage_protocol, i32::try_from(STORAGE_PROTOCOL_VERSION).unwrap());
+    let ready_channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
+        .bind(queue_name)
+        .fetch_one(&mut *connection)
+        .await
+        .unwrap();
+    assert!(ready_channel.starts_with("pgtask_ready_"));
+    let maintenance_grants: (bool, bool) = sqlx::query_as(
+        r"
+        SELECT
+            has_function_privilege(current_user, 'pgtask.put_schedule(uuid, text, text, bigint, text, text, integer, text, text, integer, jsonb, jsonb, smallint, integer, timestamptz)', 'EXECUTE'),
+            has_function_privilege(current_user, 'pgtask.delete_expired_terminal(text, integer)', 'EXECUTE')
+        ",
+    )
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    assert_eq!(maintenance_grants, (true, true));
 }
 
 #[tokio::test]
@@ -1211,17 +1236,7 @@ async fn runtime_roles_only_receive_their_protocol_capabilities() {
         .execute(&mut *worker)
         .await
         .unwrap();
-    let storage_protocol: i32 = sqlx::query_scalar("SELECT pgtask.storage_protocol_version()")
-        .fetch_one(&mut *worker)
-        .await
-        .unwrap();
-    assert_eq!(storage_protocol, i32::try_from(STORAGE_PROTOCOL_VERSION).unwrap());
-    let ready_channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
-        .bind(&queue_name)
-        .fetch_one(&mut *worker)
-        .await
-        .unwrap();
-    assert!(ready_channel.starts_with("pgtask_ready_"));
+    assert_worker_protocol_grants(&mut worker, &queue_name).await;
     let claimed_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM pgtask.claim($1, gen_random_uuid(), ARRAY['role-task'], ARRAY[1], 1, 30000)",
     )
