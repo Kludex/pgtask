@@ -1,6 +1,10 @@
 {{- $root := . -}}
 {{- range $name, $worker := .Values.workers }}
 {{- if $worker.enabled }}
+{{- $workerRepository := required (printf "workers.%s.image.repository is required for an enabled worker" $name) $worker.image.repository }}
+{{- if not $worker.command }}
+{{- fail (printf "workers.%s.command is required for an enabled worker" $name) }}
+{{- end }}
 {{- if and $worker.scheduler.enabled (not $worker.autoscaling.enabled) (lt (int $worker.replicas) 1) }}
 {{- fail (printf "workers.%s.replicas must be at least 1 when scheduling is enabled" $name) }}
 {{- end }}
@@ -57,7 +61,7 @@ spec:
       {{- end }}
       containers:
         - name: worker
-          image: {{ include "pgtask.image" (list $root $worker.image) }}
+          image: {{ include "pgtask.image" (list $root (dict "repository" $workerRepository "tag" $worker.image.tag)) }}
           imagePullPolicy: {{ default $root.Values.image.pullPolicy $worker.image.pullPolicy }}
           securityContext:
             {{- toYaml $root.Values.securityContext | nindent 12 }}

@@ -41,7 +41,7 @@ migrations:
 
 workers:
   default:
-    enabled: true
+    enabled: false
     replicas: 1
     queue: default
     concurrency: 10

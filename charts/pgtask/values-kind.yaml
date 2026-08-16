@@ -10,6 +10,10 @@ database:
 
 workers:
   default:
+    enabled: true
+    image:
+      repository: pgtask-kind
+      tag: test
     command: ["pgtask-smoke"]
     args: ["worker"]
     env:

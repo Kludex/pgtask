@@ -50,13 +50,25 @@ helm template test charts/pgtask \
     --set ui.administrator.actorHeader=x-authenticated-user \
     --set ui.ingress.enabled=true \
     --set serviceMonitor.enabled=true \
+    --set workers.default.enabled=true \
+    --set workers.default.image.repository=example.invalid/pgtask-worker \
+    --set-json 'workers.default.command=["/app/worker"]' \
     --set workers.default.autoscaling.enabled=true \
     --set workers.default.autoscaling.queueDemand.enabled=true \
     --set networkPolicy.enabled=true \
     | "$validation_dir/kubeconform" -strict -summary -ignore-missing-schemas
 
-if helm template test charts/pgtask --set workers.default.replicas=0 >/dev/null 2>&1; then
+if helm template test charts/pgtask \
+    --set workers.default.enabled=true \
+    --set workers.default.image.repository=example.invalid/pgtask-worker \
+    --set-json 'workers.default.command=["/app/worker"]' \
+    --set workers.default.replicas=0 >/dev/null 2>&1; then
     echo "scheduler-enabled workers must reject scale to zero" >&2
+    exit 1
+fi
+
+if helm template test charts/pgtask --set workers.default.enabled=true >/dev/null 2>&1; then
+    echo "enabled workers must require an application image and command" >&2
     exit 1
 fi
 

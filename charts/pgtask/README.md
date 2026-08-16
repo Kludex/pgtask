@@ -7,13 +7,16 @@ kubectl create secret generic pgtask-database \
   --from-literal=url="$PGTASK_DATABASE_URL"
 
 helm upgrade --install pgtask ./charts/pgtask \
-  --set image.repository=ghcr.io/your-org/your-pgtask-worker \
-  --set image.tag=latest
+  --set image.repository=ghcr.io/kludex/pgtask \
+  --set image.tag=0.1.0
 ```
 
 The chart never stores production PostgreSQL credentials in values. `database.existingSecret.name` and `database.existingSecret.key` select a Secret managed by your deployment system.
 
 The migration Job runs as a `pre-install` and `pre-upgrade` hook. The engine also takes a PostgreSQL advisory lock, so overlapping Helm operations cannot apply migrations concurrently.
+
+The chart does not start a worker by default. A worker image contains your registered handlers. The project image only
+provides migrations, administration, the observer UI, and smoke-test binaries.
 
 ## Configure queue workers
 
