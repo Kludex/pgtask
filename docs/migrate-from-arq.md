@@ -77,3 +77,5 @@ Use transactional enqueue when the task depends on a row written by the same req
 6. Roll back by routing new requests to ARQ. Keep the `pgtask` worker draining already committed rows.
 
 Never enqueue the same logical request to both systems unless its external idempotency key is shared and verified.
+
+Configure `idempotency_retention_seconds` for at least the longest period in which an ARQ producer may repeat a job identifier. Task history may use a shorter retention window without releasing that identifier.

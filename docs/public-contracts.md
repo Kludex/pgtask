@@ -107,6 +107,8 @@ FROM pgtask.enqueue(
 
 Producer, worker, observer, and administrator functions and views are the cross-language protocol. Their arguments, returned columns, authorization, fencing, and transaction behavior are versioned by `pgtask.storage_protocol_version()`. Workers fail before claiming when the compiled protocol does not equal the installed protocol.
 
+Queue configuration includes independent terminal-history and idempotency-retention windows. Idempotency reservations are not exposed to observer roles because keys may contain application identifiers.
+
 Additive SQL changes may keep the same protocol. A removed value, changed predicate, changed result shape, or incompatible authorization rule increments the protocol and requires an expand-and-contract migration.
 
 ## CLI

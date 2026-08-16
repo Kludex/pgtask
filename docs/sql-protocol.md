@@ -52,6 +52,8 @@ FROM pgtask.enqueue(
 
 The operation returns the stable task identifier and whether this call created it. The caller may execute it inside the same transaction as application writes.
 
+Idempotency keys are scoped to a queue. Their reservations remain active for the entire nonterminal lifetime of a task and for the queue's `idempotency_retention_seconds` after completion. A retained reservation still returns its original task identifier after task history has been deleted. `pgtask.delete_expired_idempotency_keys` removes expired reservations in bounded batches. An expired key can be reused safely before maintenance removes its old reservation.
+
 ### Batch enqueue
 
 The batch operation accepts arrays or a JSON array and inserts all tasks in one transaction. It returns one result per requested item in request order. A malformed item aborts the batch.

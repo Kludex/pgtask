@@ -126,7 +126,8 @@ The producer stores the task in PostgreSQL. PostgreSQL sends a notification afte
 claims the task, renews its lease while it runs, and stores the result.
 
 `idempotency_key` makes repeated enqueue requests return the same task. It does not make external side effects exactly
-once. Pass a stable idempotency key to external APIs from your handler when they support one.
+once. Its queue-level retention is independent from task history, so deleting old tasks does not release an unexpired
+key. Pass a stable idempotency key to external APIs from your handler when they support one.
 
 ## Delivery model
 

@@ -73,6 +73,7 @@ fn task_defaults_and_states_are_explicit() {
 
     let queue = QueueConfig::new(QueueName::new("types").unwrap());
     assert_eq!(queue.terminal_retention, Duration::from_hours(7 * 24));
+    assert_eq!(queue.idempotency_retention, Duration::from_hours(30 * 24));
 
     let request = EnqueueRequest::new(TaskName::new("types.task").unwrap(), json!({"value": 42}));
     assert_eq!(request.queue_name, QueueName::default());

@@ -8,6 +8,7 @@ use crate::{HandlerVersion, LeaseToken, QueueName, RetryPolicy, SignalName, Step
 pub struct QueueConfig {
     pub name: QueueName,
     pub terminal_retention: std::time::Duration,
+    pub idempotency_retention: std::time::Duration,
 }
 
 impl QueueConfig {
@@ -15,6 +16,7 @@ impl QueueConfig {
         Self {
             name,
             terminal_retention: std::time::Duration::from_hours(7 * 24),
+            idempotency_retention: std::time::Duration::from_hours(30 * 24),
         }
     }
 }
@@ -23,6 +25,7 @@ impl QueueConfig {
 pub struct Queue {
     pub name: QueueName,
     pub terminal_retention: std::time::Duration,
+    pub idempotency_retention: std::time::Duration,
     pub paused_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

@@ -71,7 +71,7 @@ The claim path uses a partial index over pending tasks ordered by queue, priorit
 
 Every claim receives a random lease token. The worker renews active leases in batches. Every subsequent state transition includes the task identifier, attempt number, and lease token in its predicate.
 
-The first release uses one unpartitioned task table. Retention deletes terminal rows in bounded batches. Time-based partitioning is introduced only if the load suite demonstrates that retention, vacuum, or index locality requires it.
+The first release uses one unpartitioned task table. Retention deletes terminal rows and expired idempotency reservations in separate bounded batches. Idempotency retention is independent from task history retention. Time-based partitioning is introduced only if the load suite demonstrates that retention, vacuum, or index locality requires it.
 
 ### Rust engine
 

@@ -1,0 +1,5 @@
+ALTER TABLE pgtask.administrator_audit
+DROP CONSTRAINT administrator_audit_task_id_fkey;
+
+ALTER TABLE pgtask.administrator_audit
+DROP CONSTRAINT administrator_audit_schedule_id_fkey;

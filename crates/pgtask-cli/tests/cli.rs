@@ -64,6 +64,8 @@ async fn configures_a_queue_through_the_cli() {
             queue_name.as_str(),
             "--terminal-retention-seconds",
             "60",
+            "--idempotency-retention-seconds",
+            "120",
         ])
         .env("PGTASK_DATABASE_URL", &database_url)
         .output()
@@ -79,6 +81,16 @@ async fn configures_a_queue_through_the_cli() {
             .terminal_retention
             .as_secs(),
         60
+    );
+    assert_eq!(
+        store
+            .get_queue(&queue_name)
+            .await
+            .unwrap()
+            .unwrap()
+            .idempotency_retention
+            .as_secs(),
+        120
     );
 }
 

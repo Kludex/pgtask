@@ -3,8 +3,8 @@ use std::{collections::HashSet, num::NonZeroU32, sync::Arc};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use pgtask_core::{
-    EnqueueRequest, HandlerVersion, LeaseRenewal, QueueConfig, QueueName, RetryPolicy, STORAGE_PROTOCOL_VERSION,
-    StepName, TaskName, TaskState, WorkerId,
+    EnqueueRequest, EnqueueResult, HandlerVersion, LeaseRenewal, QueueConfig, QueueName, RetryPolicy,
+    STORAGE_PROTOCOL_VERSION, StepName, TaskName, TaskState, WorkerId,
 };
 use pgtask_postgres::{PostgresError, Store, StoreConfig};
 use serde_json::json;
@@ -14,6 +14,20 @@ use uuid::Uuid;
 
 fn database_url() -> Option<String> {
     std::env::var("PGTASK_DATABASE_URL").ok()
+}
+
+async fn enqueue_concurrently(store: &Store, request: &EnqueueRequest) -> Vec<EnqueueResult> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..16 {
+        let store = store.clone();
+        let request = request.clone();
+        tasks.spawn(async move { store.enqueue(&request).await.unwrap() });
+    }
+    let mut results = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        results.push(result.unwrap());
+    }
+    results
 }
 
 async fn configure_test_roles(store: &Store) {
@@ -69,20 +83,21 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             .await
             .unwrap();
     assert_eq!(capable_tasks, 1);
-    let maintenance_grants: (bool, bool, bool, bool, bool) = sqlx::query_as(
+    let maintenance_grants: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r"
         SELECT
             has_function_privilege(current_user, 'pgtask.put_schedule(uuid, text, text, bigint, text, text, integer, text, text, integer, jsonb, jsonb, smallint, integer, timestamptz)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.delete_expired_terminal(text, integer)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.wait_for_result(uuid, integer, uuid, text, integer, uuid, bigint)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.recover_result_wait_timeouts(integer)', 'EXECUTE'),
-            has_function_privilege(current_user, 'pgtask.register_worker(uuid, text, text, text[], integer[], text[], bigint[], integer[], bigint[], bigint)', 'EXECUTE')
+            has_function_privilege(current_user, 'pgtask.register_worker(uuid, text, text, text[], integer[], text[], bigint[], integer[], bigint[], bigint)', 'EXECUTE'),
+            has_function_privilege(current_user, 'pgtask.delete_expired_idempotency_keys(text, integer)', 'EXECUTE')
         ",
     )
     .fetch_one(&mut *connection)
     .await
     .unwrap();
-    assert_eq!(maintenance_grants, (true, true, true, true, true));
+    assert_eq!(maintenance_grants, (true, true, true, true, true, true));
 }
 
 #[tokio::test]
@@ -378,6 +393,12 @@ async fn invalid_task_and_lease_values_fail_before_mutating_storage() {
         store.put_queue(&queue).await,
         Err(PostgresError::InvalidTask(_))
     ));
+    queue.terminal_retention = Duration::ZERO;
+    queue.idempotency_retention = Duration::from_secs(u64::MAX);
+    assert!(matches!(
+        store.put_queue(&queue).await,
+        Err(PostgresError::InvalidTask(_))
+    ));
 }
 
 #[tokio::test]
@@ -605,6 +626,158 @@ async fn enqueue_deduplicate_and_claim_supported_due_tasks() {
 }
 
 #[tokio::test]
+async fn idempotency_retention_is_independent_from_task_history() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("idempotency-retention-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("idempotency-retention-{suffix}")).unwrap();
+    let mut queue = QueueConfig::new(queue_name.clone());
+    queue.terminal_retention = Duration::ZERO;
+    queue.idempotency_retention = Duration::from_hours(1);
+    store.put_queue(&queue).await.unwrap();
+
+    let mut retained_request = EnqueueRequest::new(task_name.clone(), json!({}));
+    retained_request.queue_name = queue_name.clone();
+    retained_request.idempotency_key = Some("retained".to_owned());
+    let retained_id = store.enqueue(&retained_request).await.unwrap().task_id;
+    let retained = store
+        .claim(
+            &queue_name,
+            WorkerId::new(),
+            &[(task_name.clone(), HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(
+        store
+            .complete(retained.id, retained.attempt, retained.lease_token.unwrap(), None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.delete_expired_terminal(&queue_name, 1).await.unwrap(), 1);
+    assert!(store.get_task(retained_id).await.unwrap().is_none());
+    let duplicate = store.enqueue(&retained_request).await.unwrap();
+    assert!(!duplicate.created);
+    assert_eq!(duplicate.task_id, retained_id);
+
+    queue.idempotency_retention = Duration::ZERO;
+    store.put_queue(&queue).await.unwrap();
+    let mut reusable_request = retained_request.clone();
+    reusable_request.idempotency_key = Some("reusable".to_owned());
+    let reusable_id = store.enqueue(&reusable_request).await.unwrap().task_id;
+    let reusable = store
+        .claim(
+            &queue_name,
+            WorkerId::new(),
+            &[(task_name, HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(
+        store
+            .fail(
+                reusable.id,
+                reusable.attempt,
+                reusable.lease_token.unwrap(),
+                &json!({"type": "terminal"}),
+                None,
+            )
+            .await
+            .unwrap(),
+        Some(TaskState::Failed)
+    );
+    let actor = format!("idempotency-{suffix}");
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT pgtask.admin_retry_task($1, $2)")
+            .bind(reusable_id.as_uuid())
+            .bind(&actor)
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    );
+    let retried_duplicate = store.enqueue(&reusable_request).await.unwrap();
+    assert!(!retried_duplicate.created);
+    assert_eq!(retried_duplicate.task_id, reusable_id);
+    assert!(store.cancel(reusable_id).await.unwrap());
+    assert_eq!(store.delete_expired_terminal(&queue_name, 1).await.unwrap(), 1);
+    let audited_task_id: Uuid = sqlx::query_scalar("SELECT task_id FROM pgtask.administrator_audit_view WHERE actor = $1")
+        .bind(actor)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(audited_task_id, reusable_id.as_uuid());
+    assert_eq!(store.delete_expired_idempotency_keys(&queue_name, 1).await.unwrap(), 1);
+    let reused = store.enqueue(&reusable_request).await.unwrap();
+    assert!(reused.created);
+    assert_ne!(reused.task_id, reusable_id);
+    assert!(matches!(
+        store.delete_expired_idempotency_keys(&queue_name, 0).await,
+        Err(PostgresError::InvalidRetentionLimit)
+    ));
+}
+
+#[tokio::test]
+async fn concurrent_producers_create_one_task_per_idempotency_window() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("concurrent-idempotency-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("concurrent-idempotency-{suffix}")).unwrap();
+    let mut queue = QueueConfig::new(queue_name.clone());
+    queue.idempotency_retention = Duration::ZERO;
+    store.put_queue(&queue).await.unwrap();
+    let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
+    request.queue_name = queue_name.clone();
+    request.idempotency_key = Some("one-window".to_owned());
+
+    let first_window = enqueue_concurrently(&store, &request).await;
+    assert_eq!(first_window.iter().filter(|result| result.created).count(), 1);
+    let first_id = first_window[0].task_id;
+    assert!(first_window.iter().all(|result| result.task_id == first_id));
+    let first = store
+        .claim(
+            &queue_name,
+            WorkerId::new(),
+            &[(task_name, HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(
+        store
+            .complete(first.id, first.attempt, first.lease_token.unwrap(), None)
+            .await
+            .unwrap()
+    );
+
+    let second_window = enqueue_concurrently(&store, &request).await;
+    assert_eq!(second_window.iter().filter(|result| result.created).count(), 1);
+    let second_id = second_window[0].task_id;
+    assert_ne!(second_id, first_id);
+    assert!(second_window.iter().all(|result| result.task_id == second_id));
+}
+
+#[tokio::test]
 async fn claim_orders_due_tasks_by_priority_then_run_time() {
     let Some(database_url) = database_url() else {
         return;
@@ -663,12 +836,13 @@ async fn queue_configuration_pauses_and_resumes_claiming() {
 
     let implicit = store.get_queue(&queue_name).await.unwrap().unwrap();
     assert_eq!(implicit.terminal_retention, Duration::from_hours(7 * 24));
+    assert_eq!(implicit.idempotency_retention, Duration::from_hours(30 * 24));
     let mut config = QueueConfig::new(queue_name.clone());
     config.terminal_retention = Duration::from_mins(1);
-    assert_eq!(
-        store.put_queue(&config).await.unwrap().terminal_retention,
-        Duration::from_mins(1)
-    );
+    config.idempotency_retention = Duration::from_hours(1);
+    let configured = store.put_queue(&config).await.unwrap();
+    assert_eq!(configured.terminal_retention, Duration::from_mins(1));
+    assert_eq!(configured.idempotency_retention, Duration::from_hours(1));
     assert!(
         store
             .set_queue_paused(&queue_name, true)

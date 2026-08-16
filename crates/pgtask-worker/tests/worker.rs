@@ -1567,9 +1567,11 @@ async fn replicated_workers_delete_expired_terminal_tasks_in_bounded_batches() {
     let task_name = TaskName::new(format!("worker-retention-{suffix}")).unwrap();
     let mut queue = QueueConfig::new(queue_name.clone());
     queue.terminal_retention = Duration::ZERO;
+    queue.idempotency_retention = Duration::ZERO;
     store.put_queue(&queue).await.unwrap();
     let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
     request.queue_name = queue_name.clone();
+    request.idempotency_key = Some(format!("worker-retention-{suffix}"));
     let task_id = store.enqueue(&request).await.unwrap().task_id;
     let task = store
         .claim(
@@ -1598,7 +1600,18 @@ async fn replicated_workers_delete_expired_terminal_tasks_in_bounded_batches() {
     let worker_shutdown = shutdown.clone();
     let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
     tokio::time::timeout(TEST_TIMEOUT, async {
-        while store.get_task(task_id).await.unwrap().is_some() {
+        loop {
+            let task_exists = store.get_task(task_id).await.unwrap().is_some();
+            let key_exists: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pgtask.idempotency_keys WHERE task_id = $1)",
+            )
+            .bind(task_id.as_uuid())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            if !task_exists && !key_exists {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

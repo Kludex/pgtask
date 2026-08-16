@@ -22,6 +22,7 @@ A stale handler receives a lease-lost result and must stop. Fencing prevents sta
 | Operation | Failure before commit | Failure after commit | Recovery |
 | --- | --- | --- | --- |
 | Enqueue | No task exists | Task is pending | Normal claim path |
+| Idempotent enqueue | Reservation and task both remain absent | Reservation and task commit together | Retry returns the reserved task ID |
 | Claim | Task remains pending | Task is running with a lease | Handler runs or the lease expires |
 | Lease renewal | Existing lease remains | Lease expiry advances | Retry renewal or lose the lease |
 | Complete | Task remains running | Task is terminal and successful | Lease expiry or no action |
@@ -85,4 +86,4 @@ Materialization and advancement share one transaction. A unique schedule occurre
 
 ## Retention failures
 
-Retention only deletes terminal tasks older than the configured threshold. A pass deletes leaves before parents so an active workflow keeps its ownership chain. Every pass is bounded and ordered. Failure leaves rows for a later pass. It does not block claiming pending tasks.
+Task-history and idempotency retention are independent. Task retention deletes terminal workflow leaves before parents. Idempotency retention deletes expired reservations in separate bounded batches. Deleting task history does not release an unexpired key. A failed pass leaves rows for a later pass and does not block claiming pending tasks.

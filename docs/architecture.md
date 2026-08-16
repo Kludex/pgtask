@@ -116,7 +116,14 @@ leader. Workers also recover expired leases for their queue and delete expired t
 
 All durable objects live in the `pgtask` schema. Logical queues share one `tasks` table and use partial indexes for the
 claim and expired-lease paths. Separate tables retain attempt history, workflow checkpoints, signals, waits, schedule
-occurrences, worker registrations, and administrator audit records.
+occurrences, worker registrations, idempotency reservations, and administrator audit records.
+
+An idempotency reservation has its own retention window. It remains active while its task is nonterminal, then expires
+after the queue's configured idempotency retention. Deleting terminal task history does not release the key. This keeps
+deduplication semantics independent from observability retention.
+
+Administrator audit rows keep their task or schedule identifier after the target is deleted. The identifier is durable
+audit data rather than a foreign key.
 
 Clients mutate state through `SECURITY DEFINER` functions. Lease-owned transitions also require the current attempt and
 lease token. Runtime roles do not need direct table access. Observer roles read security-barrier views instead. This SQL

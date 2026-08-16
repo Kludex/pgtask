@@ -32,7 +32,7 @@ Every successful retry, cancel, pause, and resume operation writes an immutable 
 
 ## Data exposure
 
-Payloads, results, errors, checkpoints, and signals can contain sensitive data. The database stores them as plaintext JSON. PostgreSQL encryption, backup encryption, retention, and access auditing remain deployment responsibilities.
+Payloads, results, errors, checkpoints, signals, idempotency keys, and retained audit target identifiers can contain sensitive data. The database stores them as plaintext. PostgreSQL encryption, backup encryption, retention, and access auditing remain deployment responsibilities.
 
 Telemetry excludes payloads, results, errors, task identifiers, and idempotency keys from metric attributes. Trace context and baggage are persisted, so producers must not place secrets in baggage.
 

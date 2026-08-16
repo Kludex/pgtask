@@ -51,6 +51,8 @@ enum QueueCommand {
         name: String,
         #[arg(long, default_value_t = 604_800)]
         terminal_retention_seconds: u64,
+        #[arg(long, default_value_t = 2_592_000)]
+        idempotency_retention_seconds: u64,
     },
     Pause {
         name: String,
@@ -83,8 +85,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Command::Retention { queue, limit } => {
             let queue = QueueName::new(queue)?;
-            let deleted = store.delete_expired_terminal(&queue, limit).await?;
-            println!("deleted {deleted} terminal tasks");
+            let tasks = store.delete_expired_terminal(&queue, limit).await?;
+            let idempotency_keys = store.delete_expired_idempotency_keys(&queue, limit).await?;
+            println!("deleted {tasks} terminal tasks and {idempotency_keys} idempotency keys");
         }
         Command::ConfigureGrants {
             owner,
@@ -107,9 +110,11 @@ async fn run_queue_command(store: &Store, command: QueueCommand) -> Result<(), B
         QueueCommand::Put {
             name,
             terminal_retention_seconds,
+            idempotency_retention_seconds,
         } => {
             let mut config = QueueConfig::new(QueueName::new(name)?);
             config.terminal_retention = Duration::from_secs(terminal_retention_seconds);
+            config.idempotency_retention = Duration::from_secs(idempotency_retention_seconds);
             let queue = store.put_queue(&config).await?;
             println!("queue {} configured", queue.name);
         }

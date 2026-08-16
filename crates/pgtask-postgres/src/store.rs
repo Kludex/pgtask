@@ -565,11 +565,15 @@ impl Store {
     pub async fn put_queue(&self, config: &QueueConfig) -> Result<Queue, PostgresError> {
         let retention_seconds = i64::try_from(config.terminal_retention.as_secs())
             .map_err(|_| PostgresError::InvalidTask("queue retention exceeds the Postgres bigint range".to_owned()))?;
+        let idempotency_retention_seconds = i64::try_from(config.idempotency_retention.as_secs()).map_err(|_| {
+            PostgresError::InvalidTask("idempotency retention exceeds the Postgres bigint range".to_owned())
+        })?;
         let row: QueueRow = sqlx::query_as(
-            "SELECT name, terminal_retention_seconds, paused_at, created_at, updated_at FROM pgtask.put_queue($1, $2)",
+            "SELECT name, terminal_retention_seconds, idempotency_retention_seconds, paused_at, created_at, updated_at FROM pgtask.put_queue($1, $2, $3)",
         )
         .bind(config.name.as_str())
         .bind(retention_seconds)
+        .bind(idempotency_retention_seconds)
         .fetch_one(&self.pool)
         .await?;
         Queue::try_from(row)
@@ -578,7 +582,7 @@ impl Store {
     pub async fn get_queue(&self, queue_name: &QueueName) -> Result<Option<Queue>, PostgresError> {
         let row: Option<QueueRow> = sqlx::query_as(
             r"
-            SELECT name, terminal_retention_seconds, paused_at, created_at, updated_at
+            SELECT name, terminal_retention_seconds, idempotency_retention_seconds, paused_at, created_at, updated_at
             FROM pgtask.queues
             WHERE name = $1
             ",
@@ -617,7 +621,7 @@ impl Store {
 
     pub async fn set_queue_paused(&self, queue_name: &QueueName, paused: bool) -> Result<Option<Queue>, PostgresError> {
         let row: Option<QueueRow> = sqlx::query_as(
-            "SELECT name, terminal_retention_seconds, paused_at, created_at, updated_at FROM pgtask.set_queue_paused($1, $2)",
+            "SELECT name, terminal_retention_seconds, idempotency_retention_seconds, paused_at, created_at, updated_at FROM pgtask.set_queue_paused($1, $2)",
         )
         .bind(queue_name.as_str())
         .bind(paused)
@@ -826,6 +830,22 @@ impl Store {
             return Err(PostgresError::InvalidRetentionLimit);
         }
         let deleted: i64 = sqlx::query_scalar("SELECT pgtask.delete_expired_terminal($1, $2)")
+            .bind(queue_name.as_str())
+            .bind(i32::from(limit))
+            .fetch_one(&self.pool)
+            .await?;
+        u64::try_from(deleted).map_err(invalid_number)
+    }
+
+    pub async fn delete_expired_idempotency_keys(
+        &self,
+        queue_name: &QueueName,
+        limit: u16,
+    ) -> Result<u64, PostgresError> {
+        if limit == 0 {
+            return Err(PostgresError::InvalidRetentionLimit);
+        }
+        let deleted: i64 = sqlx::query_scalar("SELECT pgtask.delete_expired_idempotency_keys($1, $2)")
             .bind(queue_name.as_str())
             .bind(i32::from(limit))
             .fetch_one(&self.pool)
@@ -1528,6 +1548,7 @@ struct BatchEnqueueRow {
 struct QueueRow {
     name: String,
     terminal_retention_seconds: i64,
+    idempotency_retention_seconds: i64,
     paused_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -1717,6 +1738,9 @@ impl TryFrom<QueueRow> for Queue {
             name: QueueName::new(row.name).map_err(|error| PostgresError::InvalidTask(error.to_string()))?,
             terminal_retention: Duration::from_secs(
                 u64::try_from(row.terminal_retention_seconds).map_err(invalid_number)?,
+            ),
+            idempotency_retention: Duration::from_secs(
+                u64::try_from(row.idempotency_retention_seconds).map_err(invalid_number)?,
             ),
             paused_at: row.paused_at,
             created_at: row.created_at,

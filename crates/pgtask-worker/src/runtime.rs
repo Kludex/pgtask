@@ -886,6 +886,11 @@ async fn delete_expired_terminal(
                 {
                     warn!(%error, "could not delete expired terminal tasks");
                 }
+                if enabled
+                    && let Err(error) = store.delete_expired_idempotency_keys(&queue_name, batch_size.get()).await
+                {
+                    warn!(%error, "could not delete expired idempotency keys");
+                }
             }
         }
     }

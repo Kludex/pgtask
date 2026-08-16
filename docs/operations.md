@@ -22,11 +22,15 @@ Back up the schema with the application data needed by handlers. A queue-only re
 ## Configure retention
 
 ```console
-pgtask queue put default --terminal-retention-seconds 604800
+pgtask queue put default \
+  --terminal-retention-seconds 604800 \
+  --idempotency-retention-seconds 2592000
 pgtask retention default --limit 1000
 ```
 
-Retention deletes terminal tasks in bounded transactions. Run it repeatedly until it reports zero when reclaiming a backlog. Check autovacuum progress after a large cleanup. Do not use an unbounded `DELETE` against the task table.
+Terminal history and idempotency reservations have separate per-queue retention windows. Keep idempotency retention at least as long as producers may retry a logical request. Cleanup uses bounded transactions. Run it repeatedly until it reports zero when reclaiming a backlog. Check autovacuum progress after a large cleanup. Do not use an unbounded `DELETE` against the task table.
+
+An enqueue deduplicated after task history was removed returns the original task identifier with `created = false`. Result inspection then returns no task. This is intentional: history retention controls visibility, while idempotency retention controls whether the side effect may be requested again.
 
 ## Drain a worker
 
