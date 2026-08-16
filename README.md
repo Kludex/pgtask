@@ -30,12 +30,15 @@ cd pgtask
 uv sync --project sdks/python --group dev
 ```
 
-Start PostgreSQL:
+Start the development environment in a local Kubernetes cluster:
 
 ```console
-docker compose up -d postgres
+tilt up
 export PGTASK_DATABASE_URL=postgresql://pgtask:pgtask@localhost:54329/pgtask
 ```
+
+Tilt builds the local image and installs `charts/pgtask` with its development values. Wait for the `pgtask` resource to
+become healthy before starting the worker. Run `tilt down` to remove the Helm release.
 
 Create `worker.py`:
 

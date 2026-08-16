@@ -7,7 +7,7 @@ metadata:
     {{- include "pgtask.labels" . | nindent 4 }}
     app.kubernetes.io/component: migration
   annotations:
-    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook: {{ ternary "post-install,pre-upgrade" "pre-install,pre-upgrade" .Values.developmentPostgres.enabled }}
     helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
     helm.sh/hook-weight: "-10"
     {{- with .Values.migrations.annotations }}

@@ -3,7 +3,8 @@
 ## Run a local scaling sweep
 
 ```console
-docker compose up -d postgres
+tilt up
+export PGTASK_DATABASE_URL=postgresql://pgtask:pgtask@localhost:54329/pgtask
 ./scripts/benchmark-scaling.sh
 ./scripts/benchmark-scenarios.sh
 ./scripts/benchmark-queue-isolation.sh
@@ -26,13 +27,13 @@ The CPU-bound profile performs computation on the handler runtime. The I/O-bound
 
 The worker-death scenario starts one worker, waits until it owns work, aborts its runtime, then starts the remaining workers. It uses a two-second lease and verifies that every task drains after recovery. Configure at least two workers.
 
-The database-disconnect script runs slow handlers, pauses the Compose PostgreSQL container for two seconds during execution, and verifies that the same worker runtime drains every task after PostgreSQL returns. Handlers whose completion could not commit are recovered after their leases expire and may run again.
+The database-disconnect script runs slow handlers, stops every PostgreSQL process in the Tilt pod for two seconds during execution, and verifies that the same worker runtime drains every task after PostgreSQL returns. Handlers whose completion could not commit are recovered after their leases expire and may run again.
 
 The multi-scheduler scenario creates one due occurrence per schedule and enables scheduling on four worker runtimes. The persisted success count verifies that scheduler contention materializes and drains every unique occurrence.
 
 The retained-history scenario drains the queue, then deletes terminal rows in bounded batches. Its JSON report includes cleanup duration and deleted task count. Use a large task count while capturing table, index, WAL, and autovacuum measurements from PostgreSQL.
 
-The PostgreSQL metrics wrapper captures WAL bytes, locks and lock waits, connections, cache hit ratio, transaction counts, temporary bytes, deadlocks, database size, and task table and index size before and after a benchmark. Set `PGTASK_POSTGRES_CONTAINER` to add peak PostgreSQL container CPU. Managed benchmark runs use the provider's database CPU metric instead.
+The PostgreSQL metrics wrapper captures WAL bytes, locks and lock waits, connections, cache hit ratio, transaction counts, temporary bytes, deadlocks, database size, and task table and index size before and after a benchmark. Managed benchmark runs use the provider's database CPU metric.
 
 Local index statistics identified queue-scoped lease recovery as the first tuning target. The original `(lease_expires_at, id)` index read 492,077 tuples across many independent queue runtimes. The queue-scoped index leads with `queue_name`, matching the recovery predicate while retaining deadline order inside each queue. Re-running all 19 worker integration tests produced 664 index scans that read only six tuples.
 

@@ -44,6 +44,11 @@ helm template test charts/pgtask \
     | "$validation_dir/kubeconform" -strict -summary -ignore-missing-schemas
 helm template test charts/pgtask --values charts/pgtask/values-development.yaml \
     | "$validation_dir/kubeconform" -strict -summary -ignore-missing-schemas
+helm template test charts/pgtask --show-only templates/migration-job.yaml \
+    | grep --quiet 'helm.sh/hook: pre-install,pre-upgrade'
+helm template test charts/pgtask --values charts/pgtask/values-development.yaml \
+    --show-only templates/migration-job.yaml \
+    | grep --quiet 'helm.sh/hook: post-install,pre-upgrade'
 helm template test charts/pgtask \
     --set ui.enabled=true \
     --set ui.administrator.enabled=true \

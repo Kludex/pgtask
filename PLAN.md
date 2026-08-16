@@ -245,7 +245,7 @@ Scenarios include:
 - Large retained history, cleanup, autovacuum, and index growth.
 - Rust versus Python handler overhead.
 
-Docker Compose provides repeatable database and query-plan testing. `kind` tests deployment lifecycle, pod deletion, rolling upgrades, graceful drain, and autoscaling. Publishable capacity results use an ephemeral managed PostgreSQL instance so the database does not compete with local worker containers.
+Tilt installs the Helm chart for repeatable database and query-plan testing. `kind` tests deployment lifecycle, pod deletion, rolling upgrades, graceful drain, and autoscaling. Publishable capacity results use an ephemeral managed PostgreSQL instance so the database does not compete with local worker containers.
 
 Reports capture throughput, queue latency, schedule lag, duplicate attempts, PostgreSQL CPU, WAL volume, lock waits, connection count, cache hit rate, and table and index growth.
 
@@ -354,7 +354,7 @@ Exit gate: TypeScript and Go applications enqueue and await work executed by the
 
 ### Milestone 6: Scale validation
 
-- Complete `pgtask-bench`, Docker Compose performance environments, and `kind` chaos tests.
+- Complete `pgtask-bench`, Tilt performance environments, and `kind` chaos tests.
 - Add worker capacity telemetry and pod-local health signals.
 - Validate an observe-only overload detector before it can change admission limits.
 - Test an optional downward safety brake and gradual recovery under event-loop, lease, and database pressure.

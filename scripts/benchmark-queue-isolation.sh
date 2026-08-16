@@ -6,12 +6,12 @@ trap 'rm -rf "$result_dir"' EXIT
 
 PGTASK_BENCH_SCENARIO=retry-storm \
     PGTASK_BENCH_TASKS=${PGTASK_BENCH_NOISY_TASKS:-10000} \
-    docker compose --profile benchmark run --rm benchmark >"$result_dir/noisy.json" &
+    ./scripts/run-benchmark.sh >"$result_dir/noisy.json" &
 noisy_pid=$!
 
 PGTASK_BENCH_SCENARIO=noop \
     PGTASK_BENCH_TASKS=${PGTASK_BENCH_FAST_TASKS:-1000} \
-    docker compose --profile benchmark run --rm benchmark >"$result_dir/fast.json" &
+    ./scripts/run-benchmark.sh >"$result_dir/fast.json" &
 fast_pid=$!
 
 wait "$fast_pid"

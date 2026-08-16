@@ -1,24 +1,20 @@
 #!/bin/sh
 set -eu
 
-postgres_container=$(docker compose ps --quiet postgres)
-if [ -z "$postgres_container" ]; then
-    echo "start the PostgreSQL service with: docker compose up -d postgres" >&2
-    exit 1
-fi
+postgres_deployment=pgtask-pgtask-postgres
 
 cleanup() {
-    docker unpause "$postgres_container" >/dev/null 2>&1 || true
+    kubectl exec "deployment/$postgres_deployment" -- sh -c 'kill -CONT -1; kill -CONT 1' >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM
 
 PGTASK_BENCH_SCENARIO=database-disconnect \
 PGTASK_BENCH_TASKS=${PGTASK_BENCH_TASKS:-10000} \
-docker compose --profile benchmark run --rm benchmark &
+./scripts/run-benchmark.sh &
 benchmark_pid=$!
 
 sleep 1
-docker pause "$postgres_container" >/dev/null
+kubectl exec "deployment/$postgres_deployment" -- sh -c 'kill -STOP -1; kill -STOP 1'
 sleep 2
-docker unpause "$postgres_container" >/dev/null
+kubectl exec "deployment/$postgres_deployment" -- sh -c 'kill -CONT -1; kill -CONT 1'
 wait "$benchmark_pid"

@@ -119,13 +119,14 @@ helm upgrade --install pgtask ./charts/pgtask \
   --set otel.endpoint=http://otel-collector.observability:4317
 ```
 
-## Render disposable development PostgreSQL
+## Run the development chart
 
 ```console
-helm template pgtask ./charts/pgtask \
-  --values ./charts/pgtask/values-development.yaml
+tilt up
 ```
 
-`values-development.yaml` creates an `emptyDir` PostgreSQL deployment. It is only for `kind`, demos, and chart lifecycle tests.
+Tilt builds the project image, installs this chart with `values-development.yaml`, runs migrations, and forwards
+PostgreSQL to `localhost:54329`. The development values create an `emptyDir` PostgreSQL deployment. They are only for
+local clusters, demos, and chart lifecycle tests. Run `tilt down` to remove the release.
 
 Run the complete local lifecycle test with `./scripts/test-kind-lifecycle.sh`. It builds and loads the local image, installs the chart, drains tasks, performs a rolling restart, force-deletes an active worker, verifies lease recovery, upgrades the release, and rolls it back. The script uses a uniquely named disposable `kind` cluster and removes it on exit.

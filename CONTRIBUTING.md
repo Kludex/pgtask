@@ -2,11 +2,16 @@
 
 ## Setup
 
-Install the pinned Rust toolchain, Docker, and Docker Compose. Then start PostgreSQL:
+Install the pinned Rust toolchain, Docker, Kubernetes, Helm, and Tilt. Select a local Kubernetes context, then start the
+development environment:
 
 ```console
-docker compose up -d postgres
+tilt up
+export PGTASK_DATABASE_URL=postgresql://pgtask:pgtask@localhost:54329/pgtask
 ```
+
+Tilt installs `charts/pgtask` with disposable PostgreSQL storage and forwards PostgreSQL to port `54329`. Run
+`tilt down` to remove the Helm release.
 
 ## Checks
 
