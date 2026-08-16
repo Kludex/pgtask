@@ -45,9 +45,16 @@ fn normalize(entries: Vec<String>, owner: &str) -> String {
 
 async fn record_surface(store: &Store, owner: &str) -> String {
     let mut surface = String::new();
+    let mut connection = store.pool().acquire().await.unwrap();
+    // Postgres qualifies type names against the search path, which otherwise resolves the pgtask
+    // schema whenever the connecting role happens to be named after it.
+    sqlx::query("SET search_path = pg_catalog")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
 
     let schema = sqlx::query("SELECT coalesce(nspacl::text[], '{}') FROM pg_namespace WHERE nspname = 'pgtask'")
-        .fetch_one(store.pool())
+        .fetch_one(&mut *connection)
         .await
         .unwrap();
     writeln!(surface, "schema pgtask").unwrap();
@@ -69,7 +76,7 @@ async fn record_surface(store: &Store, owner: &str) -> String {
         ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)
         ",
     )
-    .fetch_all(store.pool())
+    .fetch_all(&mut *connection)
     .await
     .unwrap();
     for function in functions {
@@ -113,7 +120,7 @@ async fn record_surface(store: &Store, owner: &str) -> String {
         ORDER BY c.relkind, c.relname
         ",
     )
-    .fetch_all(store.pool())
+    .fetch_all(&mut *connection)
     .await
     .unwrap();
     for relation in relations {
