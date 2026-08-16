@@ -4,7 +4,7 @@
   "description": "Typed PostgreSQL client for pgtask",
   "homepage": "https://github.com/Kludex/pgtask/blob/main/docs/typescript.md",
   "bugs": "https://github.com/Kludex/pgtask/issues",
-  "license": "MIT OR Apache-2.0",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Kludex/pgtask.git",

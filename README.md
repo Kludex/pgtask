@@ -355,4 +355,4 @@ See [Contributing](CONTRIBUTING.md) for the complete development workflow.
 
 ## License
 
-This project is licensed under the Apache License 2.0 or the MIT License, at your option.
+This project is licensed under the [MIT License](LICENSE).

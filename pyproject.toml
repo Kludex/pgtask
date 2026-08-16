@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "PostgreSQL-native durable tasks and workflows"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 dependencies = ["opentelemetry-api>=1.30", "psycopg>=3.2"]
 classifiers = [
   "Development Status :: 2 - Pre-Alpha",
