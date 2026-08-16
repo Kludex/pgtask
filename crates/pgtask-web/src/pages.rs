@@ -39,9 +39,13 @@ fn queue_rows(queues: &[QueueSummary]) -> String {
         let status = if queue.paused_at.is_some() { "paused" } else { "active" };
         write!(
             rows,
-            "<tr><td>{}</td><td class=\"state\">{status}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            "<tr><td>{}</td><td class=\"state\">{status}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>\
+             <td>{}</td><td>{}</td><td>{}</td></tr>",
             encode_text(&queue.name),
             queue.pending_count,
+            queue.ready_count,
+            queue.routable_count,
+            queue.unroutable_count,
             queue.running_count,
             queue.waiting_count,
             queue.terminal_count,
@@ -119,8 +123,9 @@ fn worker_rows(workers: &[WorkerSummary]) -> String {
 
 pub fn dashboard(data: &Dashboard) -> String {
     let body = format!(
-        "<h1>Queues</h1><table><thead><tr><th>Queue</th><th>Status</th><th>Pending</th><th>Running</th>\
-         <th>Waiting</th><th>Terminal</th></tr></thead><tbody>{}</tbody></table>\
+        "<h1>Queues</h1><table><thead><tr><th>Queue</th><th>Status</th><th>Pending</th><th>Ready</th>\
+         <th>Routable</th><th>Unroutable</th><th>Running</th><th>Waiting</th><th>Terminal</th></tr></thead>\
+         <tbody>{}</tbody></table>\
          <div class=\"grid\"><div class=\"card\"><h2>Recent tasks</h2><p>{} visible</p><a href=\"/tasks\">Inspect tasks</a></div>\
          <div class=\"card\"><h2>Schedules</h2><p>{} configured</p><a href=\"/schedules\">Inspect schedules</a></div>\
          <div class=\"card\"><h2>Workers</h2><p>{} registered</p><a href=\"/workers\">Inspect workers</a></div></div>",

@@ -198,6 +198,9 @@ async fn observer_pages_cover_queues_tasks_schedules_workers_and_not_found() {
     for path in ["/", "/healthz", "/tasks", "/schedules", "/workers"] {
         assert_eq!(response(&app, path).await.0, StatusCode::OK);
     }
+    let (_, queues) = response(&app, "/").await;
+    assert!(queues.contains("Routable"));
+    assert!(queues.contains("Unroutable"));
     let (_, tasks) = response(&app, "/tasks?query=%3Cscript%3E").await;
     assert!(tasks.contains("&lt;script&gt;"));
     assert!(!tasks.contains("value=\"<script>\""));

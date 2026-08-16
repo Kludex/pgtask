@@ -13,6 +13,8 @@ struct KernelMetrics {
     schedule_occurrences: Counter<u64>,
     schedule_lag: Histogram<f64>,
     schedule_materialization_duration: Histogram<f64>,
+    queue_ready_tasks: Gauge<u64>,
+    queue_unroutable_tasks: Gauge<u64>,
     worker_configured_concurrency: Gauge<u64>,
     worker_effective_concurrency: Gauge<u64>,
     worker_active_handlers: Gauge<u64>,
@@ -58,6 +60,16 @@ fn metrics() -> &'static KernelMetrics {
                 .f64_histogram("pgtask.schedule.materialization.duration")
                 .with_description("Schedule materialization transaction duration")
                 .with_unit("s")
+                .build(),
+            queue_ready_tasks: meter
+                .u64_gauge("pgtask.queue.ready.tasks")
+                .with_description("Due tasks supported by this worker process")
+                .with_unit("{task}")
+                .build(),
+            queue_unroutable_tasks: meter
+                .u64_gauge("pgtask.queue.unroutable.tasks")
+                .with_description("Due tasks with no live capable worker")
+                .with_unit("{task}")
                 .build(),
             worker_configured_concurrency: meter
                 .u64_gauge("pgtask.worker.concurrency.configured")
@@ -160,6 +172,12 @@ pub fn record_queue_latency(queue_name: &str, task_name: &str, duration: Duratio
             KeyValue::new("pgtask.task.name", task_name.to_owned()),
         ],
     );
+}
+
+pub fn record_queue_demand(queue_name: &str, capable_tasks: u64, unroutable_tasks: u64) {
+    let attributes = [KeyValue::new("pgtask.queue.name", queue_name.to_owned())];
+    metrics().queue_ready_tasks.record(capable_tasks, &attributes);
+    metrics().queue_unroutable_tasks.record(unroutable_tasks, &attributes);
 }
 
 pub fn record_execution(queue_name: &str, task_name: &str, outcome: &'static str, duration: Duration) {

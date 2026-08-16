@@ -62,6 +62,13 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
         .await
         .unwrap();
     assert!(ready_channel.starts_with("pgtask_ready_"));
+    let capable_tasks: i64 =
+        sqlx::query_scalar("SELECT capable_tasks FROM pgtask.queue_demand($1, ARRAY['role-task'], ARRAY[1])")
+            .bind(queue_name)
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
+    assert_eq!(capable_tasks, 1);
     let maintenance_grants: (bool, bool) = sqlx::query_as(
         r"
         SELECT
@@ -195,6 +202,10 @@ async fn invalid_runtime_limits_fail_before_mutating_storage() {
         Err(PostgresError::MissingCapabilities)
     ));
     assert!(matches!(
+        store.queue_demand(&queue_name, &[]).await,
+        Err(PostgresError::MissingCapabilities)
+    ));
+    assert!(matches!(
         store.delete_expired_terminal(&queue_name, 0).await,
         Err(PostgresError::InvalidRetentionLimit)
     ));
@@ -210,6 +221,72 @@ async fn invalid_runtime_limits_fail_before_mutating_storage() {
         store.recover_expired(&queue_name, 0).await,
         Err(PostgresError::InvalidClaimLimit)
     ));
+}
+
+#[tokio::test]
+async fn queue_demand_separates_capable_and_unroutable_ready_tasks() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("demand-{suffix}")).unwrap();
+    let supported = TaskName::new(format!("supported-{suffix}")).unwrap();
+    let unsupported = TaskName::new(format!("unsupported-{suffix}")).unwrap();
+    let capabilities = [(supported.clone(), HandlerVersion::default())];
+    let mut requests = Vec::new();
+    for task_name in [supported.clone(), unsupported] {
+        let mut request = EnqueueRequest::new(task_name, json!({}));
+        request.queue_name = queue_name.clone();
+        requests.push(request);
+    }
+    let mut delayed = EnqueueRequest::new(supported, json!({}));
+    delayed.queue_name = queue_name.clone();
+    delayed.run_at = Some(Utc::now() + ChronoDuration::hours(1));
+    requests.push(delayed);
+    store.enqueue_many(&requests).await.unwrap();
+    let worker_id = WorkerId::new();
+    store
+        .register_worker(worker_id, &queue_name, "test", &capabilities, Duration::from_secs(30))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.queue_demand(&queue_name, &capabilities).await.unwrap(),
+        pgtask_postgres::QueueDemand {
+            ready_tasks: 2,
+            capable_tasks: 1,
+            unroutable_tasks: 1,
+        }
+    );
+    let overview: (i64, i64, i64) = sqlx::query_as(
+        "SELECT ready_count, routable_count, unroutable_count FROM pgtask.queue_overview WHERE name = $1",
+    )
+    .bind(queue_name.as_str())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(overview, (2, 1, 1));
+
+    assert!(
+        store
+            .heartbeat_worker(worker_id, Duration::from_secs(30), true)
+            .await
+            .unwrap()
+    );
+    let demand = store.queue_demand(&queue_name, &capabilities).await.unwrap();
+    assert_eq!(demand.capable_tasks, 1);
+    assert_eq!(demand.unroutable_tasks, 2);
+    store.set_queue_paused(&queue_name, true).await.unwrap();
+    assert_eq!(
+        store
+            .queue_demand(&queue_name, &capabilities)
+            .await
+            .unwrap()
+            .ready_tasks,
+        0
+    );
 }
 
 #[tokio::test]

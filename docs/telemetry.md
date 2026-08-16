@@ -38,6 +38,8 @@ Trace context is stored in the task `headers` JSON object. Existing application 
 | `pgtask.schedule.occurrences` | Counter | Tasks |
 | `pgtask.schedule.lag` | Histogram | Seconds |
 | `pgtask.schedule.materialization.duration` | Histogram | Seconds |
+| `pgtask.queue.ready.tasks` | Gauge | Tasks |
+| `pgtask.queue.unroutable.tasks` | Gauge | Tasks |
 | `pgtask.worker.concurrency.configured` | Gauge | Handlers |
 | `pgtask.worker.concurrency.effective` | Gauge | Handlers |
 | `pgtask.worker.handlers.active` | Gauge | Handlers |
@@ -49,6 +51,8 @@ Trace context is stored in the task `headers` JSON object. Existing application 
 Metric attributes include queue name, task name, transition state, execution outcome, and lease-renewal result. Task identifiers, payloads, results, errors, and idempotency keys are excluded to keep cardinality bounded.
 
 Worker-capacity gauges only use `pgtask.queue.name`. Configure a stable `service.instance.id` resource attribute for each process. Backends must retain that resource boundary when aggregating several workers for one queue.
+
+`pgtask.queue.ready.tasks` counts due tasks supported by the process's registered task names and handler versions. Use it for queue autoscaling. `pgtask.queue.unroutable.tasks` counts due tasks with no live, non-draining worker that advertises the required capability. Alert when it remains nonzero. Take the maximum across worker instances for both gauges; every replica observes the same durable queue.
 
 Configured concurrency is the hard process limit. Effective concurrency is the current in-memory admission limit. Available slots are `max(effective - active, 0)`. Lowering the effective limit stops new claims and never cancels an active handler. Event-loop lag measures delay beyond the one-second runtime sampling deadline. Lease-renewal age is the oldest active lease age at the renewal sampling point, or zero when the worker has no active lease.
 

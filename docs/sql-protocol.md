@@ -12,7 +12,7 @@ All objects live in the `pgtask` schema. Identifiers passed by callers are value
 | --- | --- |
 | Owner | Install and migrate the schema; grant runtime roles |
 | Producer | Enqueue tasks and emit signals; read explicitly returned identifiers |
-| Worker | Claim and mutate leased tasks; materialize schedules; manage its own heartbeat |
+| Worker | Claim and mutate leased tasks; reconcile schedules; recover waits and leases; run bounded retention; manage its own heartbeat |
 | Observer | Read operational task, worker, schedule, and occurrence views without mutation |
 | Administrator | Cancel, retry, configure queues and schedules, and run retention |
 
@@ -62,7 +62,7 @@ Signal identity is `(task_id, signal_name, occurrence)`. The first committed pay
 
 ### Inspect and wait for a result
 
-`pgtask.task_result` exposes state, result, error, and completion time for one known task identifier. A client that waits establishes `LISTEN pgtask_result` before reading this function. Every terminal transition sends the task identifier as the notification payload.
+`pgtask.task_result` exposes state, result, error, and completion time for one known task identifier. A client resolves the task's deterministic `pgtask_result_*` shard and subscribes before reading this function. Every terminal transition sends the task identifier as the notification payload.
 
 ## Worker operations
 
@@ -98,11 +98,15 @@ Schedulers claim due definitions with `pgtask.claim_due_schedules`. They calcula
 
 `pgtask.wait_for_result` either checkpoints an already-terminal child or registers a durable result wait and releases the parent lease. A trigger on terminal task transitions checkpoints the child state, result, and error before waking the parent queue. This closes both result-before-wait and wait-before-result races.
 
-Every worker establishes session-level `LISTEN` subscriptions to `pgtask_ready`, `pgtask_schedule`, and `pgtask_wait` before it claims or materializes work. A low-frequency database reconciliation remains required because notifications are not durable across disconnects.
+Every worker establishes session-level `LISTEN` subscriptions to its deterministic `pgtask_ready_*` shard, `pgtask_schedule`, and `pgtask_wait` before it claims or materializes work. One process connection multiplexes these channels. A low-frequency database reconciliation remains required because notifications are not durable across disconnects.
+
+### Queue demand
+
+`pgtask.queue_demand` returns all due tasks, due tasks supported by the caller's handler capabilities, and due tasks with no live capable worker. Workers use the supported count for autoscaling telemetry and the unroutable count for alerts. Delayed and paused tasks do not contribute demand.
 
 ## Observer operations
 
-The observer reads `queue_overview`, `task_view`, `attempt_view`, `worker_view`, `worker_capability_view`, `checkpoint_view`, `signal_view`, `wait_view`, `result_wait_view`, `schedule_view`, and `schedule_occurrence_view`. It cannot read the underlying tables or invoke mutation functions.
+The observer reads `queue_overview`, `task_view`, `attempt_view`, `worker_view`, `worker_capability_view`, `checkpoint_view`, `signal_view`, `wait_view`, `result_wait_view`, `schedule_view`, and `schedule_occurrence_view`. `queue_overview` separates pending, due, routable, and unroutable tasks. The observer cannot read the underlying tables or invoke mutation functions.
 
 ## Value limits
 

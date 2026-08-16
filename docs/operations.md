@@ -46,7 +46,7 @@ curl --fail http://127.0.0.1:8081/readyz
 ```sql
 SELECT *
 FROM pgtask.queue_overview
-ORDER BY pending_count DESC;
+ORDER BY unroutable_count DESC, ready_count DESC;
 
 SELECT id, task_name, state, run_at, attempt, max_attempts, lease_expires_at
 FROM pgtask.task_view
@@ -60,7 +60,7 @@ WHERE queue_name = 'default'
 ORDER BY heartbeat_at DESC;
 ```
 
-If pending tasks have unsupported task names or handler versions, deploy a worker with the missing capability. If `run_at` is in the future, check PostgreSQL time before changing task rows. If workers are live but readiness fails, inspect database, listener, and lease-renewal telemetry.
+If `unroutable_count` is nonzero, deploy a worker with the missing task name and handler version. `ready_count` excludes delayed and paused tasks. If `run_at` is in the future, check PostgreSQL time before changing task rows. If workers are live but readiness fails, inspect database, listener, and lease-renewal telemetry.
 
 ## Respond to PostgreSQL loss
 

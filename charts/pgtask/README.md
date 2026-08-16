@@ -17,6 +17,8 @@ Workers also receive `PGTASK_LISTENER_DATABASE_URL`. It uses the main database S
 
 Every worker replica can run maintenance. PostgreSQL `SKIP LOCKED` claims divide schedule materialization, wait timeout recovery, expired lease recovery, and terminal retention without a leader. `workers.<name>.maintenance.retention` controls bounded retention batches for that worker's queue.
 
+The default external autoscaling metric, `pgtask_queue_ready_tasks`, is the Prometheus-normalized form of the capability-aware `pgtask.queue.ready.tasks` OpenTelemetry gauge. Configure your metrics adapter to take the maximum across worker instances. Alert on `pgtask_queue_unroutable_tasks` instead of scaling from it: those tasks require a deployment with the missing task name and handler version.
+
 The migration Job runs as a `pre-install` and `pre-upgrade` hook. The engine also takes a PostgreSQL advisory lock, so overlapping Helm operations cannot apply migrations concurrently.
 
 The chart does not start a worker by default. A worker image contains your registered handlers. The project image only

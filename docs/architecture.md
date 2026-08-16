@@ -74,6 +74,8 @@ stores the result. Handlers must use stable idempotency keys when they change st
 
 An unsupported task name or handler version remains `pending`. The database only returns tasks that match the
 capabilities supplied by the claiming worker, so a deployment does not consume attempts for code it cannot run.
+`pgtask.queue_overview` separates ready, routable, and unroutable counts. Workers export capability-aware ready demand
+for autoscaling and a separate unroutable gauge for alerting.
 
 ## Durable workflows
 

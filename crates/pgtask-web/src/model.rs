@@ -7,6 +7,9 @@ pub struct QueueSummary {
     pub name: String,
     pub paused_at: Option<DateTime<Utc>>,
     pub pending_count: i64,
+    pub ready_count: i64,
+    pub routable_count: i64,
+    pub unroutable_count: i64,
     pub running_count: i64,
     pub waiting_count: i64,
     pub terminal_count: i64,
@@ -15,7 +18,8 @@ pub struct QueueSummary {
 impl QueueSummary {
     async fn all(pool: &PgPool) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as(
-            "SELECT name, paused_at, pending_count, running_count, waiting_count, terminal_count \
+            "SELECT name, paused_at, pending_count, ready_count, routable_count, unroutable_count, \
+             running_count, waiting_count, terminal_count \
              FROM pgtask.queue_overview ORDER BY name",
         )
         .fetch_all(pool)

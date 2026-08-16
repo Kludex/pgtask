@@ -210,6 +210,14 @@ struct ActiveLease {
     last_renewed: Instant,
 }
 
+struct HeartbeatConfig {
+    worker_id: WorkerId,
+    queue_name: QueueName,
+    capabilities: Vec<(TaskName, HandlerVersion)>,
+    interval: Duration,
+    ttl: Duration,
+}
+
 impl Worker {
     pub fn new(store: Store, registry: HandlerRegistry, config: WorkerConfig) -> Result<Self, WorkerError> {
         if config.lease_duration < Duration::from_millis(3) {
@@ -339,9 +347,13 @@ impl Worker {
         );
         let heartbeat = heartbeat_worker(
             self.store.clone(),
-            self.id,
-            self.config.worker_heartbeat_interval,
-            self.config.worker_ttl,
+            HeartbeatConfig {
+                worker_id: self.id,
+                queue_name: self.config.queue_name.clone(),
+                capabilities: capabilities.clone(),
+                interval: self.config.worker_heartbeat_interval,
+                ttl: self.config.worker_ttl,
+            },
             runtime_shutdown.clone(),
             self.health.clone(),
         );
@@ -875,27 +887,20 @@ async fn delete_expired_terminal(
     }
 }
 
-async fn heartbeat_worker(
-    store: Store,
-    worker_id: WorkerId,
-    heartbeat_interval: Duration,
-    ttl: Duration,
-    shutdown: CancellationToken,
-    health: Health,
-) {
-    let mut interval = tokio::time::interval(heartbeat_interval);
+async fn heartbeat_worker(store: Store, config: HeartbeatConfig, shutdown: CancellationToken, health: Health) {
+    let mut interval = tokio::time::interval(config.interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval.tick().await;
     loop {
         tokio::select! {
             () = shutdown.cancelled() => {
-                if let Err(error) = store.heartbeat_worker(worker_id, Duration::from_millis(1), true).await {
+                if let Err(error) = store.heartbeat_worker(config.worker_id, Duration::from_millis(1), true).await {
                     warn!(%error, "could not mark worker as stopped");
                 }
                 break;
             }
             _ = interval.tick() => {
-                match store.heartbeat_worker(worker_id, ttl, false).await {
+                match store.heartbeat_worker(config.worker_id, config.ttl, false).await {
                     Ok(true) => health.set_database(true),
                     Ok(false) => {
                         health.set_database(false);
@@ -904,6 +909,17 @@ async fn heartbeat_worker(
                     Err(error) => {
                         health.set_database(false);
                         warn!(%error, "could not update worker heartbeat");
+                    }
+                }
+                match store.queue_demand(&config.queue_name, &config.capabilities).await {
+                    Ok(demand) => pgtask_otel::record_queue_demand(
+                        config.queue_name.as_str(),
+                        demand.capable_tasks,
+                        demand.unroutable_tasks,
+                    ),
+                    Err(error) => {
+                        health.set_database(false);
+                        warn!(%error, "could not read queue demand");
                     }
                 }
             }

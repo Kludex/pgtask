@@ -179,6 +179,13 @@ pub enum TaskResultWait {
     TimedOut,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueDemand {
+    pub ready_tasks: u64,
+    pub capable_tasks: u64,
+    pub unroutable_tasks: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct SignalWaitRequest<'a> {
     pub task_id: TaskId,
@@ -529,6 +536,32 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         row.map(Queue::try_from).transpose()
+    }
+
+    pub async fn queue_demand(
+        &self,
+        queue_name: &QueueName,
+        capabilities: &[(TaskName, HandlerVersion)],
+    ) -> Result<QueueDemand, PostgresError> {
+        if capabilities.is_empty() {
+            return Err(PostgresError::MissingCapabilities);
+        }
+        let task_names: Vec<_> = capabilities.iter().map(|(name, _)| name.as_str()).collect();
+        let handler_versions: Vec<_> = capabilities
+            .iter()
+            .map(|(_, version)| i32::try_from(version.get()).map_err(|_| PostgresError::InvalidHandlerVersion))
+            .collect::<Result<_, _>>()?;
+        let row: QueueDemandRow = sqlx::query_as("SELECT * FROM pgtask.queue_demand($1, $2, $3)")
+            .bind(queue_name.as_str())
+            .bind(&task_names)
+            .bind(&handler_versions)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(QueueDemand {
+            ready_tasks: u64::try_from(row.ready).map_err(invalid_number)?,
+            capable_tasks: u64::try_from(row.capable).map_err(invalid_number)?,
+            unroutable_tasks: u64::try_from(row.unroutable).map_err(invalid_number)?,
+        })
     }
 
     pub async fn set_queue_paused(&self, queue_name: &QueueName, paused: bool) -> Result<Option<Queue>, PostgresError> {
@@ -1398,6 +1431,16 @@ impl Store {
 struct EnqueueRow {
     task_id: Uuid,
     created: bool,
+}
+
+#[derive(FromRow)]
+struct QueueDemandRow {
+    #[sqlx(rename = "ready_tasks")]
+    ready: i64,
+    #[sqlx(rename = "capable_tasks")]
+    capable: i64,
+    #[sqlx(rename = "unroutable_tasks")]
+    unroutable: i64,
 }
 
 #[derive(FromRow)]
