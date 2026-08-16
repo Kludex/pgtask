@@ -84,7 +84,6 @@ crates/
   pgtask-worker      Tokio worker, leases, scheduler, and shutdown
   pgtask             Public Rust API
   pgtask-cli         Administrative and diagnostic CLI
-  pgtask-python      Python SDK and async handler bridge
   pgtask-bench       Correctness and load generator
   pgtask-web         Optional UI service
 ```
@@ -92,6 +91,9 @@ crates/
 The worker runtime has separate supervised loops for claims, batched lease renewal, worker heartbeats, schedule materialization, notification listening, retention, and graceful shutdown. A handler is an async Rust function registered under an explicit stable name and version.
 
 ### Language SDKs
+
+The Python SDK and async handler bridge live in `sdks/python`. The TypeScript and Go producer SDKs live alongside it in
+`sdks/typescript` and `sdks/go`.
 
 The Rust API is the reference client. The Python package has four explicit concepts: `TaskDefinition`, `TaskRegistry`,
 `Client`, and `TaskHandle`. A definition statically links the payload and result types. A registry owns one logical queue,

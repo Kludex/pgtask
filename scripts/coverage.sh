@@ -7,7 +7,7 @@ set -eu
 eval "$(cargo llvm-cov show-env --sh)"
 cargo llvm-cov clean --workspace
 
-for artifact in python/pgtask/_native.*.so; do
+for artifact in sdks/python/python/pgtask/_native.*.so; do
     if test -e "$artifact"; then
         rm "$artifact"
     fi
@@ -57,12 +57,12 @@ fi
 if PGTASK_BENCH_SCENARIO=worker-death PGTASK_BENCH_WORKERS=1 target/debug/pgtask-bench >/dev/null 2>&1; then
     exit 1
 fi
-if uv run --no-sync python -c \
+if uv run --project sdks/python --no-sync python -c \
     'import os; env = os.environb.copy(); env[b"PGTASK_BENCH_SCENARIO"] = b"\xff"; os.execve(b"target/debug/pgtask-bench", [b"pgtask-bench"], env)' \
     >/dev/null 2>&1; then
     exit 1
 fi
-if uv run --no-sync python -c \
+if uv run --project sdks/python --no-sync python -c \
     'import os; env = os.environb.copy(); env[b"PGTASK_BENCH_TASKS"] = b"\xff"; os.execve(b"target/debug/pgtask-bench", [b"pgtask-bench"], env)' \
     >/dev/null 2>&1; then
     exit 1
@@ -106,12 +106,12 @@ fi
 if PGTASK_QUEUE='' target/debug/pgtask-smoke enqueue >/dev/null 2>&1; then
     exit 1
 fi
-if uv run --no-sync python -c \
+if uv run --project sdks/python --no-sync python -c \
     'import os; env = os.environb.copy(); env[b"PGTASK_CONCURRENCY"] = b"\xff"; os.execve(b"target/debug/pgtask-smoke", [b"pgtask-smoke", b"worker"], env)' \
     >/dev/null 2>&1; then
     exit 1
 fi
-if uv run --no-sync python -c \
+if uv run --project sdks/python --no-sync python -c \
     'import os; env = os.environb.copy(); env[b"PGTASK_SCHEDULER_ENABLED"] = b"\xff"; os.execve(b"target/debug/pgtask-smoke", [b"pgtask-smoke", b"worker"], env)' \
     >/dev/null 2>&1; then
     exit 1
@@ -168,17 +168,17 @@ coverage_web_pid=
 
 mkdir -p target/llvm-cov
 cargo llvm-cov report \
-    --ignore-filename-regex 'crates/pgtask-python/src/lib.rs' \
+    --ignore-filename-regex 'sdks/python/src/lib.rs' \
     --text \
     --show-missing-lines \
     --output-path target/llvm-cov/missing.txt
 cargo llvm-cov report \
-    --ignore-filename-regex 'crates/pgtask-python/src/lib.rs' \
+    --ignore-filename-regex 'sdks/python/src/lib.rs' \
     --json \
     --output-path target/llvm-cov/report.json
 cargo llvm-cov report \
-    --ignore-filename-regex 'crates/pgtask-python/src/lib.rs' \
+    --ignore-filename-regex 'sdks/python/src/lib.rs' \
     --fail-under-lines 98
 
-uv run --no-sync maturin develop --all-features
-uv run --no-sync pytest --cov=pgtask --cov=tests --cov-report=term-missing
+(cd sdks/python && uv run --no-sync maturin develop --all-features)
+(cd sdks/python && uv run --no-sync pytest --cov=pgtask --cov=tests --cov-report=term-missing)

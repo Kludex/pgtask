@@ -27,7 +27,7 @@ Clone the repository and install the Python package:
 ```console
 git clone https://github.com/Kludex/pgtask.git
 cd pgtask
-uv sync --group dev
+uv sync --project sdks/python --group dev
 ```
 
 Start PostgreSQL:
@@ -81,7 +81,7 @@ if __name__ == "__main__":
 Run the worker:
 
 ```console
-uv run python worker.py
+uv run --project sdks/python python worker.py
 ```
 
 Create `enqueue.py`:
@@ -119,7 +119,7 @@ asyncio.run(main())
 Run the producer in another terminal:
 
 ```console
-uv run python enqueue.py
+uv run --project sdks/python python enqueue.py
 ```
 
 The producer stores the task in PostgreSQL. PostgreSQL sends a notification after the transaction commits. The worker
@@ -304,6 +304,7 @@ cargo test --workspace --all-features
 Run the Python checks:
 
 ```console
+cd sdks/python
 uv sync --group dev
 uv run ruff format --check python tests
 uv run ruff check python tests
@@ -339,9 +340,10 @@ See [Contributing](CONTRIBUTING.md) for the complete development workflow.
 
 ## Documentation
 
-- [Python SDK](docs/python.md)
-- [TypeScript SDK](docs/typescript.md)
-- [Go SDK](docs/go.md)
+- [Architecture](docs/architecture.md)
+- [Python SDK](docs/sdk/python.md)
+- [TypeScript SDK](docs/sdk/typescript.md)
+- [Go SDK](docs/sdk/go.md)
 - [Durable execution](docs/durable-execution.md)
 - [Failure model](docs/failure-model.md)
 - [SQL protocol](docs/sql-protocol.md)

@@ -3,6 +3,7 @@ FROM rust:1.94-bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY sdks/python ./sdks/python
 RUN cargo build --locked --release --bin pgtask --bin pgtask-bench --bin pgtask-smoke --bin pgtask-web
 
 FROM debian:bookworm-slim

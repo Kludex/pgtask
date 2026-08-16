@@ -13,7 +13,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 chrono.workspace = true
-pgtask = { path = "../pgtask", version = "0.1.0" }
+pgtask = { path = "../../crates/pgtask", version = "0.1.0" }
 pyo3.workspace = true
 pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
 pythonize.workspace = true

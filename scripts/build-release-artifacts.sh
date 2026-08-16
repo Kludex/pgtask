@@ -6,8 +6,8 @@ mkdir -p dist
 
 cargo package --workspace --allow-dirty --locked
 cargo build --workspace --all-features --bins --release --locked
-uv run --no-sync maturin build --release --locked --out dist
-uv build --sdist --out-dir dist
+(cd sdks/python && uv run --no-sync maturin build --release --locked --out ../../dist)
+uv build --project sdks/python --sdist --out-dir dist
 (cd sdks/typescript && npm ci && npm run build && npm pack --pack-destination ../../dist)
 helm package charts/pgtask --version "$version" --app-version "$version" --destination dist
 

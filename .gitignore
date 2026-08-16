@@ -5,7 +5,12 @@
 /.venv/
 *.profraw
 *.pyc
-python/pgtask/_native.*.so
+sdks/python/.coverage
+sdks/python/.mypy_cache/
+sdks/python/.pytest_cache/
+sdks/python/.ruff_cache/
+sdks/python/.venv/
+sdks/python/python/pgtask/_native.*.so
 .DS_Store
 .env
 /sdks/typescript/coverage/

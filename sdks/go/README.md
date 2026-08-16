@@ -46,5 +46,5 @@ func main() {
 ```
 
 This is the typed Go producer and result client for pgtask. See the
-[Go SDK documentation](https://github.com/Kludex/pgtask/blob/main/docs/go.md) for transactions, OpenTelemetry
+[Go SDK documentation](https://github.com/Kludex/pgtask/blob/main/docs/sdk/go.md) for transactions, OpenTelemetry
 propagation, signals, and cancellation.

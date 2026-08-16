@@ -33,7 +33,7 @@ dev = [
 ]
 
 [tool.maturin]
-manifest-path = "crates/pgtask-python/Cargo.toml"
+manifest-path = "Cargo.toml"
 python-source = "python"
 module-name = "pgtask._native"
 features = ["pyo3/abi3-py310", "pyo3/extension-module"]

@@ -18,5 +18,5 @@ try {
 ```
 
 This is the typed TypeScript producer and result client for pgtask. See the
-[TypeScript SDK documentation](https://github.com/Kludex/pgtask/blob/main/docs/typescript.md) for transactions,
+[TypeScript SDK documentation](https://github.com/Kludex/pgtask/blob/main/docs/sdk/typescript.md) for transactions,
 OpenTelemetry propagation, signals, and cancellation.

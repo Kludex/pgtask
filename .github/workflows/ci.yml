@@ -105,6 +105,9 @@ jobs:
           - 5432:5432
     env:
       PGTASK_DATABASE_URL: postgresql://pgtask:pgtask@localhost:5432/pgtask
+    defaults:
+      run:
+        working-directory: sdks/python
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -237,7 +240,7 @@ jobs:
         with:
           python-version: "3.14"
       - run: cargo install cargo-llvm-cov --version 0.8.6 --locked
-      - run: uv sync --group dev
+      - run: uv sync --project sdks/python --group dev
       - run: ./scripts/coverage.sh
 
   wheels:
@@ -270,10 +273,11 @@ jobs:
       - uses: PyO3/maturin-action@v1
         with:
           command: build
+          working-directory: sdks/python
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           rust-toolchain: "1.94"
-          args: --release --locked --compatibility pypi --out dist
+          args: --release --locked --compatibility pypi --out ../../dist
       - run: uv pip install --system opentelemetry-api 'psycopg[binary]'
       - run: uv pip install --system --no-deps --no-index --find-links dist pgtask
       - run: python -c "import pgtask; assert pgtask.Client"

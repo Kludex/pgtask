@@ -89,11 +89,12 @@ jobs:
       - uses: PyO3/maturin-action@86b9d133d34bc1b40018696f782949dac11bd380
         with:
           command: build
+          working-directory: sdks/python
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           maturin-version: v1.11.5
           rust-toolchain: "1.94"
-          args: --release --locked --compatibility pypi --out dist
+          args: --release --locked --compatibility pypi --out ../../dist
       - run: uv pip install --system --no-deps --no-index --find-links dist pgtask
       - run: python -c "import pgtask; assert pgtask.Client"
       - uses: actions/upload-artifact@v4
@@ -110,7 +111,7 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.14"
-      - run: uv build --sdist --out-dir dist
+      - run: uv build --project sdks/python --sdist --out-dir dist
       - uses: actions/upload-artifact@v4
         with:
           name: source-distribution
