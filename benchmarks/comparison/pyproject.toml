@@ -1,0 +1,14 @@
+[project]
+name = "pgtask-comparison"
+version = "0"
+requires-python = ">=3.13"
+dependencies = [
+  "celery[redis]>=5.4",
+  "dramatiq[redis]>=1.17",
+  "redis>=5.0",
+  "pgtask",
+  "psycopg>=3.3.4",
+]
+
+[tool.uv.sources]
+pgtask = { path = "../../sdks/python" }
