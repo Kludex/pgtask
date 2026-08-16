@@ -2,8 +2,15 @@
 
 ## Setup
 
-Install the pinned Rust toolchain, Docker, Kubernetes, Helm, and Tilt. Select a local Kubernetes context, then start the
-development environment:
+Install the pinned Rust toolchain, Docker, Kubernetes, Helm, and Tilt. Select a local Kubernetes context that advertises
+a local registry. Without one Tilt pushes the development image to Docker Hub and the build fails with
+`denied: requested access to the resource is denied`. Create a suitable cluster with `k3d`:
+
+```console
+k3d cluster create pgtask --registry-create pgtask-registry:0.0.0.0:5111
+```
+
+Then start the development environment:
 
 ```console
 tilt up

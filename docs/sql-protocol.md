@@ -117,7 +117,7 @@ Every worker establishes session-level `LISTEN` subscriptions to its determinist
 
 ### Retry policies
 
-The policy-aware `pgtask.register_worker` overload durably registers one retry policy for each queue, task name, and handler version. Re-registering the same identity with different policy values fails. `pgtask.claim` snapshots that policy on a task before its first attempt. `handler_policy_view` exposes the immutable definitions to observers.
+`pgtask.register_worker` durably registers one retry policy for each queue, task name, and handler version. Re-registering the same identity with different policy values fails. `pgtask.claim` snapshots that policy on a task before its first attempt. `handler_policy_view` exposes the immutable definitions to observers.
 
 ## Observer operations
 
