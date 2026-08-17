@@ -193,6 +193,8 @@ impl DatabaseFaultWorker {
         config.worker_heartbeat_interval = Duration::from_millis(20);
         config.worker_ttl = Duration::from_millis(200);
         config.schedule_reconciliation_interval = Duration::from_millis(20);
+        // Retention must tick inside the fault windows below, or its failure path is never exercised.
+        config.retention_interval = Duration::from_millis(20);
         config.supervisor_interval = Duration::from_millis(20);
         config.shutdown_grace = Duration::from_millis(20);
         let worker = Worker::new(worker_store, registry, config).unwrap();
@@ -1049,6 +1051,8 @@ async fn worker_recovers_from_revoked_database_protocols() {
     fixture.admin.recover_expired(&fixture.fault_queue, 10).await.unwrap();
 
     for (function, delay) in [
+        ("pgtask.delete_expired_terminal(text, integer)", 150),
+        ("pgtask.delete_expired_idempotency_keys(text, integer)", 150),
         ("pgtask.recover_expired(text, integer)", 150),
         ("pgtask.claim(text, uuid, text[], integer[], integer, bigint)", 150),
         ("pgtask.next_task_delay_milliseconds(text, text[], integer[])", 150),

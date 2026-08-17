@@ -1,7 +1,7 @@
 use std::{num::NonZeroU16, time::Duration};
 
 use chrono::{TimeZone, Utc};
-use pgtask_core::{MisfirePolicy, ScheduleDefinition};
+use pgtask_core::{MisfirePolicy, ScheduleDefinition, ScheduleError};
 
 #[test]
 fn schedule_state_remains_ordered_when_database_time_moves_backward_and_forward() {
@@ -112,4 +112,16 @@ fn a_cron_schedule_reports_discarded_occurrences() {
     let latest = schedule.materialize(first_due, now, MisfirePolicy::Latest).unwrap();
     assert_eq!(latest.occurrences.len(), 1);
     assert_eq!(latest.skipped, 5, "00:00 through 05:00 are due, one is kept");
+}
+
+#[test]
+fn a_sub_millisecond_interval_is_rejected_rather_than_dividing_by_zero() {
+    // `interval` only rejects a zero duration, so an interval below a millisecond reaches
+    // materialization and truncates to zero milliseconds.
+    let schedule = ScheduleDefinition::interval(Duration::from_micros(500)).unwrap();
+    let first_due = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+    let now = first_due + chrono::TimeDelta::seconds(1);
+
+    let error = schedule.materialize(first_due, now, MisfirePolicy::Skip).unwrap_err();
+    assert!(matches!(error, ScheduleError::ZeroInterval));
 }
