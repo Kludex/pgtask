@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Generic, TypeVar, cast
@@ -309,7 +309,7 @@ class Worker:
     def __init__(
         self,
         database_url: str,
-        registry: TaskRegistry,
+        registry: TaskRegistry | Sequence[TaskRegistry],
         *,
         concurrency: int = 10,
         poll_interval: float = 30.0,
@@ -319,9 +319,15 @@ class Worker:
         max_query_connections: int = 10,
         max_listener_connections: int = 1,
     ) -> None:
+        registries = [registry] if isinstance(registry, TaskRegistry) else list(registry)
+        if not registries:
+            raise ValueError("at least one registry is required")
+        queue_names = [entry.queue_name for entry in registries]
+        if len(set(queue_names)) != len(queue_names):
+            raise ValueError("registries must target distinct queues")
         self._native = _native.Worker(
             database_url,
-            registry.queue_name,
+            queue_names,
             {
                 "concurrency": concurrency,
                 "poll_interval": poll_interval,
@@ -332,7 +338,8 @@ class Worker:
                 "max_listener_connections": max_listener_connections,
             },
         )
-        for definition in registry.definitions:
+        definitions = [definition for entry in registries for definition in entry.definitions]
+        for definition in definitions:
 
             async def adapter(
                 value: dict[str, Any],

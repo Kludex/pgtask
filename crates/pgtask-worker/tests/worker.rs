@@ -274,6 +274,24 @@ async fn worker_configuration_rejects_every_invalid_invariant() {
         Err(WorkerError::MissingHandlers)
     ));
 
+    assert!(matches!(
+        Worker::new(
+            store.clone(),
+            successful_registry(&task_name),
+            WorkerConfig::with_queues(Vec::new())
+        ),
+        Err(WorkerError::MissingQueues)
+    ));
+
+    assert!(matches!(
+        Worker::new(
+            store.clone(),
+            successful_registry(&task_name),
+            WorkerConfig::with_queues(vec![queue_name.clone(), queue_name.clone()])
+        ),
+        Err(WorkerError::DuplicateQueues)
+    ));
+
     let mut config = WorkerConfig::new(queue_name.clone());
     config.lease_duration = Duration::from_millis(2);
     assert!(matches!(
@@ -490,6 +508,75 @@ async fn worker_executes_registered_task_and_shuts_down() {
 
     shutdown.cancel();
     worker_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn worker_drains_earlier_queues_before_later_ones() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let high = QueueName::new(format!("multi-high-{}", Uuid::new_v4())).unwrap();
+    let low = QueueName::new(format!("multi-low-{}", Uuid::new_v4())).unwrap();
+    let task_name = TaskName::new("multi-queue-order").unwrap();
+
+    let mut task_ids = Vec::new();
+    for queue_name in [&low, &high, &low, &high] {
+        let mut request = EnqueueRequest::new(task_name.clone(), json!(queue_name.as_str()));
+        request.queue_name = queue_name.clone();
+        task_ids.push(store.enqueue(&request).await.unwrap().task_id);
+    }
+
+    let executed = Arc::new(Mutex::new(Vec::new()));
+    let mut registry = HandlerRegistry::new();
+    let recorded = Arc::clone(&executed);
+    registry.register(
+        task_name,
+        HandlerVersion::default(),
+        RetryPolicy::Never,
+        move |task| {
+            let recorded = Arc::clone(&recorded);
+            async move {
+                recorded.lock().await.push(task.queue_name.clone());
+                Ok(json!(null))
+            }
+        },
+    );
+
+    let mut config = WorkerConfig::with_queues(vec![high.clone(), low.clone()]);
+    config.concurrency = NonZeroU16::new(1).unwrap();
+    config.claim_batch_size = NonZeroU16::new(1).unwrap();
+    config.lease_duration = Duration::from_millis(30);
+    config.poll_interval = Duration::from_millis(5);
+    config.retention_enabled = false;
+    config.shutdown_grace = Duration::from_secs(1);
+    let worker = Worker::new(store.clone(), registry, config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let mut done = true;
+            for task_id in &task_ids {
+                done &= store.get_task(*task_id).await.unwrap().unwrap().state == TaskState::Succeeded;
+            }
+            if done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    shutdown.cancel();
+    worker_task.await.unwrap().unwrap();
+
+    let order = executed.lock().await.clone();
+    assert_eq!(order, vec![high.clone(), high, low.clone(), low]);
 }
 
 #[tokio::test]
