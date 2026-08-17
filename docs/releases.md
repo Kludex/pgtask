@@ -14,6 +14,35 @@ A release tag publishes the same version in each artifact:
 
 Wheel targets are `manylinux_2_28` on x86-64 and ARM64, macOS 11 or newer on x86-64 and Apple Silicon, and 64-bit Windows. Python 3.10 through 3.14 run the SDK test suite. The stable ABI avoids publishing five copies of the same native extension per platform.
 
+## The tag sets the version
+
+You do not edit a version before releasing. Push the tag and every artifact takes its version from it:
+
+```console
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+Each job that builds an artifact runs `scripts/set-release-version.sh` with the version from the tag,
+which writes it into the workspace `Cargo.toml`, the path dependencies that carry a version for
+crates.io, `package.json` and its lock file, and the chart's `version` and `appVersion`. It then
+refreshes `Cargo.lock` so a `--locked` build still resolves, and finally runs
+`scripts/check-release-version.sh` to confirm every manifest agrees.
+
+The Python wheel needs no separate handling. `sdks/python/pyproject.toml` declares
+`dynamic = ["version"]` and `sdks/python/Cargo.toml` inherits the workspace version, so maturin
+builds `pgtask-0.2.0` from the same source.
+
+!!! note "Why not uv-dynamic-versioning"
+
+    It derives a Python version straight from the tag, which is what you want, but it requires
+    hatchling as the build backend. This SDK needs maturin to compile the `_native` extension, so the
+    version arrives through the Cargo workspace instead and reaches the wheel the same way.
+
+The version committed in the repository is the development version. It is not what a release
+publishes, and it does not have to be bumped before tagging. CI still checks that the committed
+manifests agree with each other, so they never drift apart.
+
 ## Configure publishing
 
 Configure the GitHub `pypi` environment as a trusted publisher for the PyPI project. Configure `@pgtask/client` on npm
