@@ -543,7 +543,9 @@ async fn worker_drains_earlier_queues_before_later_ones() {
     let mut config = WorkerConfig::with_queues(vec![high.clone(), low.clone()]);
     config.concurrency = NonZeroU16::new(1).unwrap();
     config.claim_batch_size = NonZeroU16::new(1).unwrap();
-    config.lease_duration = Duration::from_millis(30);
+    // Long enough that a slow runner cannot expire a lease mid-handler and run a task twice, which
+    // would say nothing about the order queues are drained in.
+    config.lease_duration = TEST_TIMEOUT;
     config.poll_interval = Duration::from_millis(5);
     config.retention_enabled = false;
     config.shutdown_grace = Duration::from_secs(1);

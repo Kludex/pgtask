@@ -1077,12 +1077,14 @@ async fn bounded_queue_reconfiguration_preserves_concurrent_admission() {
 
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            let waiting: bool =
-                sqlx::query_scalar("SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = $1")
-                    .bind(reconfigure_pid)
-                    .fetch_one(store.pool())
-                    .await
-                    .unwrap();
+            // A backend that is running rather than waiting reports no wait event at all.
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT coalesce(wait_event_type = 'Lock', false) FROM pg_stat_activity WHERE pid = $1",
+            )
+            .bind(reconfigure_pid)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
             if waiting {
                 break;
             }
