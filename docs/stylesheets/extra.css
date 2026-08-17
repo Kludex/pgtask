@@ -191,6 +191,13 @@
   opacity: 0.45;
 }
 
+/* Marks a fixed point on the timeline. Styled like the playhead but never moves. */
+.deployment .marker {
+  stroke: var(--md-primary-fg-color);
+  stroke-width: 1.5;
+  opacity: 0.45;
+}
+
 @keyframes deployment-playhead {
   from { transform: translateX(0); }
   to { transform: translateX(506px); }

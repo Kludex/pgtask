@@ -45,7 +45,7 @@ helm upgrade pgtask ./charts/pgtask --values production.yaml
 <svg viewBox="0 0 640 300" role="img" aria-label="A rolling upgrade: the migration Job runs first, then worker pods are replaced one at a time while PostgreSQL keeps serving tasks.">
   <text class="caption" x="0" y="14">helm upgrade</text>
   <g class="from-12">
-    <line class="playhead" x1="181" y1="6" x2="181" y2="22" />
+    <line class="marker" x1="181" y1="6" x2="181" y2="22" />
     <text class="caption" x="188" y="18">applied</text>
   </g>
 
