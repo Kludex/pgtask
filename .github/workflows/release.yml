@@ -172,7 +172,18 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm pack
-      - run: npm publish "pgtask-client-${{ needs.version.outputs.version }}.tgz"
+      # Skip a version the registry already has, so a partial release can be rerun. This is the
+      # same tolerance publish-crates.sh applies to crates.io.
+      - name: Publish to npm unless the version is already there
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -eu
+          if npm view "@pgtask/client@$VERSION" version >/dev/null 2>&1; then
+            echo "@pgtask/client@$VERSION is already published"
+          else
+            npm publish "pgtask-client-$VERSION.tgz"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: npm-package
