@@ -7,7 +7,15 @@ You need PostgreSQL 17 or newer and a way to run a worker process.
 The Python package ships the worker runtime as a native extension, so installing it is enough to run handlers:
 
 ```console
-uv sync --project sdks/python --group dev
+pip install pgtask
+```
+
+Wheels are published for CPython 3.10 and newer on Linux, macOS, and Windows. The other clients install the same way:
+
+```console
+cargo add pgtask
+npm install @pgtask/client
+go get github.com/Kludex/pgtask/sdks/go
 ```
 
 ## Point it at a database
