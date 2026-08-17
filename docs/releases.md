@@ -14,14 +14,10 @@ A release tag publishes the same version in each artifact:
 
 Wheel targets are `manylinux_2_28` on x86-64 and ARM64, macOS 11 or newer on x86-64 and Apple Silicon, and 64-bit Windows. Python 3.10 through 3.14 run the SDK test suite. The stable ABI avoids publishing five copies of the same native extension per platform.
 
-## The tag sets the version
+## The release tag sets the version
 
-You do not edit a version before releasing. Push the tag and every artifact takes its version from it:
-
-```console
-git tag v0.2.0
-git push origin v0.2.0
-```
+You do not edit a version before releasing. The tag on the release carries it, and every artifact
+takes its version from that tag.
 
 Each job that builds an artifact runs `scripts/set-release-version.sh` with the version from the tag,
 which writes it into the workspace `Cargo.toml`, the path dependencies that carry a version for
@@ -55,16 +51,25 @@ without republishing completed artifacts.
 
 ## Create a release
 
-Set the workspace version before tagging. Use the same semantic version in the tag:
+Publishing a GitHub Release is what releases. Draft one, let GitHub create the `v1.0.0` tag on the
+commit you are releasing, write the notes, and publish it:
 
 ```console
-git tag v1.0.0
-git push origin v1.0.0
+gh release create v1.0.0 --draft --generate-notes
 ```
 
-The release workflow rejects a tag that differs from the Cargo workspace and npm package versions. It reruns the full
-Rust suite on PostgreSQL 17 and 18 before any artifact is published. After every artifact succeeds, it creates the
-corresponding `sdks/go/v1.0.0` tag at the same commit so the Go module proxy resolves the release.
+Publishing the draft starts the workflow. Nothing happens while it stays a draft, so the notes can be
+written and reviewed before anything is published to a registry.
+
+The workflow reruns the full Rust suite on PostgreSQL 17 and 18 before any artifact is published,
+then attaches the wheels, source distribution, npm package, and chart to the release you published.
+It also creates the matching `sdks/go/v1.0.0` tag at the same commit so the Go module proxy resolves
+the release.
+
+!!! warning "A published release cannot be unpublished cleanly"
+
+    Registries do not accept a version twice. If a release fails partway, fix forward with a new
+    patch version rather than retrying the same one.
 
 ## Test local artifacts
 

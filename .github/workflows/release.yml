@@ -1,8 +1,8 @@
 name: Release
 
 on:
-  push:
-    tags: ["v*.*.*"]
+  release:
+    types: ["published"]
 
 permissions:
   contents: read
@@ -16,13 +16,15 @@ jobs:
       - uses: actions/checkout@v4
       - id: version
         shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           set -eu
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           case $version in
               [0-9]*.[0-9]*.[0-9]*) ;;
               *)
-                  echo "tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH" >&2
+                  echo "release tag $TAG is not vMAJOR.MINOR.PATCH" >&2
                   exit 1
                   ;;
           esac
@@ -286,9 +288,10 @@ jobs:
           path: dist
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
         run: |
           set -eu
-          go_tag="sdks/go/$GITHUB_REF_NAME"
+          go_tag="sdks/go/$TAG"
           if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$go_tag" >/dev/null 2>&1; then
             gh api \
               --method POST \
@@ -296,4 +299,4 @@ jobs:
               --field ref="refs/tags/$go_tag" \
               --field sha="$GITHUB_SHA"
           fi
-          gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
+          gh release upload "$TAG" dist/* --clobber
