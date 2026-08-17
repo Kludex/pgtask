@@ -43,3 +43,6 @@ old ones are gone. A range like `1..=2` is what keeps both releases working duri
 
 A retry policy belongs to a `(queue, task_name, handler_version)`. The database rejects policy drift under an existing
 identity, so changing retries requires a new handler version. See [Retries](concepts/retries.md).
+
+For the operational procedure, including what happens to work in flight and how to roll back, see
+[Upgrade pgtask](upgrading.md).

@@ -1,0 +1,131 @@
+# Upgrade pgtask
+
+Upgrading `pgtask` means applying a schema migration to a database that already has work in it, then
+replacing workers that are in the middle of running tasks.
+
+Nothing here asks you to drain the queue first. The point of the design is that you do not have to.
+
+## What protects you
+
+Three mechanisms do the work, and knowing which one covers which failure makes the procedure below
+obvious rather than memorised.
+
+**Migrations are forward-only and additive within a release window.** A new column, index, or function
+does not disturb a worker that has never heard of it. This is what lets two worker versions run at
+once, and it is also why rollback works.
+
+**Workers verify the storage protocol before they start.** A worker asks the database for its
+inclusive protocol range and refuses to run when it does not overlap its own:
+
+```
+database storage protocols 1..=1 are incompatible with client protocols 2..=2
+```
+
+That is a worker that will not start, printing both ranges. It is not a worker that starts and
+corrupts something.
+
+**Workers never migrate.** Only the migration Job or `pgtask migrate` changes the schema. A worker
+that finds an old schema stops; it does not try to fix it.
+
+!!! note "Schema version is not handler version"
+
+    Upgrading `pgtask` does not change your handler versions, so durable workflows keep their
+    checkpoints and resume normally on the new binary. The two version numbers are independent, and
+    only you change the second one.
+
+## The ordinary upgrade
+
+For an additive migration, which is every upgrade that does not raise the storage protocol:
+
+```console
+helm upgrade pgtask ./charts/pgtask --values production.yaml
+```
+
+The chart runs the migration as a `pre-upgrade` hook with weight `-10`, so the schema is migrated
+before any worker Deployment rolls. Then Kubernetes replaces workers one at a time.
+
+Without Helm, the same order applies. Run `pgtask migrate`, wait for it to finish, then deploy
+workers.
+
+`migrate` takes an advisory lock, so running it from ten places at once applies the schema once and
+the rest wait.
+
+## What happens to work in flight
+
+Each worker that gets replaced goes through the same path, and none of it is special to upgrades.
+
+`SIGTERM` stops claim admission first, so the worker takes no new work. Handlers already running get
+until the grace period to finish, and anything still running is aborted. Those tasks keep their rows,
+their leases expire, and another worker claims them as a new attempt.
+
+That is the ordinary at-least-once path, which is why an upgrade needs no special handling: a
+replaced worker looks exactly like a crashed one, and the engine already handles a crashed one.
+
+Suspended workflows are unaffected. A task sleeping for six hours is a row with a deadline, so it
+does not care that every worker was replaced while it waited.
+
+!!! warning "Handlers must still be safe to run again"
+
+    A rolling upgrade increases how often a handler is interrupted mid-flight. If your handler is not
+    idempotent, an upgrade is when you find out.
+
+## When the storage protocol changes
+
+A protocol bump means an old worker cannot safely share the schema with a new one. Expand first, and
+contract only after the old workers are gone:
+
+1. Release a schema whose range covers both, such as `1..=2`.
+2. Migrate. Both worker versions now pass the handshake.
+3. Roll workers to the new version.
+4. Confirm no old workers remain, using `pgtask.worker_view`.
+5. Contract the range to `2..=2` in a later release.
+
+Skipping step 1 makes the upgrade a stop-the-world change. Old workers fail the handshake the moment
+the migration lands, and they stay down until you deploy the new version.
+
+Check what the database currently offers at any time:
+
+```sql
+SELECT minimum, maximum FROM pgtask.storage_protocol_range();
+```
+
+## Rolling back
+
+You roll back workers. You do not roll back the schema.
+
+Migrations are forward-only, and the reason rollback still works is that an additive schema is
+compatible with the previous worker. The extra column is simply unused.
+
+Route producers back to the old version first, keep the new workers running until their queues are
+empty, then remove them. Reversing that order strands committed tasks in a queue nobody is serving.
+
+!!! warning "A contracted protocol cannot be rolled back into"
+
+    Once you remove the old shape in a contract step, the previous worker version can no longer run.
+    Keep the expanded range in place for at least one release longer than you expect to need it.
+
+## Verifying an upgrade
+
+Four checks, in the order they fail:
+
+```sql
+-- 1. The schema is at the range you expect.
+SELECT minimum, maximum FROM pgtask.storage_protocol_range();
+
+-- 2. Every live worker registered, so none are stuck on the handshake.
+SELECT version, count(*) FROM pgtask.worker_view WHERE live GROUP BY version;
+
+-- 3. Nothing is unroutable, so no queue lost its handler.
+SELECT name, ready_count, unroutable_count FROM pgtask.queue_overview
+ WHERE unroutable_count > 0;
+
+-- 4. Nothing is stuck running with an expired lease.
+SELECT count(*) FROM pgtask.task_view
+ WHERE state = 'running' AND lease_expires_at < now();
+```
+
+A worker that fails the handshake never appears in `worker_view`, so an upgrade that halved your
+worker count shows up in check 2 rather than as silence.
+
+See [Schema compatibility](schema-compatibility.md) for the rules a migration must follow, and
+[Operations](operations.md) for draining and incident response.

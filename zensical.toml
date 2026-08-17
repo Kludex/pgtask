@@ -36,6 +36,7 @@ nav = [
   ] },
   { "Operations" = [
     "operations.md",
+    "upgrading.md",
     "scaling.md",
     "telemetry.md",
     "ui.md",
