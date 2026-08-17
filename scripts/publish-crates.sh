@@ -35,10 +35,13 @@ wait_for_crate() {
 
 # crates.io rate limits new crates, and this workspace publishes several at once. A 429 names the
 # time it will accept the next one, so wait for it rather than failing a release halfway through.
+#
+# The version comes from the tag rather than from a commit, so the manifests are dirty by design and
+# cargo has to be told to package them anyway.
 publish_crate() {
     attempt=1
     while true; do
-        if output=$(cargo publish --locked -p "$1" 2>&1); then
+        if output=$(cargo publish --locked --allow-dirty -p "$1" 2>&1); then
             printf '%s\n' "$output"
             return 0
         fi

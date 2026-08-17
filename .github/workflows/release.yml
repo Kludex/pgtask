@@ -64,6 +64,11 @@ jobs:
   wheels:
     needs: [version, quality]
     runs-on: ${{ matrix.os }}
+    # Windows defaults to PowerShell, which dot-sources a shell script instead of running it, so the
+    # version step would report success without having changed a thing.
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -259,6 +264,12 @@ jobs:
         with:
           version: v4.1.1
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+      # helm keeps its own registry credentials, and cosign reads the docker ones.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.version.outputs.version }}
