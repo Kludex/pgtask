@@ -22,15 +22,17 @@ concurrency slots are shared.
 | `starvation_timeout_seconds` | When old work starts bypassing priority |
 | `paused_at` | Whether claims are allowed |
 
-```python
-await client.put_queue(
-    QueueConfig(
-        name="reports",
-        terminal_retention_seconds=7 * 24 * 3600,
-        max_outstanding_tasks=10_000,
-    )
-)
+You configure a queue with the CLI rather than from a producer, because these are operational settings rather than
+application state:
+
+```console
+pgtask queue put reports \
+  --terminal-retention-seconds 604800 \
+  --max-outstanding-tasks 10000
 ```
+
+A queue is also created implicitly the first time a task names it, with defaults for every setting. You only need this
+command when you want something other than the defaults.
 
 ## Pausing
 

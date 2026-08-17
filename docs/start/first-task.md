@@ -120,7 +120,7 @@ data:
 ```python
 async with connection.transaction():
     await connection.execute("INSERT INTO reports (id, status) VALUES ($1, 'pending')", report_id)
-    await client.enqueue_in(connection, render.request({"report_id": report_id}))
+    await Client.enqueue_on(connection, render.request({"report_id": report_id}))
 ```
 
 If the transaction rolls back, the row and the task both disappear. There is no window where a task exists for a report

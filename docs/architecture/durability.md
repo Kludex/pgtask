@@ -22,7 +22,7 @@ async def publish(task: Task, request: PublishRequest) -> PublishResult:
     url = await task.step("render", lambda: renderer.render(request["report_id"]))
 
     # Runs once. On replay, returns immediately if the deadline has already passed.
-    await task.sleep("cool-off", seconds=300)
+    await task.sleep_for("cool-off", 300)
 
     await task.step("notify", lambda: mailer.send(request["email"], url))
     return {"url": url}

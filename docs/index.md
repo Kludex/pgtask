@@ -11,7 +11,7 @@ never existed. That one property removes most of the consistency problems queues
 ```python
 async with connection.transaction():
     await create_report(connection, report_id)
-    await client.enqueue_in(connection, render.request({"report_id": report_id}))
+    await Client.enqueue_on(connection, render.request({"report_id": report_id}))
 ```
 
 !!! warning "Not ready for production"
