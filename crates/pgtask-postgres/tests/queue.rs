@@ -1973,3 +1973,19 @@ async fn live_worker_count_follows_registration_and_expiry() {
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(store.live_worker_count(&queue_name).await.unwrap(), 1);
 }
+
+#[tokio::test]
+async fn a_listener_requires_at_least_one_queue() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    // Subscribing to nothing would open a listener that can never deliver a ready notification,
+    // so it is rejected rather than silently idling.
+    assert!(matches!(
+        store.ready_listener_for(&[]).await,
+        Err(PostgresError::MissingQueues)
+    ));
+}

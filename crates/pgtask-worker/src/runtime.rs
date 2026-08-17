@@ -33,7 +33,8 @@ use crate::{
 
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
-    pub queue_name: QueueName,
+    /// Ordered by priority: the worker drains earlier queues before claiming from later ones.
+    pub queues: Vec<QueueName>,
     pub concurrency: NonZeroU16,
     pub claim_batch_size: NonZeroU16,
     pub lease_duration: Duration,
@@ -79,8 +80,12 @@ impl Default for OverloadProtectionConfig {
 
 impl WorkerConfig {
     pub fn new(queue_name: QueueName) -> Self {
+        Self::with_queues(vec![queue_name])
+    }
+
+    pub fn with_queues(queues: Vec<QueueName>) -> Self {
         Self {
-            queue_name,
+            queues,
             concurrency: NonZeroU16::new(10).expect("10 is nonzero"),
             claim_batch_size: NonZeroU16::new(10).expect("10 is nonzero"),
             lease_duration: Duration::from_secs(30),
@@ -134,6 +139,10 @@ pub enum WorkerError {
     },
     #[error("worker has no registered handlers")]
     MissingHandlers,
+    #[error("worker has no queues")]
+    MissingQueues,
+    #[error("worker queue list contains duplicates")]
+    DuplicateQueues,
     #[error("effective concurrency {requested} exceeds configured concurrency {configured}")]
     AdmissionLimitExceedsConfigured { requested: u16, configured: u16 },
     #[error("declared schedule {0} targets another queue or an unregistered handler")]
@@ -251,8 +260,19 @@ impl Worker {
         if registry.capabilities().is_empty() {
             return Err(WorkerError::MissingHandlers);
         }
+        if config.queues.is_empty() {
+            return Err(WorkerError::MissingQueues);
+        }
+        if config
+            .queues
+            .iter()
+            .enumerate()
+            .any(|(index, queue)| config.queues[..index].contains(queue))
+        {
+            return Err(WorkerError::DuplicateQueues);
+        }
         if let Some(schedule) = config.declared_schedules.iter().find(|schedule| {
-            schedule.task.queue_name != config.queue_name
+            !config.queues.contains(&schedule.task.queue_name)
                 || registry
                     .get(&schedule.task.task_name, schedule.task.handler_version)
                     .is_none()
@@ -264,7 +284,7 @@ impl Worker {
             effective: Arc::new(AtomicU16::new(config.concurrency.get())),
             proposed: Arc::new(AtomicU16::new(config.concurrency.get())),
             changed: Arc::new(Notify::new()),
-            queue_name: config.queue_name.clone(),
+            queue_name: config.queues[0].clone(),
         };
         Ok(Self {
             store,
@@ -292,7 +312,7 @@ impl Worker {
         }
         let _supervisor = Supervisor::start(
             self.health.clone(),
-            self.config.queue_name.clone(),
+            self.config.queues[0].clone(),
             self.config.supervisor_interval,
             self.config.health_address,
             self.control.clone(),
@@ -306,7 +326,7 @@ impl Worker {
         let runtime_shutdown = CancellationToken::new();
         let capabilities = self.registry.capabilities();
         let registrations = self.registry.registrations();
-        let ready_listener = self.store.ready_listener(&self.config.queue_name).await?;
+        let ready_listener = self.store.ready_listener_for(&self.config.queues).await?;
         self.health.set_listener(true);
         for schedule in &self.config.declared_schedules {
             self.store.put_schedule(schedule).await?;
@@ -314,7 +334,7 @@ impl Worker {
         self.store
             .register_worker(
                 self.id,
-                &self.config.queue_name,
+                &self.config.queues[0],
                 env!("CARGO_PKG_VERSION"),
                 &registrations,
                 self.config.worker_ttl,
@@ -331,7 +351,7 @@ impl Worker {
         );
         let listener = listen_for_ready(
             self.store.clone(),
-            self.config.queue_name.clone(),
+            self.config.queues.clone(),
             Arc::clone(&task_wakeup),
             Arc::clone(&schedule_wakeup),
             runtime_shutdown.clone(),
@@ -349,7 +369,7 @@ impl Worker {
         );
         let retention = delete_expired_terminal(
             self.store.clone(),
-            self.config.queue_name.clone(),
+            self.config.queues.clone(),
             self.config.retention_enabled,
             self.config.retention_batch_size,
             self.config.retention_interval,
@@ -359,7 +379,7 @@ impl Worker {
             self.store.clone(),
             HeartbeatConfig {
                 worker_id: self.id,
-                queue_name: self.config.queue_name.clone(),
+                queue_name: self.config.queues[0].clone(),
                 capabilities: capabilities.clone(),
                 interval: self.config.worker_heartbeat_interval,
                 ttl: self.config.worker_ttl,
@@ -411,17 +431,7 @@ impl Worker {
                 let deadline_delay = if limit == 0 {
                     self.config.poll_interval
                 } else {
-                    match self.store.next_task_delay(&self.config.queue_name, &capabilities).await {
-                        Ok(delay) => delay
-                            .unwrap_or(self.config.poll_interval)
-                            .min(self.config.poll_interval)
-                            .max(Duration::from_millis(1)),
-                        Err(error) => {
-                            self.health.set_database(false);
-                            warn!(%error, "could not read the next task deadline");
-                            Duration::from_secs(1).min(self.config.poll_interval)
-                        }
-                    }
+                    self.next_task_delay(&capabilities).await
                 };
                 if handlers.is_empty() {
                     tokio::select! {
@@ -460,6 +470,22 @@ impl Worker {
         Ok(())
     }
 
+    async fn next_task_delay(&self, capabilities: &[(TaskName, HandlerVersion)]) -> Duration {
+        let mut delay = self.config.poll_interval;
+        for queue_name in &self.config.queues {
+            match self.store.next_task_delay(queue_name, capabilities).await {
+                Ok(Some(queue_delay)) => delay = delay.min(queue_delay),
+                Ok(None) => {}
+                Err(error) => {
+                    self.health.set_database(false);
+                    warn!(%error, "could not read the next task deadline");
+                    return Duration::from_secs(1).min(self.config.poll_interval);
+                }
+            }
+        }
+        delay.max(Duration::from_millis(1))
+    }
+
     async fn claim_tasks(
         &self,
         shutdown: &CancellationToken,
@@ -469,20 +495,22 @@ impl Worker {
     ) -> Option<(usize, Vec<Task>)> {
         let effective_concurrency = self.control.effective_concurrency().get();
         pgtask_otel::record_worker_capacity(
-            self.config.queue_name.as_str(),
+            self.config.queues[0].as_str(),
             self.config.concurrency.get(),
             effective_concurrency,
             active_handlers,
         );
-        if let Err(error) = self
-            .store
-            .recover_expired(&self.config.queue_name, self.config.claim_batch_size.get())
-            .await
-        {
-            self.health.set_database(false);
-            warn!(%error, "could not recover expired task leases");
-            wait_after_database_error(shutdown, wakeup).await;
-            return None;
+        for queue_name in &self.config.queues {
+            if let Err(error) = self
+                .store
+                .recover_expired(queue_name, self.config.claim_batch_size.get())
+                .await
+            {
+                self.health.set_database(false);
+                warn!(%error, "could not recover expired task leases");
+                wait_after_database_error(shutdown, wakeup).await;
+                return None;
+            }
         }
         self.health.set_database(true);
         let available = usize::from(effective_concurrency).saturating_sub(active_handlers);
@@ -490,28 +518,36 @@ impl Worker {
         if limit == 0 {
             return Some((limit, Vec::new()));
         }
-        match self
-            .store
-            .claim(
-                &self.config.queue_name,
-                self.id,
-                capabilities,
-                u16::try_from(limit).expect("limit is bounded by a u16 configuration value"),
-                self.config.lease_duration,
-            )
-            .await
-        {
-            Ok(tasks) => {
-                self.health.set_database(true);
-                Some((limit, tasks))
+        let mut tasks = Vec::new();
+        for queue_name in &self.config.queues {
+            let remaining = limit - tasks.len();
+            if remaining == 0 {
+                break;
             }
-            Err(error) => {
-                self.health.set_database(false);
-                warn!(%error, "could not claim tasks");
-                wait_after_database_error(shutdown, wakeup).await;
-                None
+            match self
+                .store
+                .claim(
+                    queue_name,
+                    self.id,
+                    capabilities,
+                    u16::try_from(remaining).expect("limit is bounded by a u16 configuration value"),
+                    self.config.lease_duration,
+                )
+                .await
+            {
+                Ok(claimed) => {
+                    self.health.set_database(true);
+                    tasks.extend(claimed);
+                }
+                Err(error) => {
+                    self.health.set_database(false);
+                    warn!(%error, "could not claim tasks");
+                    wait_after_database_error(shutdown, wakeup).await;
+                    return None;
+                }
             }
         }
+        Some((limit, tasks))
     }
 
     async fn spawn_task(
@@ -769,7 +805,7 @@ async fn cancel_uncertain_leases(active: &ActiveLeases, leases: &[ActiveLease], 
 
 async fn listen_for_ready(
     store: Store,
-    queue_name: QueueName,
+    queues: Vec<QueueName>,
     task_wakeup: Arc<Notify>,
     schedule_wakeup: Arc<Notify>,
     shutdown: CancellationToken,
@@ -786,7 +822,7 @@ async fn listen_for_ready(
             match notification {
                 Ok(notification)
                     if notification.channel().starts_with("pgtask_ready_")
-                        && notification.payload() == queue_name.as_str() =>
+                        && queues.iter().any(|queue| notification.payload() == queue.as_str()) =>
                 {
                     task_wakeup.notify_one();
                 }
@@ -804,7 +840,7 @@ async fn listen_for_ready(
         loop {
             let reconnected = tokio::select! {
                 () = shutdown.cancelled() => return,
-                result = store.ready_listener(&queue_name) => result,
+                result = store.ready_listener_for(&queues) => result,
             };
             match reconnected {
                 Ok(reconnected) => {
@@ -878,7 +914,7 @@ async fn materialize_schedules(
 
 async fn delete_expired_terminal(
     store: Store,
-    queue_name: QueueName,
+    queues: Vec<QueueName>,
     enabled: bool,
     batch_size: NonZeroU16,
     retention_interval: Duration,
@@ -890,15 +926,17 @@ async fn delete_expired_terminal(
         tokio::select! {
             () = shutdown.cancelled() => return,
             _ = interval.tick() => {
-                if enabled
-                    && let Err(error) = store.delete_expired_terminal(&queue_name, batch_size.get()).await
-                {
-                    warn!(%error, "could not delete expired terminal tasks");
-                }
-                if enabled
-                    && let Err(error) = store.delete_expired_idempotency_keys(&queue_name, batch_size.get()).await
-                {
-                    warn!(%error, "could not delete expired idempotency keys");
+                for queue_name in &queues {
+                    if enabled
+                        && let Err(error) = store.delete_expired_terminal(queue_name, batch_size.get()).await
+                    {
+                        warn!(%error, "could not delete expired terminal tasks");
+                    }
+                    if enabled
+                        && let Err(error) = store.delete_expired_idempotency_keys(queue_name, batch_size.get()).await
+                    {
+                        warn!(%error, "could not delete expired idempotency keys");
+                    }
                 }
             }
         }

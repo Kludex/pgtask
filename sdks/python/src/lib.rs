@@ -52,7 +52,7 @@ struct PythonWorker {
     lease_duration: Duration,
     poll_interval: Duration,
     health_address: Option<SocketAddr>,
-    queue_name: QueueName,
+    queues: Vec<QueueName>,
     shutdown: CancellationToken,
 }
 
@@ -329,7 +329,7 @@ impl PythonTaskContext {
 #[pymethods]
 impl PythonWorker {
     #[new]
-    fn new(database_url: String, queue_name: &str, options: &Bound<'_, PyAny>) -> PyResult<Self> {
+    fn new(database_url: String, queue_names: Vec<String>, options: &Bound<'_, PyAny>) -> PyResult<Self> {
         let options: PythonWorkerOptions = depythonize(options).map_err(value_error)?;
         Ok(Self {
             concurrency: NonZeroU16::new(options.concurrency)
@@ -348,7 +348,10 @@ impl PythonWorker {
                 .map(|value| value.parse())
                 .transpose()
                 .map_err(value_error)?,
-            queue_name: QueueName::new(queue_name).map_err(value_error)?,
+            queues: queue_names
+                .into_iter()
+                .map(|name| QueueName::new(&name).map_err(value_error))
+                .collect::<PyResult<_>>()?,
             shutdown: CancellationToken::new(),
         })
     }
@@ -392,7 +395,7 @@ impl PythonWorker {
         }
         let locals = pyo3_async_runtimes::TaskLocals::with_running_loop(py)?.copy_context(py)?;
         let store_config = self.config.clone();
-        let queue_name = self.queue_name.clone();
+        let queues = self.queues.clone();
         let concurrency = self.concurrency;
         let lease_duration = self.lease_duration;
         let poll_interval = self.poll_interval;
@@ -413,7 +416,7 @@ impl PythonWorker {
                     },
                 );
             }
-            let mut config = WorkerConfig::new(queue_name);
+            let mut config = WorkerConfig::with_queues(queues);
             config.concurrency = concurrency;
             config.lease_duration = lease_duration;
             config.poll_interval = poll_interval;

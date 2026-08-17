@@ -44,6 +44,8 @@ pub enum PostgresError {
     InvalidLeaseDuration,
     #[error("at least one handler capability is required")]
     MissingCapabilities,
+    #[error("at least one queue is required")]
+    MissingQueues,
     #[error("handler version exceeds the Postgres integer range")]
     InvalidHandlerVersion,
     #[error("schedule claim limit must be greater than zero")]
@@ -428,17 +430,22 @@ impl Store {
     }
 
     pub async fn ready_listener(&self, queue_name: &QueueName) -> Result<ReadyListener, PostgresError> {
-        let channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
-            .bind(queue_name.as_str())
-            .fetch_one(&self.pool)
-            .await?;
-        self.notifications
-            .subscribe(HashMap::from([
-                (channel, Some(queue_name.to_string())),
-                ("pgtask_schedule".to_owned(), None),
-                ("pgtask_wait".to_owned(), None),
-            ]))
-            .await
+        self.ready_listener_for(std::slice::from_ref(queue_name)).await
+    }
+
+    pub async fn ready_listener_for(&self, queue_names: &[QueueName]) -> Result<ReadyListener, PostgresError> {
+        if queue_names.is_empty() {
+            return Err(PostgresError::MissingQueues);
+        }
+        let mut channels = HashMap::from([("pgtask_schedule".to_owned(), None), ("pgtask_wait".to_owned(), None)]);
+        for queue_name in queue_names {
+            let channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
+                .bind(queue_name.as_str())
+                .fetch_one(&self.pool)
+                .await?;
+            channels.insert(channel, Some(queue_name.to_string()));
+        }
+        self.notifications.subscribe(channels).await
     }
 
     pub async fn result_listener(&self, task_id: TaskId) -> Result<ReadyListener, PostgresError> {
