@@ -156,6 +156,30 @@ asyncio.run(main())
 
 Keep names and occurrences stable. Code outside a completed `step` can run again. Use `handler_version` when a deployment changes the order or meaning of durable operations.
 
+## Reach the task from anywhere below the handler
+
+Your handler receives the `Task` as an argument, which is all you need when you control every frame. When a
+framework calls you back, you do not: nothing between `agent.run()` and the hook it invokes knows to forward
+it. `get_current_task()` returns the task for the current call chain:
+
+```python
+from __future__ import annotations
+
+from pgtask import get_current_task
+
+
+async def charge_with_retry_history() -> dict[str, str]:
+    task = get_current_task()
+    if task is None:
+        raise RuntimeError("call this from inside a pgtask handler")
+    return await task.step("create-charge", create_charge)
+```
+
+It returns `None` outside a handler, so library code can fall back instead of failing.
+
+The task is stored in a `ContextVar` that the worker sets around each invocation, so two handlers running
+under `concurrency > 1` each see their own task, and a `step` operation sees the task that started it.
+
 ## Enqueue in an application transaction
 
 Pass your Psycopg connection and the task commits with your data:

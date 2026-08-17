@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Generic, TypeVar, cast
@@ -211,6 +212,18 @@ class Task:
         return cast(JSONValue, await self._context.wait_for_result(step_name, occurrence, task_id, timeout))
 
 
+_current_task: ContextVar[Task | None] = ContextVar("pgtask_current_task", default=None)
+
+
+def get_current_task() -> Task | None:
+    """The task running in this call chain, or `None` outside a handler.
+
+    Reach for this when a frame between your handler and the code that needs the task cannot pass it
+    down, which is the usual shape when a framework calls you back.
+    """
+    return _current_task.get()
+
+
 @dataclass(frozen=True)
 class TaskHandle(Generic[ResultT]):
     id: str
@@ -348,9 +361,11 @@ class Worker:
             ) -> JSONValue:
                 task = Task.from_native(value, context)
                 token = attach(extract(cast(dict[str, str], task.headers)))
+                current = _current_task.set(task)
                 try:
                     return cast(JSONValue, await registered.handler(task, task.payload))
                 finally:
+                    _current_task.reset(current)
                     detach(token)
 
             self._native.register(
