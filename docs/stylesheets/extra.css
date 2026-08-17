@@ -213,6 +213,8 @@
 @keyframes deployment-window-60-68 { 0%, 58% { opacity: 0; } 62%, 66% { opacity: 1; } 70%, 100% { opacity: 0; } }
 @keyframes deployment-window-15-30 { 0%, 13% { opacity: 0; } 17%, 28% { opacity: 1; } 32%, 100% { opacity: 0; } }
 
+@keyframes deployment-window-32-68 { 0%, 30% { opacity: 0; } 34%, 66% { opacity: 1; } 70%, 100% { opacity: 0; } }
+
 @keyframes deployment-from-12 { 0%, 10% { opacity: 0; } 14%, 100% { opacity: 1; } }
 @keyframes deployment-from-30 { 0%, 28% { opacity: 0; } 32%, 100% { opacity: 1; } }
 @keyframes deployment-from-40 { 0%, 38% { opacity: 0; } 42%, 100% { opacity: 1; } }
@@ -228,6 +230,7 @@
 .deployment .drain-b { animation: deployment-window-46-54 20s linear infinite; }
 .deployment .drain-c { animation: deployment-window-60-68 20s linear infinite; }
 .deployment .job-running { animation: deployment-window-15-30 20s linear infinite; }
+.deployment .overlap { animation: deployment-window-32-68 20s linear infinite; }
 .deployment .from-12 { animation: deployment-from-12 20s linear infinite; }
 .deployment .from-30 { animation: deployment-from-30 20s linear infinite; }
 .deployment .from-40 { animation: deployment-from-40 20s linear infinite; }
@@ -244,7 +247,8 @@
   .deployment .drain-a,
   .deployment .drain-b,
   .deployment .drain-c,
-  .deployment .job-running {
+  .deployment .job-running,
+  .deployment .overlap {
     display: none;
   }
 

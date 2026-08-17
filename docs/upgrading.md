@@ -42,7 +42,7 @@ helm upgrade pgtask ./charts/pgtask --values production.yaml
 ```
 
 <figure class="deployment" markdown="0">
-<svg viewBox="0 0 640 300" role="img" aria-label="A rolling upgrade: the migration Job runs first, then worker pods are replaced one at a time while PostgreSQL keeps serving tasks.">
+<svg viewBox="0 0 640 300" role="img" aria-label="A rolling upgrade: the migration Job runs first, then each replica is replaced by a new pod from the v2 ReplicaSet, so v1 and v2 pods claim side by side until the roll finishes.">
   <text class="caption" x="0" y="14">helm upgrade</text>
   <g class="from-12">
     <line class="marker" x1="181" y1="6" x2="181" y2="22" />
@@ -56,36 +56,47 @@ helm upgrade pgtask ./charts/pgtask --values production.yaml
   </g>
   <g class="from-30"><text class="caption" x="280" y="56">schema now serves 1..=2</text></g>
 
-  <text class="pod-label" x="0" y="106">worker-1</text>
-  <g class="until-32"><rect class="pod-old" x="120" y="90" width="162" height="24" rx="6" /><text class="caption" x="130" y="106">v1 running</text></g>
+  <text class="pod-label" x="0" y="106">replica 1</text>
+  <g class="until-32"><rect class="pod-old" x="120" y="90" width="162" height="24" rx="6" /><text class="caption" x="130" y="106">worker-7d4f9 · v1</text></g>
   <g class="drain-a"><rect class="pod-drain" x="282" y="90" width="40" height="24" rx="6" /></g>
-  <g class="from-40"><rect class="pod-new" x="322" y="90" width="304" height="24" rx="6" /><text class="caption" x="332" y="106">v2 running</text></g>
+  <g class="from-40"><rect class="pod-new" x="322" y="90" width="304" height="24" rx="6" /><text class="caption" x="332" y="106">worker-b82e1 · v2</text></g>
 
-  <text class="pod-label" x="0" y="146">worker-2</text>
-  <g class="until-46"><rect class="pod-old" x="120" y="130" width="233" height="24" rx="6" /><text class="caption" x="130" y="146">v1 running</text></g>
+  <text class="pod-label" x="0" y="146">replica 2</text>
+  <g class="until-46"><rect class="pod-old" x="120" y="130" width="233" height="24" rx="6" /><text class="caption" x="130" y="146">worker-7d4f9 · v1</text></g>
   <g class="drain-b"><rect class="pod-drain" x="353" y="130" width="40" height="24" rx="6" /></g>
-  <g class="from-54"><rect class="pod-new" x="393" y="130" width="233" height="24" rx="6" /><text class="caption" x="403" y="146">v2 running</text></g>
+  <g class="from-54"><rect class="pod-new" x="393" y="130" width="233" height="24" rx="6" /><text class="caption" x="403" y="146">worker-b82e1 · v2</text></g>
 
-  <text class="pod-label" x="0" y="186">worker-3</text>
-  <g class="until-60"><rect class="pod-old" x="120" y="170" width="304" height="24" rx="6" /><text class="caption" x="130" y="186">v1 running</text></g>
+  <text class="pod-label" x="0" y="186">replica 3</text>
+  <g class="until-60"><rect class="pod-old" x="120" y="170" width="304" height="24" rx="6" /><text class="caption" x="130" y="186">worker-7d4f9 · v1</text></g>
   <g class="drain-c"><rect class="pod-drain" x="424" y="170" width="40" height="24" rx="6" /></g>
-  <g class="from-68"><rect class="pod-new" x="464" y="170" width="162" height="24" rx="6" /><text class="caption" x="474" y="186">v2 running</text></g>
+  <g class="from-68"><rect class="pod-new" x="464" y="170" width="162" height="24" rx="6" /><text class="caption" x="474" y="186">worker-b82e1 · v2</text></g>
 
-  <text class="caption" x="120" y="210">a dashed pod is draining: it finishes its handlers and claims nothing new</text>
+  <g class="overlap">
+    <line class="marker" x1="282" y1="200" x2="464" y2="200" />
+    <line class="marker" x1="282" y1="196" x2="282" y2="204" />
+    <line class="marker" x1="464" y1="196" x2="464" y2="204" />
+    <text class="caption" x="288" y="216">v1 and v2 pods both claiming</text>
+  </g>
 
-  <text class="pod-label" x="0" y="240">PostgreSQL</text>
-  <rect class="database" x="120" y="224" width="506" height="24" rx="6" />
-  <text class="caption" x="130" y="240">claims, leases, and completions never stop</text>
+  <text class="pod-label" x="0" y="248">PostgreSQL</text>
+  <rect class="database" x="120" y="232" width="506" height="24" rx="6" />
+  <text class="caption" x="130" y="248">claims, leases, and completions never stop</text>
 
-  <g class="from-74"><text class="caption" x="494" y="272">upgrade complete</text></g>
+  <g class="from-74"><text class="caption" x="494" y="278">upgrade complete</text></g>
 
-  <line class="playhead" x1="120" y1="34" x2="120" y2="256" />
+  <line class="playhead" x1="120" y1="34" x2="120" y2="264" />
 </svg>
-<figcaption>The Job finishes before any pod is replaced, and only one worker drains at a time. Tasks a draining worker cannot finish return through lease expiry.</figcaption>
+<figcaption>Each replica is replaced by a new pod from the v2 ReplicaSet, so both versions claim at once until the roll finishes. A dashed pod is draining: it finishes its handlers and claims nothing new, and whatever it cannot finish returns through lease expiry.</figcaption>
 </figure>
 
 The chart runs the migration as a `pre-upgrade` hook with weight `-10`, so the schema is migrated
 before any worker Deployment rolls. Then Kubernetes replaces workers one at a time.
+
+A replica is not upgraded in place. Kubernetes starts a pod from the new ReplicaSet and terminates
+the old one, so for most of the roll **both versions are live and both are claiming from the same
+queue**. That is the state the migration has to be safe for, and it is why the schema is migrated
+first and why the change has to be additive: the v1 pod still running has to keep working against a
+schema that v2 also understands.
 
 Without Helm, the same order applies. Run `pgtask migrate`, wait for it to finish, then deploy
 workers.
