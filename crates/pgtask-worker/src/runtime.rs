@@ -919,15 +919,24 @@ async fn heartbeat_worker(store: Store, config: HeartbeatConfig, shutdown: Cance
             }
             _ = interval.tick() => {
                 match store.heartbeat_worker(config.worker_id, config.ttl, false).await {
-                    Ok(true) => health.set_database(true),
+                    Ok(true) => {
+                        health.set_database(true);
+                        pgtask_otel::record_heartbeat(config.queue_name.as_str(), "ok");
+                    }
                     Ok(false) => {
                         health.set_database(false);
+                        pgtask_otel::record_heartbeat(config.queue_name.as_str(), "missing");
                         warn!("worker registration disappeared");
                     }
                     Err(error) => {
                         health.set_database(false);
+                        pgtask_otel::record_heartbeat(config.queue_name.as_str(), "error");
                         warn!(%error, "could not update worker heartbeat");
                     }
+                }
+                match store.live_worker_count(&config.queue_name).await {
+                    Ok(live) => pgtask_otel::record_live_workers(config.queue_name.as_str(), live),
+                    Err(error) => warn!(%error, "could not read the live worker count"),
                 }
                 match store.queue_demand(&config.queue_name, &config.capabilities).await {
                     Ok(demand) => pgtask_otel::record_queue_demand(

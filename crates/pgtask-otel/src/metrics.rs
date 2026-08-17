@@ -15,6 +15,8 @@ struct KernelMetrics {
     schedule_lag: Histogram<f64>,
     schedule_materialization_duration: Histogram<f64>,
     queue_ready_tasks: Gauge<u64>,
+    workers_live: Gauge<u64>,
+    worker_heartbeats: Counter<u64>,
     queue_unroutable_tasks: Gauge<u64>,
     worker_configured_concurrency: Gauge<u64>,
     worker_effective_concurrency: Gauge<u64>,
@@ -65,6 +67,15 @@ fn metrics() -> &'static KernelMetrics {
                 .f64_histogram("pgtask.schedule.materialization.duration")
                 .with_description("Schedule materialization transaction duration")
                 .with_unit("s")
+                .build(),
+            workers_live: meter
+                .u64_gauge("pgtask.workers.live")
+                .with_description("Workers the database still considers live for this queue")
+                .with_unit("{worker}")
+                .build(),
+            worker_heartbeats: meter
+                .u64_counter("pgtask.worker.heartbeats")
+                .with_description("Worker heartbeat attempts by outcome")
                 .build(),
             queue_ready_tasks: meter
                 .u64_gauge("pgtask.queue.ready.tasks")
@@ -183,6 +194,23 @@ pub fn record_queue_demand(queue_name: &str, capable_tasks: u64, unroutable_task
     let attributes = [KeyValue::new("pgtask.queue.name", queue_name.to_owned())];
     metrics().queue_ready_tasks.record(capable_tasks, &attributes);
     metrics().queue_unroutable_tasks.record(unroutable_tasks, &attributes);
+}
+
+/// `outcome` is `ok`, `missing` when the registration is gone, or `error` when the call failed.
+pub fn record_heartbeat(queue_name: &str, outcome: &'static str) {
+    metrics().worker_heartbeats.add(
+        1,
+        &[
+            KeyValue::new("pgtask.queue.name", queue_name.to_owned()),
+            KeyValue::new("pgtask.heartbeat.outcome", outcome),
+        ],
+    );
+}
+
+pub fn record_live_workers(queue_name: &str, live: u64) {
+    metrics()
+        .workers_live
+        .record(live, &[KeyValue::new("pgtask.queue.name", queue_name.to_owned())]);
 }
 
 pub fn record_execution(queue_name: &str, task_name: &str, outcome: &'static str, duration: Duration) {

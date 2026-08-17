@@ -1937,3 +1937,39 @@ async fn runtime_roles_only_receive_their_protocol_capabilities() {
     sqlx::query("RESET ROLE").execute(&mut *administrator).await.unwrap();
     drop(administrator);
 }
+
+#[tokio::test]
+async fn live_worker_count_follows_registration_and_expiry() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let queue_name = QueueName::new(format!("live-workers-{}", Uuid::new_v4())).unwrap();
+    store.put_queue(&QueueConfig::new(queue_name.clone())).await.unwrap();
+    assert_eq!(store.live_worker_count(&queue_name).await.unwrap(), 0);
+
+    let registrations = [(
+        TaskName::new("live-worker-task").unwrap(),
+        HandlerVersion::default(),
+        RetryPolicy::Never,
+    )];
+    let first = WorkerId::new();
+    let second = WorkerId::new();
+    for worker_id in [first, second] {
+        store
+            .register_worker(worker_id, &queue_name, "test", &registrations, Duration::from_secs(30))
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.live_worker_count(&queue_name).await.unwrap(), 2);
+
+    // A worker that stops heartbeating stops counting once its lease on the registration expires.
+    store
+        .heartbeat_worker(first, Duration::from_millis(1), false)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert_eq!(store.live_worker_count(&queue_name).await.unwrap(), 1);
+}

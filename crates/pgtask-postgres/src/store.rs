@@ -516,6 +516,16 @@ impl Store {
         Ok(updated)
     }
 
+    /// Counts workers the database still considers live, which is not the same as the number of
+    /// processes reporting metrics: a worker whose heartbeat fails keeps reporting and stops counting.
+    pub async fn live_worker_count(&self, queue_name: &QueueName) -> Result<u64, PostgresError> {
+        let count: i64 = sqlx::query_scalar("SELECT pgtask.live_worker_count($1)")
+            .bind(queue_name.as_str())
+            .fetch_one(&self.pool)
+            .await?;
+        u64::try_from(count).map_err(invalid_number)
+    }
+
     pub async fn get_worker(&self, worker_id: WorkerId) -> Result<Option<WorkerRecord>, PostgresError> {
         let row: Option<WorkerRow> = sqlx::query_as(
             r"

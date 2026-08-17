@@ -1295,6 +1295,18 @@ AS $$
     SELECT EXISTS(SELECT 1 FROM updated);
 $$;
 
+CREATE FUNCTION pgtask.live_worker_count(p_queue_name text)
+RETURNS bigint
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pgtask
+AS $$
+    SELECT count(*)
+    FROM pgtask.workers
+    WHERE queue_name = p_queue_name AND expires_at > statement_timestamp();
+$$;
+
 CREATE FUNCTION pgtask.queue_demand(
     p_queue_name text,
     p_task_names text[],
@@ -2781,6 +2793,9 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.delete_expired_terminal(text, integer) TO %s', p_worker);
     EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.delete_expired_idempotency_keys(text, integer) TO %s', p_worker);
     EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.queue_demand(text, text[], integer[]) TO %s', p_worker);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.live_worker_count(text) TO %s', p_worker);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.live_worker_count(text) TO %s', p_observer);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.live_worker_count(text) TO %s', p_administrator);
     EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.storage_protocol_version() TO %s', p_worker);
     EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.ready_channel(text) TO %s', p_worker);
 

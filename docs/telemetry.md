@@ -39,6 +39,8 @@ Trace context is stored in the task `headers` JSON object. Existing application 
 | `pgtask.schedule.skipped_occurrences` | Counter | Occurrences |
 | `pgtask.schedule.lag` | Histogram | Seconds |
 | `pgtask.schedule.materialization.duration` | Histogram | Seconds |
+| `pgtask.workers.live` | Gauge | Workers |
+| `pgtask.worker.heartbeats` | Counter | Heartbeats |
 | `pgtask.queue.ready.tasks` | Gauge | Tasks |
 | `pgtask.queue.unroutable.tasks` | Gauge | Tasks |
 | `pgtask.worker.concurrency.configured` | Gauge | Handlers |
@@ -68,3 +70,19 @@ PostgreSQL CPU, memory, connections, locks, WAL, cache, and storage are infrastr
 ## Worker health
 
 Set `WorkerConfig.health_address` to serve `/livez` and `/readyz` from the dedicated Rust supervisor thread. `/livez` only proves that the supervisor can respond. `/readyz` requires open claim admission, database connectivity, a healthy notification listener, and safe lease renewal. Dependency failure removes the worker from readiness without asking Kubernetes to restart a process whose supervisor is healthy.
+
+## Worker liveness
+
+`pgtask.workers.live` counts the workers the database still considers live for a queue, and every
+worker reports it on its heartbeat tick.
+
+That is deliberately not the same as counting the processes reporting metrics. A worker whose
+heartbeat is failing keeps exporting everything else and stops being live, which is exactly the
+failure worth alerting on. Compare the two and a divergence means workers are running but the
+database cannot see them.
+
+`pgtask.worker.heartbeats` counts attempts with a `pgtask.heartbeat.outcome` attribute of `ok`,
+`missing` when the registration has gone, or `error` when the call failed.
+
+Heartbeats are not spans. They are periodic and unparented, so a span for each would add one
+single-span trace per worker every ten seconds and still not answer how many workers are alive.
