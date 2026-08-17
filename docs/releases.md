@@ -45,6 +45,26 @@ Configure the GitHub `pypi` environment as a trusted publisher for the PyPI proj
 with this repository and `release.yml` as its trusted publisher. Add `CARGO_REGISTRY_TOKEN` as a repository secret. Allow
 GitHub Actions to write packages so it can publish to `ghcr.io`.
 
+The three registries do not need the same preparation before a first release.
+
+| Registry | Before the first release |
+| --- | --- |
+| PyPI | Nothing. Register a pending publisher from your account sidebar; it becomes a normal publisher on first use |
+| crates.io | Nothing. `CARGO_REGISTRY_TOKEN` can publish a crate that does not exist yet |
+| npm | **Publish once by hand.** A trusted publisher is configured in the package's settings, which requires the package to exist |
+
+So the npm package is the one gate on a first release:
+
+```console
+cd sdks/typescript
+npm run build
+npm publish --access public
+```
+
+Configure the trusted publisher afterwards and every later release goes through OIDC. Publishing a
+placeholder such as `0.0.1` works too, if you would rather the first real version came from the
+workflow like the others.
+
 The workflow uses GitHub OIDC for keyless Sigstore signatures. It does not store a signing key. Rust crates publish in
 dependency order and wait for crates.io indexing before publishing a dependent crate, so a partial workflow can be rerun
 without republishing completed artifacts.
