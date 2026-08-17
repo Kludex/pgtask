@@ -4,7 +4,7 @@ Durable tasks and workflows that live entirely in PostgreSQL.
 
 There is no broker, no coordinator, and no extension to install. If your database is up, your queue is up.
 
-> **Warning**
+> [!WARNING]
 > `pgtask` is under active development. It is not ready for production use.
 
 ## Installation
