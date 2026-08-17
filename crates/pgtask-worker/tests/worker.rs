@@ -2351,12 +2351,17 @@ async fn durable_result_wait_handles_ready_and_stale_parents() {
     store.migrate().await.unwrap();
     let suffix = Uuid::new_v4();
     let queue_name = QueueName::new(format!("durable-ready-result-{suffix}")).unwrap();
+    // Each parent spawns a child under its own name. Sharing one name lets complete_ready_child
+    // claim the other parent's child, leaving the ready parent waiting on a child nobody finishes.
     let child_name = TaskName::new(format!("durable-ready-child-{suffix}")).unwrap();
+    let stale_child_name = TaskName::new(format!("durable-stale-child-{suffix}")).unwrap();
     let parent_name = TaskName::new(format!("durable-ready-parent-{suffix}")).unwrap();
     let stale_name = TaskName::new(format!("durable-stale-parent-{suffix}")).unwrap();
 
     let mut child_request = EnqueueRequest::new(child_name.clone(), json!({}));
     child_request.queue_name = queue_name.clone();
+    let mut stale_child_request = EnqueueRequest::new(stale_child_name, json!({}));
+    stale_child_request.queue_name = queue_name.clone();
 
     let mut registry = HandlerRegistry::new();
     let ready_store = store.clone();
@@ -2385,7 +2390,6 @@ async fn durable_result_wait_handles_ready_and_stale_parents() {
     let release = Arc::new(Semaphore::new(0));
     let handler_started = Arc::clone(&started);
     let handler_release = Arc::clone(&release);
-    let stale_child_request = child_request;
     registry.register_durable(
         stale_name.clone(),
         HandlerVersion::default(),

@@ -285,13 +285,16 @@ async fn external_result_wait_uses_notifications() {
     request.queue_name = queue_name.clone();
     let task_id = store.enqueue(&request).await.unwrap().task_id;
     let waiting_store = store.clone();
+    // The assertion is that a notification delivers the result, not that it arrives quickly. The
+    // budget has to cover listener startup, two notifications, a claim, and a completion, so a one
+    // second wait failed under load while the delivery it tests was working.
     let waiter = tokio::spawn(async move {
         waiting_store
-            .wait_for_task_result(task_id, Some(Duration::from_secs(1)))
+            .wait_for_task_result(task_id, Some(Duration::from_secs(30)))
             .await
             .unwrap()
     });
-    tokio::time::timeout(Duration::from_secs(1), async {
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let listening: bool = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name = $1 AND query LIKE 'LISTEN%')",
