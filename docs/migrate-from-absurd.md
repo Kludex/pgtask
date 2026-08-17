@@ -1,5 +1,47 @@
 # Migrate from Absurd
 
+## Why migrate
+
+Absurd and pgtask solve durable execution the same way. Steps store checkpoints, a sleep suspends the
+task rather than blocking a worker, and a resume replays the handler from the top with completed
+steps restored. If durable execution is all you need, you already have it.
+
+So migrate for what sits around the workflow, not for the workflow itself:
+
+| | Absurd | pgtask |
+| --- | --- | --- |
+| Durable steps, sleeps, events | Yes | Yes |
+| Leases and stale-worker fencing | Yes | Yes |
+| Priority | No | Yes, with a starvation escape |
+| Child tasks and cascade cancellation | No | Yes |
+| Role separation | Runs as your role | Producer, worker, observer, administrator |
+| Queue admission limits | No | Optional hard capacity |
+| Scheduling | `pg_cron` | Embedded in the worker, no extension |
+| Footprint | One SQL file | Rust engine, chart, CLI, web interface |
+
+Three of those tend to decide it.
+
+**Priority**, because a queue that cannot say "this first" eventually needs a second queue to say it
+for you.
+
+**Child tasks**, because a workflow that fans out needs its children cancelled when it is cancelled,
+and that has to be enforced by the database rather than remembered by a handler.
+
+**Role separation**, because a producer that can also claim tasks, mark them succeeded, and read
+every payload is a problem the moment more than one team shares the database. pgtask enforces this
+with `SECURITY DEFINER` functions and no direct table grants.
+
+!!! warning "Absurd is the more proven system"
+
+    Absurd has been public since October 2025 and has production use behind it. pgtask does not, and
+    its own README still says it is not production ready. If your workflows work today, that is a
+    strong reason to leave them where they are.
+
+!!! note "Do not move a workflow mid-flight"
+
+    Checkpoint identities are not interchangeable between the two engines. Route new workflow
+    identifiers to pgtask and let Absurd finish the runs it already started.
+
 ## Define durable boundaries
 
 Absurd workflows become handlers whose durable points are named steps:
@@ -46,4 +88,4 @@ Kill the worker after every durable boundary. Restart it with the same handler v
 
 ## Roll out and roll back
 
-Deploy the new worker beside Absurd. Route only new workflow identifiers to `pgtask`; let Absurd finish existing runs. Rollback routes new identifiers to Absurd while `pgtask` drains committed work. Do not move an in-progress workflow between engines because their checkpoint identities are not interchangeable.
+Deploy the new worker beside Absurd. Route only new workflow identifiers to `pgtask`; let Absurd finish existing runs. Rollback routes new identifiers to Absurd while `pgtask` drains committed work.

@@ -1,5 +1,41 @@
 # Migrate from ARQ
 
+## Why migrate
+
+ARQ keeps your queue in Redis. That is a second datastore, and it is the one your task lives in while
+your data lives somewhere else.
+
+Everything below follows from moving that state into the database you already have:
+
+| | ARQ | pgtask |
+| --- | --- | --- |
+| Storage | Redis | PostgreSQL |
+| Enqueue in your transaction | No | Yes |
+| Durable steps, sleeps, signals | No | Yes |
+| Typed payloads | Untyped arguments | Checked against the handler |
+| Priority | No | Yes, with a starvation escape |
+| Results | Redis, one hour by default | PostgreSQL, per-queue retention |
+| Stale worker writes | Job requeued on shutdown | Rejected by lease token |
+
+The one that changes how you write code is transactional enqueue. In ARQ, creating a row and
+enqueueing the job that processes it are two writes to two systems, so either can fail alone. You
+either accept the inconsistency or build an outbox table, which is a queue in your database feeding a
+queue in Redis.
+
+The one that changes what you can build is durable execution. A workflow that renders a report, waits
+six hours, then emails it is not an ARQ job. In pgtask it is one handler, because the wait releases
+the worker and the task resumes from its checkpoints.
+
+ARQ is not careless with your work. Its pessimistic execution keeps a job in the queue until it
+succeeds or fails, so a worker shutdown requeues rather than drops it. The difference is what backs
+that queue and whether the enqueue can join your transaction.
+
+!!! note "Stay on ARQ if"
+
+    Your jobs are fire-and-forget, you already run Redis, and nothing you enqueue has to agree with a
+    database write. ARQ is smaller, older, and has none of the operational surface pgtask adds. A
+    migration is only worth it for transactional enqueue, durable workflows, or dropping Redis.
+
 ## Define the task
 
 An ARQ task function becomes a registered handler with a typed payload:
