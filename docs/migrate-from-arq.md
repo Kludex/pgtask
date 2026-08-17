@@ -109,6 +109,77 @@ async with connection.transaction():
 
 Use transactional enqueue when the task depends on a row written by the same request. This removes the outbox race without adding another service.
 
+## Process the existing queue
+
+Do not move jobs between the two systems. Drain the old queue instead.
+
+A job in Redis has no equivalent row in PostgreSQL, and copying one across gives you a job that both
+workers can run. Every safe cutover has the same shape: stop producing into ARQ, let ARQ finish what
+it already holds, and produce into `pgtask` from that moment on.
+
+Both workers run at once during the drain, which is fine as long as each is only claiming its own
+backlog.
+
+### Stop cron before you enable schedules
+
+This is the step that causes duplicate work, so do it first and confirm it.
+
+ARQ cron jobs and `pgtask` schedules do not know about each other. If both are live, every occurrence
+runs twice. Remove the `cron_jobs` entry from the ARQ worker settings and deploy that worker **before**
+you create the equivalent schedule in `pgtask`.
+
+A short gap where neither runs is safe. An overlap where both run is not, unless the task is
+genuinely idempotent.
+
+### Wait for deferred jobs
+
+A job enqueued with `_defer_by` or `_defer_until` sits in Redis until its time arrives. It is not
+visible as work in progress, and it will run even after you think the queue is empty.
+
+Find the furthest one and keep the ARQ worker alive until it has passed:
+
+```python
+from arq.connections import create_pool
+
+redis = await create_pool(settings)
+for job in await redis.queued_jobs():
+    print(job.function, job.enqueue_time, job.score)
+```
+
+`queued_jobs()` includes deferred jobs, so an empty result means nothing is pending or waiting. If
+your application defers work by days, the ARQ worker has to outlive the longest deferral.
+
+### Confirm the queue is finished
+
+ARQ is done when three things hold at once:
+
+- `queued_jobs()` returns nothing.
+- No job reports `JobStatus.in_progress`.
+- The latest deferred time has passed.
+
+Then stop the ARQ worker. Keep Redis until you no longer need the job results it holds; results
+expire on their own default of one hour unless you configured otherwise.
+
+### Protect the overlap with idempotency keys
+
+While both systems run, a retry in your application can produce the same logical work twice, once on
+each side.
+
+Derive the idempotency key from your data rather than from a request, and pass the same value to any
+external system that accepts one:
+
+```python
+await client.enqueue(
+    generate_report.request(
+        {"account_id": str(account_id), "period": period},
+        idempotency_key=f"report:{account_id}:{period}",
+    )
+)
+```
+
+The key deduplicates the task inside `pgtask`. It does not deduplicate against ARQ, which is why the
+external key matters more during a cutover than at any other time.
+
 ## Roll out and roll back
 
 1. Measure the old task's volume, duration, failures, retries, and queue age.

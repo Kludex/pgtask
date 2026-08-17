@@ -86,6 +86,63 @@ Map each existing checkpoint, model call, tool call, sleep, signal, spawn, and r
 
 Kill the worker after every durable boundary. Restart it with the same handler version. Verify completed steps do not run again, incomplete work resumes, stale lease owners cannot commit, and the product row reaches one correct terminal state.
 
+## Process existing runs
+
+An in-flight workflow cannot move. Its checkpoints belong to Absurd's tables and mean nothing to
+`pgtask`, so a half-finished run has to finish where it started.
+
+That makes the cutover a routing decision rather than a data migration. New workflow identifiers go
+to `pgtask`. Absurd keeps its own runs until they reach a terminal state, and both engines run side
+by side until it is empty.
+
+### The longest sleep decides how long you run both
+
+This is the part that surprises people, and it is worth working out before you start.
+
+A durable workflow suspended for seven days keeps Absurd alive for seven days. The run is not
+consuming a worker, but it is unfinished, and something has to wake it. The same applies to a signal
+wait with a long timeout and to a child result wait.
+
+So the drain window is not "until the queue looks quiet". It is **the longest sleep or timeout any
+live run can still be holding**. Find that number from your own workflow definitions before you plan
+the cutover, because it sets the date you can decommission Absurd.
+
+If that window is unacceptable, you have two honest options, and neither is free:
+
+- **Wait it out.** Run both engines for the full duration. Simplest, and usually correct.
+- **Cancel and re-run.** Cancel the long sleepers in Absurd and start equivalent work in `pgtask`.
+  Only safe when the completed steps have no external side effects you would repeat.
+
+### Confirm Absurd is finished
+
+Absurd stores each queue in its own tables, named `t_` followed by the queue name, so ask the tables
+directly rather than inferring from worker activity:
+
+```sql
+SELECT queue_name FROM absurd.list_queues();
+
+-- For each queue, count what has not reached a terminal state.
+SELECT count(*) FROM absurd.t_orders
+ WHERE state IN ('pending', 'running', 'sleeping');
+```
+
+A `sleeping` task is the one that matters. It is not failing and not running, so it does not show up
+as activity, and it still has to be resumed before the queue is finished.
+
+Check every queue rather than only the one you migrated, because a workflow can spawn work onto
+another.
+
+Keep the Absurd worker running until then. A suspended run that nobody resumes is not finished, it
+is stuck.
+
+### Do not enable both sides of a schedule
+
+Absurd has no recurring schedules of its own, so anything periodic in your system is triggered from
+outside it, whether that is `pg_cron`, a Kubernetes CronJob, or an external scheduler.
+
+Point that trigger at exactly one engine. Moving it to a `pgtask` schedule means disabling the old
+trigger first, in the same way you would when leaving any other scheduler.
+
 ## Roll out and roll back
 
 Deploy the new worker beside Absurd. Route only new workflow identifiers to `pgtask`; let Absurd finish existing runs. Rollback routes new identifiers to Absurd while `pgtask` drains committed work.
