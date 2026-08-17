@@ -532,18 +532,13 @@ async fn worker_drains_earlier_queues_before_later_ones() {
     let executed = Arc::new(Mutex::new(Vec::new()));
     let mut registry = HandlerRegistry::new();
     let recorded = Arc::clone(&executed);
-    registry.register(
-        task_name,
-        HandlerVersion::default(),
-        RetryPolicy::Never,
-        move |task| {
-            let recorded = Arc::clone(&recorded);
-            async move {
-                recorded.lock().await.push(task.queue_name.clone());
-                Ok(json!(null))
-            }
-        },
-    );
+    registry.register(task_name, HandlerVersion::default(), RetryPolicy::Never, move |task| {
+        let recorded = Arc::clone(&recorded);
+        async move {
+            recorded.lock().await.push(task.queue_name.clone());
+            Ok(json!(null))
+        }
+    });
 
     let mut config = WorkerConfig::with_queues(vec![high.clone(), low.clone()]);
     config.concurrency = NonZeroU16::new(1).unwrap();

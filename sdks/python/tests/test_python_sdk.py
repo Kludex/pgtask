@@ -167,6 +167,10 @@ async def test_worker_configuration_rejects_invalid_values() -> None:
         Worker(database_url, empty, max_listener_connections=0)
     with pytest.raises(ValueError, match="queue name must not be empty"):
         Worker(database_url, TaskRegistry(""))
+    with pytest.raises(ValueError, match="at least one registry is required"):
+        Worker(database_url, [])
+    with pytest.raises(ValueError, match="registries must target distinct queues"):
+        Worker(database_url, [TaskRegistry("reports"), TaskRegistry("reports")])
     with pytest.raises(ValueError):
         Worker(database_url, empty, poll_interval=float("nan"))
     with pytest.raises(ValueError):

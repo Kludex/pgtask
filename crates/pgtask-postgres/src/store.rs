@@ -437,10 +437,7 @@ impl Store {
         if queue_names.is_empty() {
             return Err(PostgresError::MissingQueues);
         }
-        let mut channels = HashMap::from([
-            ("pgtask_schedule".to_owned(), None),
-            ("pgtask_wait".to_owned(), None),
-        ]);
+        let mut channels = HashMap::from([("pgtask_schedule".to_owned(), None), ("pgtask_wait".to_owned(), None)]);
         for queue_name in queue_names {
             let channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
                 .bind(queue_name.as_str())
