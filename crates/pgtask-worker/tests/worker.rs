@@ -2526,3 +2526,44 @@ async fn durable_result_wait_handles_ready_and_stale_parents() {
     shutdown.cancel();
     worker_task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn worker_refuses_to_start_against_an_unmigrated_database() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let database_name = format!("pgtask_unmigrated_{}", Uuid::new_v4().simple());
+    let options = PgConnectOptions::from_str(&database_url).unwrap();
+    let maintenance = PgPool::connect_with(options.clone().database("postgres"))
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database_name}")))
+        .execute(&maintenance)
+        .await
+        .unwrap();
+
+    // Deliberately not migrated: this is a worker that won the race against its migration Job.
+    let store = Store::from_pool(PgPool::connect_with(options.database(&database_name)).await.unwrap());
+    let task_name = TaskName::new("unmigrated-task").unwrap();
+    let queue_name = QueueName::new(format!("unmigrated-{}", Uuid::new_v4())).unwrap();
+    let worker = Worker::new(store, successful_registry(&task_name), WorkerConfig::new(queue_name)).unwrap();
+
+    // It must fail rather than idle, because a deployment orders the migration before the workers
+    // and a silent worker would look healthy while doing nothing.
+    let error = tokio::time::timeout(TEST_TIMEOUT, worker.run(CancellationToken::new()))
+        .await
+        .expect("worker idled instead of failing")
+        .expect_err("worker started without a schema");
+    let message = error.to_string();
+    assert!(
+        message.contains("schema \"pgtask\" does not exist"),
+        "the error should say the schema is missing rather than anything vaguer: {message}"
+    );
+
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE {database_name} WITH (FORCE)"
+    )))
+    .execute(&maintenance)
+    .await
+    .unwrap();
+}
