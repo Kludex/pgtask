@@ -211,12 +211,24 @@ jobs:
           toolchain: "1.94"
       - run: ./scripts/publish-crates.sh "${{ needs.version.outputs.version }}"
 
+  # Each architecture builds on its own runner. Emulating aarch64 for a release build of the whole
+  # workspace took over an hour and was still going, so the manifest is assembled from digests
+  # instead.
   image:
     needs: [version, quality]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: amd64
+            platform: linux/amd64
+            os: ubuntu-latest
+          - name: arm64
+            platform: linux/arm64
+            os: ubuntu-22.04-arm
     permissions:
       contents: read
-      id-token: write
       packages: write
     steps:
       - uses: actions/checkout@v4
@@ -224,7 +236,6 @@ jobs:
         run: ./scripts/set-release-version.sh "${{ needs.version.outputs.version }}"
       - id: registry
         run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -235,19 +246,60 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ghcr.io/${{ steps.registry.outputs.owner }}/pgtask:${{ needs.version.outputs.version }}
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=image-${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.name }}
+          outputs: type=image,name=ghcr.io/${{ steps.registry.outputs.owner }}/pgtask,push-by-digest=true,name-canonical=true,push=true
+      - name: Hand the digest to the manifest job
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -eu
+          mkdir digests
+          touch "digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image-digest-${{ matrix.name }}
+          path: digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  image-manifest:
+    needs: [version, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: image-digest-*
+          path: digests
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
       - env:
-          DIGEST: ${{ steps.build.outputs.digest }}
-          IMAGE: ghcr.io/${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          cosign sign --yes "$IMAGE@$DIGEST"
+          set -eu
+          image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/pgtask
+          sources=()
+          for digest in digests/*; do
+            sources+=("$image@sha256:$(basename "$digest")")
+          done
+          docker buildx imagetools create --tag "$image:$VERSION" "${sources[@]}"
+          manifest=$(docker buildx imagetools inspect "$image:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)
+          cosign sign --yes "$image@$manifest"
           cosign verify \
             --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/v" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "$IMAGE@$DIGEST"
+            "$image@$manifest"
 
   chart:
     needs: [version, quality]
@@ -292,7 +344,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [version, wheels, source-distribution, python, npm, crates, image, chart]
+    needs: [version, wheels, source-distribution, python, npm, crates, image-manifest, chart]
     runs-on: ubuntu-latest
     permissions:
       contents: write
