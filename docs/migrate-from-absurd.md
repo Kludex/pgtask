@@ -16,7 +16,7 @@ So migrate for what sits around the workflow, not for the workflow itself:
 | Child tasks and cascade cancellation | No | Yes |
 | Role separation | Runs as your role | Producer, worker, observer, administrator |
 | Queue admission limits | No | Optional hard capacity |
-| Scheduling | `pg_cron` | Embedded in the worker, no extension |
+| Recurring schedules | None; `pg_cron` runs its own maintenance | Interval and cron, embedded in the worker |
 | Footprint | One SQL file | Rust engine, chart, CLI, web interface |
 
 Three of those tend to decide it.
