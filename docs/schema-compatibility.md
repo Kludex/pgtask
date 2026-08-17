@@ -22,6 +22,34 @@ miss a feature.
 Check compatibility with the range. Do not compare `pgtask.storage_protocol_version()` for equality - that is the
 current identifier, useful for reporting, not a compatibility test.
 
+## What enforces this
+
+The rule above is checked rather than trusted.
+
+`tests/sql_surface_baseline.txt` records the schema as of the oldest storage protocol the release
+still supports. A test asserts that every function signature, view, and grant in that baseline still
+exists unchanged. Additions pass, because a worker built for the older protocol never calls them.
+Removals and changes fail, because that same worker still calls what it always called:
+
+```
+the schema is no longer backward compatible with storage protocol 1
+  changed function queue_demand(p_queue_name text, ...) -> TABLE(...)
+    baseline: grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+    now:      grants: {owner}=X/{owner}
+```
+
+Dropping support is deliberate rather than accidental. Raise `STORAGE_PROTOCOL_MIN_VERSION`, then
+rerun with `PGTASK_UPDATE_SQL_BASELINE=1` to rebase the baseline on the new minimum.
+
+!!! warning "Structure is checked, meaning is not"
+
+    A function that keeps its signature and changes what it does passes this test. That is exactly
+    the change a protocol bump exists for, and it remains a judgement you make rather than one the
+    suite makes for you.
+
+Client access goes through functions and views only, so those signatures and their grants are the
+whole contract. Table columns are internal and can change freely.
+
 ## Rolling releases
 
 Use expand and contract:

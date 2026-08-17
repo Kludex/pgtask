@@ -5,11 +5,15 @@
 
 use std::{collections::BTreeMap, fmt::Write as _, str::FromStr};
 
+use pgtask_core::STORAGE_PROTOCOL_MIN_VERSION;
 use pgtask_postgres::Store;
 use sqlx::{PgPool, Row, postgres::PgConnectOptions};
 use uuid::Uuid;
 
 const RECORDED: &str = include_str!("sql_surface.txt");
+/// The surface as of the oldest storage protocol this release still supports. Everything in it must
+/// still exist, unchanged, or a worker built for that protocol breaks.
+const BASELINE: &str = include_str!("sql_surface_baseline.txt");
 const OWNER: &str = "{owner}";
 
 const ROLES: [&str; 5] = [
@@ -188,6 +192,8 @@ async fn sql_surface_matches_the_recorded_contract() {
         std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sql_surface.txt"), &surface).unwrap();
         return;
     }
+    assert_backward_compatible(&surface);
+
     if surface != RECORDED {
         let recorded = blocks(RECORDED);
         let current = blocks(&surface);
@@ -223,4 +229,60 @@ fn blocks(surface: &str) -> BTreeMap<String, String> {
             Some((object.trim().to_string(), detail.trim().to_string()))
         })
         .collect()
+}
+
+/// Fails when the schema stopped offering something the baseline protocol depends on.
+///
+/// Additions are fine, because a worker built for the older protocol simply does not call them.
+/// Removals and changes are not: the same worker still calls what it always called. Semantic changes
+/// behind an unchanged signature cannot be caught here and are what a protocol bump is for.
+fn assert_backward_compatible(surface: &str) {
+    let (declared, baseline) = BASELINE
+        .split_once("\n\n")
+        .expect("the baseline starts with a protocol header");
+    let declared: u32 = declared
+        .rsplit(':')
+        .next()
+        .expect("the header ends with a version")
+        .trim()
+        .parse()
+        .expect("the header records a protocol number");
+
+    if declared != STORAGE_PROTOCOL_MIN_VERSION {
+        assert!(
+            std::env::var("PGTASK_UPDATE_SQL_BASELINE").is_ok(),
+            "the baseline records protocol {declared} and the crate now supports {STORAGE_PROTOCOL_MIN_VERSION} \
+             as its minimum. Dropping support is a contract step: rerun with \
+             PGTASK_UPDATE_SQL_BASELINE=1 to rebase the baseline on the new minimum."
+        );
+        std::fs::write(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/tests/sql_surface_baseline.txt"),
+            format!("# Storage protocol minimum: {STORAGE_PROTOCOL_MIN_VERSION}\n\n{surface}"),
+        )
+        .unwrap();
+        return;
+    }
+
+    let current = blocks(surface);
+    let mut broken = String::new();
+    for (object, detail) in blocks(baseline) {
+        match current.get(&object) {
+            None => writeln!(broken, "  removed {object}").unwrap(),
+            Some(now) if *now != detail => {
+                writeln!(
+                    broken,
+                    "  changed {object}\n    baseline: {detail}\n    now:      {now}"
+                )
+                .unwrap();
+            }
+            Some(_) => {}
+        }
+    }
+    assert!(
+        broken.is_empty(),
+        "the schema is no longer backward compatible with storage protocol {STORAGE_PROTOCOL_MIN_VERSION}\n\
+         {broken}\n\
+         A worker built for that protocol still calls these. Keep them, or raise \
+         STORAGE_PROTOCOL_MIN_VERSION to drop support deliberately."
+    );
 }
