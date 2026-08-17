@@ -1,0 +1,2 @@
+# The crate documentation is the README, and product names in prose are not code.
+doc-valid-idents = ["OpenTelemetry", "PostgreSQL", ".."]
