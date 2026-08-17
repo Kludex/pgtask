@@ -11,6 +11,7 @@ struct KernelMetrics {
     queue_latency: Histogram<f64>,
     execution_duration: Histogram<f64>,
     schedule_occurrences: Counter<u64>,
+    schedule_skipped_occurrences: Counter<u64>,
     schedule_lag: Histogram<f64>,
     schedule_materialization_duration: Histogram<f64>,
     queue_ready_tasks: Gauge<u64>,
@@ -50,6 +51,10 @@ fn metrics() -> &'static KernelMetrics {
             schedule_occurrences: meter
                 .u64_counter("pgtask.schedule.occurrences")
                 .with_description("Schedule occurrences materialized as tasks")
+                .build(),
+            schedule_skipped_occurrences: meter
+                .u64_counter("pgtask.schedule.skipped_occurrences")
+                .with_description("Due schedule occurrences discarded by the misfire policy")
                 .build(),
             schedule_lag: meter
                 .f64_histogram("pgtask.schedule.lag")
@@ -191,13 +196,21 @@ pub fn record_execution(queue_name: &str, task_name: &str, outcome: &'static str
     );
 }
 
-pub fn record_schedule_occurrences(queue_name: &str, task_name: &str, kind: &'static str, count: u64, lag: Duration) {
+pub fn record_schedule_occurrences(
+    queue_name: &str,
+    task_name: &str,
+    kind: &'static str,
+    count: u64,
+    skipped: u64,
+    lag: Duration,
+) {
     let attributes = [
         KeyValue::new("pgtask.queue.name", queue_name.to_owned()),
         KeyValue::new("pgtask.task.name", task_name.to_owned()),
         KeyValue::new("pgtask.schedule.kind", kind),
     ];
     metrics().schedule_occurrences.add(count, &attributes);
+    metrics().schedule_skipped_occurrences.add(skipped, &attributes);
     metrics().schedule_lag.record(lag.as_secs_f64(), &attributes);
 }
 

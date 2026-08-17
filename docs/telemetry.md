@@ -36,6 +36,7 @@ Trace context is stored in the task `headers` JSON object. Existing application 
 | `pgtask.queue.latency` | Histogram | Seconds |
 | `pgtask.execution.duration` | Histogram | Seconds |
 | `pgtask.schedule.occurrences` | Counter | Tasks |
+| `pgtask.schedule.skipped_occurrences` | Counter | Occurrences |
 | `pgtask.schedule.lag` | Histogram | Seconds |
 | `pgtask.schedule.materialization.duration` | Histogram | Seconds |
 | `pgtask.queue.ready.tasks` | Gauge | Tasks |

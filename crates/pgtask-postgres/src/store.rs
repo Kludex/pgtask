@@ -810,6 +810,7 @@ impl Store {
                 schedule.config.task.task_name.as_str(),
                 kind,
                 materialized,
+                materialization.skipped,
                 lag,
             );
             total = total

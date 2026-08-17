@@ -47,6 +47,13 @@ so you choose:
 | `latest` | Run once for the most recent missed occurrence | You want current state, not a backlog - a nightly report |
 | `catch_up` | Run every missed occurrence, bounded by `catch_up_limit` | Each occurrence is a distinct unit of work - per-hour billing rollups |
 
+Whichever you choose, a discarded occurrence is counted. `pgtask.schedule.skipped_occurrences` records
+the due occurrences a policy threw away, with the same queue, task, and kind attributes as
+`pgtask.schedule.occurrences`.
+
+Without it, `skip` and `latest` recover silently: the schedule looks healthy again and nothing says
+that three hours of runs never happened. Alert on this counter being non-zero if the work matters.
+
 `catch_up` is bounded on purpose. An unbounded catch-up after a long outage is how a scheduler turns a recovery into a
 second outage.
 

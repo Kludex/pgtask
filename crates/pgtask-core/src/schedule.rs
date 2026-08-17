@@ -39,6 +39,34 @@ impl ScheduleDefinition {
         }
     }
 
+    /// Counts occurrences due in `first_due..=now`.
+    ///
+    /// An interval is arithmetic. A cron expression has to be walked, so the walk is capped: a
+    /// schedule that missed more than `DUE_COUNT_LIMIT` occurrences reports the cap rather than
+    /// spending unbounded time inside the materialization transaction.
+    fn due_count(&self, first_due: DateTime<Utc>, now: DateTime<Utc>) -> Result<u64, ScheduleError> {
+        match self {
+            Self::Interval { every } => {
+                let every_milliseconds =
+                    i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)?;
+                if every_milliseconds == 0 {
+                    return Err(ScheduleError::ZeroInterval);
+                }
+                let elapsed_milliseconds = (now - first_due).num_milliseconds().max(0);
+                Ok(u64::try_from(elapsed_milliseconds / every_milliseconds).unwrap_or(0) + 1)
+            }
+            Self::Cron { .. } => {
+                let mut count = 0_u64;
+                let mut occurrence = first_due;
+                while occurrence <= now && count < DUE_COUNT_LIMIT {
+                    count += 1;
+                    occurrence = self.next_after(occurrence)?;
+                }
+                Ok(count)
+            }
+        }
+    }
+
     fn latest_due(&self, first_due: DateTime<Utc>, now: DateTime<Utc>) -> Result<DateTime<Utc>, ScheduleError> {
         match self {
             Self::Interval { every } => {
@@ -87,6 +115,7 @@ impl ScheduleDefinition {
             return Ok(Materialization {
                 occurrences: Vec::new(),
                 next_run_at,
+                skipped: 0,
             });
         }
 
@@ -103,7 +132,9 @@ impl ScheduleDefinition {
                 occurrences
             }
         };
+        let due = self.due_count(next_run_at, now)?;
         Ok(Materialization {
+            skipped: due.saturating_sub(occurrences.len() as u64),
             occurrences,
             next_run_at: self.next_after(now)?,
         })
@@ -152,10 +183,15 @@ pub struct Schedule {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Upper bound on the cron occurrences counted when reporting a missed window.
+const DUE_COUNT_LIMIT: u64 = 10_000;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Materialization {
     pub occurrences: Vec<DateTime<Utc>>,
     pub next_run_at: DateTime<Utc>,
+    /// Due occurrences the misfire policy discarded, so a silent gap stays observable.
+    pub skipped: u64,
 }
 
 #[derive(Debug, Error)]
