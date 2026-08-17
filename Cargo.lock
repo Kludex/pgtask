@@ -1169,6 +1169,8 @@ dependencies = [
  "pgtask-postgres",
  "pgtask-worker",
  "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

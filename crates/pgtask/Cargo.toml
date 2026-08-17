@@ -15,6 +15,8 @@ pgtask-worker = { path = "../pgtask-worker", version = "0.1.0" }
 
 [dev-dependencies]
 serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
 
 [lints]
 workspace = true

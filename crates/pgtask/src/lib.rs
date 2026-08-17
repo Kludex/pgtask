@@ -1,4 +1,4 @@
-#![doc = "PostgreSQL-native durable tasks and workflows."]
+#![doc = include_str!("../README.md")]
 
 pub use pgtask_core as core;
 pub use pgtask_otel as otel;
