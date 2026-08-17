@@ -379,4 +379,5 @@ jobs:
               --field ref="refs/tags/$go_tag" \
               --field sha="$GITHUB_SHA"
           fi
-          gh release upload "$TAG" dist/* --clobber
+          # This job never checks the repository out, so gh has to be told which one to upload to.
+          gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
