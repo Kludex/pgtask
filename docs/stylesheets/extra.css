@@ -118,3 +118,136 @@
     transform: none;
   }
 }
+
+/* Rolling upgrade animation. One 20s cycle: migrate, then replace workers one at a time. */
+
+.deployment {
+  margin: 2rem 0;
+  overflow-x: auto;
+}
+
+.deployment svg {
+  display: block;
+  min-width: 36rem;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.deployment figcaption {
+  margin-top: 0.75rem;
+  color: var(--md-default-fg-color--light);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.deployment .pod-old {
+  fill: var(--md-default-fg-color--lightest);
+  stroke: var(--md-default-fg-color--light);
+  stroke-width: 1.5;
+}
+
+.deployment .pod-drain {
+  fill: none;
+  stroke: var(--md-default-fg-color--light);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+.deployment .pod-new {
+  fill: var(--md-primary-fg-color);
+  fill-opacity: 0.18;
+  stroke: var(--md-primary-fg-color);
+  stroke-width: 1.5;
+}
+
+.deployment .job {
+  fill: var(--md-accent-fg-color);
+  fill-opacity: 0.18;
+  stroke: var(--md-accent-fg-color);
+  stroke-width: 1.5;
+}
+
+.deployment .database {
+  fill: var(--md-default-fg-color--lightest);
+  stroke: var(--md-default-fg-color--light);
+  stroke-width: 1.5;
+}
+
+.deployment .pod-label {
+  fill: var(--md-default-fg-color);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.deployment .caption {
+  fill: var(--md-default-fg-color--light);
+  font-size: 11px;
+}
+
+.deployment .playhead {
+  stroke: var(--md-primary-fg-color);
+  stroke-width: 1.5;
+  opacity: 0.45;
+}
+
+@keyframes deployment-playhead {
+  from { transform: translateX(0); }
+  to { transform: translateX(506px); }
+}
+
+/* Visible for a window of the cycle, then gone. */
+@keyframes deployment-until-32 { 0%, 30% { opacity: 1; } 34%, 100% { opacity: 0; } }
+@keyframes deployment-until-46 { 0%, 44% { opacity: 1; } 48%, 100% { opacity: 0; } }
+@keyframes deployment-until-60 { 0%, 58% { opacity: 1; } 62%, 100% { opacity: 0; } }
+
+@keyframes deployment-window-32-40 { 0%, 30% { opacity: 0; } 34%, 38% { opacity: 1; } 42%, 100% { opacity: 0; } }
+@keyframes deployment-window-46-54 { 0%, 44% { opacity: 0; } 48%, 52% { opacity: 1; } 56%, 100% { opacity: 0; } }
+@keyframes deployment-window-60-68 { 0%, 58% { opacity: 0; } 62%, 66% { opacity: 1; } 70%, 100% { opacity: 0; } }
+@keyframes deployment-window-15-30 { 0%, 13% { opacity: 0; } 17%, 28% { opacity: 1; } 32%, 100% { opacity: 0; } }
+
+@keyframes deployment-from-12 { 0%, 10% { opacity: 0; } 14%, 100% { opacity: 1; } }
+@keyframes deployment-from-30 { 0%, 28% { opacity: 0; } 32%, 100% { opacity: 1; } }
+@keyframes deployment-from-40 { 0%, 38% { opacity: 0; } 42%, 100% { opacity: 1; } }
+@keyframes deployment-from-54 { 0%, 52% { opacity: 0; } 56%, 100% { opacity: 1; } }
+@keyframes deployment-from-68 { 0%, 66% { opacity: 0; } 70%, 100% { opacity: 1; } }
+@keyframes deployment-from-74 { 0%, 72% { opacity: 0; } 76%, 100% { opacity: 1; } }
+
+.deployment .playhead { animation: deployment-playhead 20s linear infinite; }
+.deployment .until-32 { animation: deployment-until-32 20s linear infinite; }
+.deployment .until-46 { animation: deployment-until-46 20s linear infinite; }
+.deployment .until-60 { animation: deployment-until-60 20s linear infinite; }
+.deployment .drain-a { animation: deployment-window-32-40 20s linear infinite; }
+.deployment .drain-b { animation: deployment-window-46-54 20s linear infinite; }
+.deployment .drain-c { animation: deployment-window-60-68 20s linear infinite; }
+.deployment .job-running { animation: deployment-window-15-30 20s linear infinite; }
+.deployment .from-12 { animation: deployment-from-12 20s linear infinite; }
+.deployment .from-30 { animation: deployment-from-30 20s linear infinite; }
+.deployment .from-40 { animation: deployment-from-40 20s linear infinite; }
+.deployment .from-54 { animation: deployment-from-54 20s linear infinite; }
+.deployment .from-68 { animation: deployment-from-68 20s linear infinite; }
+.deployment .from-74 { animation: deployment-from-74 20s linear infinite; }
+
+/* Motion explains the order; it is never required to read the diagram. */
+@media (prefers-reduced-motion: reduce) {
+  .deployment .playhead,
+  .deployment .until-32,
+  .deployment .until-46,
+  .deployment .until-60,
+  .deployment .drain-a,
+  .deployment .drain-b,
+  .deployment .drain-c,
+  .deployment .job-running {
+    display: none;
+  }
+
+  .deployment .from-12,
+  .deployment .from-30,
+  .deployment .from-40,
+  .deployment .from-54,
+  .deployment .from-68,
+  .deployment .from-74 {
+    animation: none;
+    opacity: 1;
+  }
+}

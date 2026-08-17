@@ -41,6 +41,49 @@ For an additive migration, which is every upgrade that does not raise the storag
 helm upgrade pgtask ./charts/pgtask --values production.yaml
 ```
 
+<figure class="deployment" markdown="0">
+<svg viewBox="0 0 640 300" role="img" aria-label="A rolling upgrade: the migration Job runs first, then worker pods are replaced one at a time while PostgreSQL keeps serving tasks.">
+  <text class="caption" x="0" y="14">helm upgrade</text>
+  <g class="from-12">
+    <line class="playhead" x1="181" y1="6" x2="181" y2="22" />
+    <text class="caption" x="188" y="18">applied</text>
+  </g>
+
+  <text class="pod-label" x="0" y="56">Job</text>
+  <g class="job-running">
+    <rect class="job" x="196" y="40" width="76" height="24" rx="6" />
+    <text class="caption" x="204" y="56">migrate</text>
+  </g>
+  <g class="from-30"><text class="caption" x="280" y="56">schema now serves 1..=2</text></g>
+
+  <text class="pod-label" x="0" y="106">worker-1</text>
+  <g class="until-32"><rect class="pod-old" x="120" y="90" width="162" height="24" rx="6" /><text class="caption" x="130" y="106">v1 running</text></g>
+  <g class="drain-a"><rect class="pod-drain" x="282" y="90" width="40" height="24" rx="6" /></g>
+  <g class="from-40"><rect class="pod-new" x="322" y="90" width="304" height="24" rx="6" /><text class="caption" x="332" y="106">v2 running</text></g>
+
+  <text class="pod-label" x="0" y="146">worker-2</text>
+  <g class="until-46"><rect class="pod-old" x="120" y="130" width="233" height="24" rx="6" /><text class="caption" x="130" y="146">v1 running</text></g>
+  <g class="drain-b"><rect class="pod-drain" x="353" y="130" width="40" height="24" rx="6" /></g>
+  <g class="from-54"><rect class="pod-new" x="393" y="130" width="233" height="24" rx="6" /><text class="caption" x="403" y="146">v2 running</text></g>
+
+  <text class="pod-label" x="0" y="186">worker-3</text>
+  <g class="until-60"><rect class="pod-old" x="120" y="170" width="304" height="24" rx="6" /><text class="caption" x="130" y="186">v1 running</text></g>
+  <g class="drain-c"><rect class="pod-drain" x="424" y="170" width="40" height="24" rx="6" /></g>
+  <g class="from-68"><rect class="pod-new" x="464" y="170" width="162" height="24" rx="6" /><text class="caption" x="474" y="186">v2 running</text></g>
+
+  <text class="caption" x="120" y="210">a dashed pod is draining: it finishes its handlers and claims nothing new</text>
+
+  <text class="pod-label" x="0" y="240">PostgreSQL</text>
+  <rect class="database" x="120" y="224" width="506" height="24" rx="6" />
+  <text class="caption" x="130" y="240">claims, leases, and completions never stop</text>
+
+  <g class="from-74"><text class="caption" x="494" y="272">upgrade complete</text></g>
+
+  <line class="playhead" x1="120" y1="34" x2="120" y2="256" />
+</svg>
+<figcaption>The Job finishes before any pod is replaced, and only one worker drains at a time. Tasks a draining worker cannot finish return through lease expiry.</figcaption>
+</figure>
+
 The chart runs the migration as a `pre-upgrade` hook with weight `-10`, so the schema is migrated
 before any worker Deployment rolls. Then Kubernetes replaces workers one at a time.
 
