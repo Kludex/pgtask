@@ -13,6 +13,7 @@ from pgtask.client import (
     TaskState,
     TransactionConnection,
     Worker,
+    get_current_task,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "TaskState",
     "TransactionConnection",
     "Worker",
+    "get_current_task",
 ]

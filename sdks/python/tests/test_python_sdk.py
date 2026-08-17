@@ -40,6 +40,7 @@ def test_public_python_contract() -> None:
         "TaskState",
         "TransactionConnection",
         "Worker",
+        "get_current_task",
     ]
     assert tuple(inspect.signature(TaskRegistry.task).parameters) == (
         "self",
@@ -403,5 +404,44 @@ async def test_python_handler_uses_durable_workflow_operations() -> None:
         "child": {"error": None, "result": 42, "state": "succeeded"},
     }
     assert step_calls == 1
+    worker.shutdown()
+    await running
+
+
+@pytest.mark.anyio
+async def test_ambient_task_is_reachable_from_any_frame_below_the_handler() -> None:
+    database_url = os.environ["PGTASK_DATABASE_URL"]
+    client = await Client.connect(database_url)
+    await client.migrate()
+    queue_name = f"python-{os.urandom(8).hex()}"
+    registry = TaskRegistry(queue_name)
+    started = asyncio.Event()
+    observed: dict[str, tuple[str, str]] = {}
+
+    async def deep_frame() -> str:
+        ambient = pgtask.get_current_task()
+        assert ambient is not None
+        return ambient.id
+
+    @registry.task("python.ambient")
+    async def ambient(task: Task, payload: dict[str, JSONValue]) -> JSONValue:
+        if payload["wait"]:
+            started.set()
+            await asyncio.sleep(0.2)
+        observed[task.id] = (await deep_frame(), await task.step("inside-step", deep_frame))
+        return {"id": task.id}
+
+    assert pgtask.get_current_task() is None
+    worker = Worker(database_url, registry, concurrency=2, poll_interval=30.0)
+    slow = await client.enqueue(ambient.request({"wait": True}))
+    running = asyncio.create_task(worker.run())
+    await asyncio.wait_for(started.wait(), timeout=5)
+    fast = await client.enqueue(ambient.request({"wait": False}))
+    for handle in (fast, slow):
+        result = await handle.result(timeout=10)
+        assert result is not None
+        assert result.state == "succeeded"
+    assert observed == {fast.id: (fast.id, fast.id), slow.id: (slow.id, slow.id)}
+    assert pgtask.get_current_task() is None
     worker.shutdown()
     await running
