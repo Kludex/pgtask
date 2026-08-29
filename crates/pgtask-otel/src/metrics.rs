@@ -79,12 +79,12 @@ fn metrics() -> &'static KernelMetrics {
                 .build(),
             queue_ready_tasks: meter
                 .u64_gauge("pgtask.queue.ready.tasks")
-                .with_description("Due tasks supported by this worker process")
+                .with_description("Due tasks a live, non-draining worker on this queue can run")
                 .with_unit("{task}")
                 .build(),
             queue_unroutable_tasks: meter
                 .u64_gauge("pgtask.queue.unroutable.tasks")
-                .with_description("Due tasks with no live capable worker")
+                .with_description("Due tasks with no live capable worker on this queue")
                 .with_unit("{task}")
                 .build(),
             worker_configured_concurrency: meter
@@ -190,9 +190,9 @@ pub fn record_queue_latency(queue_name: &str, task_name: &str, duration: Duratio
     );
 }
 
-pub fn record_queue_demand(queue_name: &str, capable_tasks: u64, unroutable_tasks: u64) {
+pub fn record_queue_demand(queue_name: &str, ready_tasks: u64, unroutable_tasks: u64) {
     let attributes = [KeyValue::new("pgtask.queue.name", queue_name.to_owned())];
-    metrics().queue_ready_tasks.record(capable_tasks, &attributes);
+    metrics().queue_ready_tasks.record(ready_tasks, &attributes);
     metrics().queue_unroutable_tasks.record(unroutable_tasks, &attributes);
 }
 

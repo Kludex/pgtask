@@ -249,6 +249,12 @@ async fn invalid_runtime_limits_fail_before_mutating_storage() {
         Err(PostgresError::InvalidSampleInterval)
     ));
     assert!(matches!(
+        store
+            .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, Duration::from_micros(500))
+            .await,
+        Err(PostgresError::InvalidSampleInterval)
+    ));
+    assert!(matches!(
         store.next_task_delay(&queue_name, &[]).await,
         Err(PostgresError::MissingCapabilities)
     ));
@@ -2066,50 +2072,148 @@ async fn worker_heartbeats_elect_one_queue_demand_sampler_per_interval() {
     let suffix = Uuid::new_v4();
     let queue_name = QueueName::new(format!("heartbeat-sampler-{suffix}")).unwrap();
     let task_name = TaskName::new(format!("heartbeat-sampler-task-{suffix}")).unwrap();
-    let registrations = [(task_name, HandlerVersion::default(), RetryPolicy::Never)];
-    let first = WorkerId::new();
-    let second = WorkerId::new();
-    for worker_id in [first, second] {
+    let missing_name = TaskName::new(format!("heartbeat-missing-task-{suffix}")).unwrap();
+    let registrations = [(task_name.clone(), HandlerVersion::default(), RetryPolicy::Never)];
+    let mut routable = EnqueueRequest::new(task_name, json!({}));
+    routable.queue_name = queue_name.clone();
+    store.enqueue(&routable).await.unwrap();
+    let mut unroutable = EnqueueRequest::new(missing_name, json!({}));
+    unroutable.queue_name = queue_name.clone();
+    store.enqueue(&unroutable).await.unwrap();
+    let worker_ids = [WorkerId::new(), WorkerId::new(), WorkerId::new(), WorkerId::new()];
+    for worker_id in worker_ids {
         store
             .register_worker(worker_id, &queue_name, "test", &registrations, Duration::from_secs(1))
             .await
             .unwrap();
     }
     let interval = Duration::from_secs(30);
-
-    let (first_heartbeat, second_heartbeat) = tokio::join!(
-        store.heartbeat_worker_with_sampling(first, Duration::from_secs(1), false, interval),
-        store.heartbeat_worker_with_sampling(second, Duration::from_secs(1), false, interval),
-    );
-    let heartbeats = [first_heartbeat.unwrap(), second_heartbeat.unwrap()];
-    assert!(heartbeats.iter().all(|heartbeat| heartbeat.updated));
-    assert_eq!(heartbeats.iter().filter(|heartbeat| heartbeat.should_sample).count(), 1);
-
-    let first_heartbeat = store
-        .heartbeat_worker_with_sampling(first, Duration::from_secs(1), false, interval)
+    let seeded = store
+        .heartbeat_worker_with_sampling(worker_ids[0], Duration::from_secs(1), false, interval)
         .await
         .unwrap();
-    assert!(!first_heartbeat.should_sample);
-
+    assert!(seeded.sampled);
+    assert_eq!((seeded.ready_tasks, seeded.unroutable_tasks), (1, 1));
     sqlx::query(
-        "UPDATE pgtask.queues SET demand_sampled_at = demand_sampled_at - interval '30 seconds' WHERE name = $1",
+        "UPDATE pgtask.queues SET demand_sampled_at = statement_timestamp() - interval '1 hour' WHERE name = $1",
     )
     .bind(queue_name.as_str())
     .execute(store.pool())
     .await
     .unwrap();
-    let second_heartbeat = store
-        .heartbeat_worker_with_sampling(second, Duration::from_secs(1), false, interval)
+
+    let barrier = Arc::new(Barrier::new(worker_ids.len() + 1));
+    let mut tasks = tokio::task::JoinSet::new();
+    for worker_id in worker_ids {
+        let store = store.clone();
+        let barrier = Arc::clone(&barrier);
+        tasks.spawn(async move {
+            barrier.wait().await;
+            store
+                .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, interval)
+                .await
+                .unwrap()
+        });
+    }
+    barrier.wait().await;
+    let mut heartbeats = Vec::new();
+    while let Some(heartbeat) = tasks.join_next().await {
+        heartbeats.push(heartbeat.unwrap());
+    }
+    assert!(heartbeats.iter().all(|heartbeat| heartbeat.updated));
+    assert!(heartbeats.iter().all(|heartbeat| heartbeat.live_workers == 4));
+    assert!(
+        heartbeats
+            .iter()
+            .all(|heartbeat| (heartbeat.ready_tasks, heartbeat.unroutable_tasks) == (1, 1))
+    );
+    assert_eq!(heartbeats.iter().filter(|heartbeat| heartbeat.sampled).count(), 1);
+}
+
+#[tokio::test]
+async fn queue_demand_sampling_honors_its_window_without_waiting_for_the_election_lock() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let queue_name = QueueName::new(format!("sampling-window-{}", Uuid::new_v4())).unwrap();
+    let task_name = TaskName::new(format!("sampling-window-task-{}", Uuid::new_v4())).unwrap();
+    let worker_id = WorkerId::new();
+    store
+        .register_worker(
+            worker_id,
+            &queue_name,
+            "test",
+            &[(task_name, HandlerVersion::default(), RetryPolicy::Never)],
+            Duration::from_secs(1),
+        )
         .await
         .unwrap();
-    assert!(second_heartbeat.should_sample);
+    let interval = Duration::from_secs(30);
+    assert!(
+        store
+            .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, interval)
+            .await
+            .unwrap()
+            .sampled
+    );
+
+    sqlx::query(
+        "UPDATE pgtask.queues SET demand_sampled_at = statement_timestamp() - interval '29 seconds' WHERE name = $1",
+    )
+    .bind(queue_name.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let early = store
+        .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, interval)
+        .await
+        .unwrap();
+    assert!(early.sampled);
+
+    sqlx::query(
+        "UPDATE pgtask.queues SET demand_sampled_at = statement_timestamp() - interval '15 seconds' WHERE name = $1",
+    )
+    .bind(queue_name.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let inside_window = store
+        .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, interval)
+        .await
+        .unwrap();
+    assert!(!inside_window.sampled);
+
+    sqlx::query(
+        "UPDATE pgtask.queues SET demand_sampled_at = statement_timestamp() - interval '1 hour' WHERE name = $1",
+    )
+    .bind(queue_name.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let mut lock = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('pgtask.demand.' || $1, 0))")
+        .bind(queue_name.as_str())
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let locked = tokio::time::timeout(
+        Duration::from_secs(5),
+        store.heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, interval),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(!locked.sampled);
+    lock.commit().await.unwrap();
 
     let missing = store
         .heartbeat_worker_with_sampling(WorkerId::new(), Duration::from_secs(1), false, interval)
         .await
         .unwrap();
     assert!(!missing.updated);
-    assert!(!missing.should_sample);
+    assert!(!missing.sampled);
 }
 
 #[tokio::test]

@@ -211,7 +211,10 @@ pub struct QueueDemand {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WorkerHeartbeat {
     pub updated: bool,
-    pub should_sample: bool,
+    pub sampled: bool,
+    pub live_workers: u64,
+    pub ready_tasks: u64,
+    pub unroutable_tasks: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -557,8 +560,20 @@ impl Store {
                 .await?;
         Ok(WorkerHeartbeat {
             updated: row.updated,
-            should_sample: row.should_sample,
+            sampled: row.sampled,
+            live_workers: u64::try_from(row.live_workers).map_err(invalid_number)?,
+            ready_tasks: u64::try_from(row.ready_tasks).map_err(invalid_number)?,
+            unroutable_tasks: u64::try_from(row.unroutable_tasks).map_err(invalid_number)?,
         })
+    }
+
+    pub async fn supports_demand_sampling(&self) -> Result<bool, PostgresError> {
+        let supported = sqlx::query_scalar(
+            "SELECT to_regprocedure('pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint)') IS NOT NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(supported)
     }
 
     /// Counts workers the database still considers live, which is not the same as the number of
@@ -1627,7 +1642,10 @@ struct QueueDemandRow {
 #[derive(FromRow)]
 struct WorkerHeartbeatRow {
     updated: bool,
-    should_sample: bool,
+    sampled: bool,
+    live_workers: i64,
+    ready_tasks: i64,
+    unroutable_tasks: i64,
 }
 
 #[derive(FromRow)]

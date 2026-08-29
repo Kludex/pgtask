@@ -116,8 +116,12 @@ pub enum WorkerError {
     InvalidLeaseDuration,
     #[error("poll interval must be greater than zero")]
     InvalidPollInterval,
-    #[error("worker heartbeat interval must be nonzero and shorter than its time to live")]
+    #[error("worker heartbeat interval must be at least one millisecond and shorter than its time to live")]
     InvalidWorkerHeartbeat,
+    #[error(
+        "the database is missing pgtask.heartbeat_worker_with_sampling; apply pending migrations before starting workers"
+    )]
+    OutdatedStorageSchema,
     #[error("schedule reconciliation interval must be greater than zero")]
     InvalidScheduleReconciliationInterval,
     #[error("retention interval must be greater than zero")]
@@ -229,7 +233,6 @@ struct ActiveLease {
 struct HeartbeatConfig {
     worker_id: WorkerId,
     queue_name: QueueName,
-    capabilities: Vec<(TaskName, HandlerVersion)>,
     interval: Duration,
     ttl: Duration,
 }
@@ -242,7 +245,9 @@ impl Worker {
         if config.poll_interval.is_zero() {
             return Err(WorkerError::InvalidPollInterval);
         }
-        if config.worker_heartbeat_interval.is_zero() || config.worker_heartbeat_interval >= config.worker_ttl {
+        if config.worker_heartbeat_interval < Duration::from_millis(1)
+            || config.worker_heartbeat_interval >= config.worker_ttl
+        {
             return Err(WorkerError::InvalidWorkerHeartbeat);
         }
         if config.schedule_reconciliation_interval.is_zero() {
@@ -310,6 +315,9 @@ impl Worker {
                 worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
             });
         }
+        if !self.store.supports_demand_sampling().await? {
+            return Err(WorkerError::OutdatedStorageSchema);
+        }
         let _supervisor = Supervisor::start(
             self.health.clone(),
             self.config.queues[0].clone(),
@@ -324,7 +332,6 @@ impl Worker {
         let task_wakeup = Arc::new(Notify::new());
         let schedule_wakeup = Arc::new(Notify::new());
         let runtime_shutdown = CancellationToken::new();
-        let capabilities = self.registry.capabilities();
         let registrations = self.registry.registrations();
         let ready_listener = self.store.ready_listener_for(&self.config.queues).await?;
         self.health.set_listener(true);
@@ -380,7 +387,6 @@ impl Worker {
             HeartbeatConfig {
                 worker_id: self.id,
                 queue_name: self.config.queues[0].clone(),
-                capabilities: capabilities.clone(),
                 interval: self.config.worker_heartbeat_interval,
                 ttl: self.config.worker_ttl,
             },
@@ -956,46 +962,29 @@ async fn heartbeat_worker(store: Store, config: HeartbeatConfig, shutdown: Cance
                 break;
             }
             _ = interval.tick() => {
-                let should_sample = match store
+                match store
                     .heartbeat_worker_with_sampling(config.worker_id, config.ttl, false, config.interval)
                     .await
                 {
                     Ok(heartbeat) if heartbeat.updated => {
                         health.set_database(true);
                         pgtask_otel::record_heartbeat(config.queue_name.as_str(), "ok");
-                        heartbeat.should_sample
+                        pgtask_otel::record_live_workers(config.queue_name.as_str(), heartbeat.live_workers);
+                        pgtask_otel::record_queue_demand(
+                            config.queue_name.as_str(),
+                            heartbeat.ready_tasks,
+                            heartbeat.unroutable_tasks,
+                        );
                     }
                     Ok(_) => {
                         health.set_database(false);
                         pgtask_otel::record_heartbeat(config.queue_name.as_str(), "missing");
                         warn!("worker registration disappeared");
-                        false
                     }
                     Err(error) => {
                         health.set_database(false);
                         pgtask_otel::record_heartbeat(config.queue_name.as_str(), "error");
                         warn!(%error, "could not update worker heartbeat");
-                        false
-                    }
-                };
-                if should_sample {
-                    match store.live_worker_count(&config.queue_name).await {
-                        Ok(live) => pgtask_otel::record_live_workers(config.queue_name.as_str(), live),
-                        Err(error) => warn!(%error, "could not read the live worker count"),
-                    }
-                    match store.queue_demand(&config.queue_name, &config.capabilities).await {
-                        Ok(demand) => {
-                            let routable_tasks = demand.ready_tasks.saturating_sub(demand.unroutable_tasks);
-                            pgtask_otel::record_queue_demand(
-                                config.queue_name.as_str(),
-                                routable_tasks,
-                                demand.unroutable_tasks,
-                            );
-                        }
-                        Err(error) => {
-                            health.set_database(false);
-                            warn!(%error, "could not read queue demand");
-                        }
                     }
                 }
             }

@@ -27,6 +27,9 @@ corrupts something.
 **Workers never migrate.** Only the migration Job or `pgtask migrate` changes the schema. A worker
 that finds an old schema stops; it does not try to fix it.
 
+Workers that publish shared queue-demand samples require migration `0004`. They fail with an actionable error when the
+sampling function is missing. The Helm migration hook applies it before replacing workers.
+
 !!! note "Schema version is not handler version"
 
     Upgrading `pgtask` does not change your handler versions, so durable workflows keep their
@@ -34,6 +37,10 @@ that finds an old schema stops; it does not try to fix it.
     only you change the second one.
 
 ## The ordinary upgrade
+
+This release changes `pgtask.queue.ready.tasks` from the tasks supported by one process to the tasks supported by any
+live, non-draining worker on the queue. The queue-wide value is suitable for fleet autoscaling and remains aggregated by
+the maximum across worker instances.
 
 For an additive migration, which is every upgrade that does not raise the storage protocol:
 

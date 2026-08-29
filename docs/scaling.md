@@ -45,8 +45,8 @@ sustained overload it reduces the effective concurrency limit - which stops the 
 cancels a running handler and never exceeds your configured concurrency. Recovery is additive, so a worker climbs back
 gradually rather than slamming the database again.
 
-**Kubernetes replica scaling** adds or removes whole workers based on queue demand, using ready-task count or
-oldest-ready age exposed by `pgtask.queue_demand`.
+**Kubernetes replica scaling** adds or removes whole workers based on queue demand, using the published
+`pgtask.queue.ready.tasks` gauge or oldest-ready age.
 
 They are deliberately separate: one manages a single process against the database it can see, the other manages fleet
 size against a queue's backlog. Neither is part of task correctness. Turning both off changes throughput, not

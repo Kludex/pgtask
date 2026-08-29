@@ -306,7 +306,7 @@ async fn worker_configuration_rejects_every_invalid_invariant() {
         Err(WorkerError::InvalidPollInterval)
     ));
 
-    for heartbeat in [Duration::ZERO, Duration::from_secs(30)] {
+    for heartbeat in [Duration::ZERO, Duration::from_micros(500), Duration::from_secs(30)] {
         let mut config = WorkerConfig::new(queue_name.clone());
         config.worker_heartbeat_interval = heartbeat;
         assert!(matches!(
@@ -803,6 +803,54 @@ async fn another_worker_recovers_a_task_after_runtime_termination() {
 }
 
 #[tokio::test]
+async fn workers_publish_shared_queue_demand_samples() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("shared-demand-{suffix}")).unwrap();
+    let supported_name = TaskName::new(format!("shared-demand-supported-{suffix}")).unwrap();
+    let missing_name = TaskName::new(format!("shared-demand-missing-{suffix}")).unwrap();
+    let mut request = EnqueueRequest::new(missing_name, json!({}));
+    request.queue_name = queue_name.clone();
+    store.enqueue(&request).await.unwrap();
+    let mut config = WorkerConfig::new(queue_name.clone());
+    config.worker_heartbeat_interval = Duration::from_millis(50);
+    config.worker_ttl = Duration::from_secs(1);
+    let first = Worker::new(store.clone(), successful_registry(&supported_name), config.clone()).unwrap();
+    let second = Worker::new(store.clone(), successful_registry(&supported_name), config).unwrap();
+    let shutdown = CancellationToken::new();
+    let first_shutdown = shutdown.clone();
+    let second_shutdown = shutdown.clone();
+    let first_task = tokio::spawn(async move { first.run(first_shutdown).await });
+    let second_task = tokio::spawn(async move { second.run(second_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let sample: (bool, i64, i64) = sqlx::query_as(
+                "SELECT demand_sampled_at IS NOT NULL, demand_ready_tasks, demand_unroutable_tasks \
+                 FROM pgtask.queues WHERE name = $1",
+            )
+            .bind(queue_name.as_str())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            if sample == (true, 0, 1) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.cancel();
+    first_task.await.unwrap().unwrap();
+    second_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn queue_runtimes_have_independent_concurrency() {
     let Some(database_url) = database_url() else {
         return;
@@ -1120,6 +1168,7 @@ async fn worker_recovers_from_revoked_database_protocols() {
     let revoke_background = format!(
         "REVOKE EXECUTE ON FUNCTION \
          pgtask.renew_leases(uuid[], integer[], uuid[], bigint), \
+         pgtask.heartbeat_worker(uuid, bigint, boolean), \
          pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint), \
          pgtask.claim_due_schedules(integer), \
          pgtask.recover_wait_timeouts(integer) FROM {}",
@@ -1162,6 +1211,41 @@ async fn worker_recovers_from_revoked_database_protocols() {
     .await
     .unwrap();
     fixture.stop().await;
+}
+
+#[tokio::test]
+async fn worker_refuses_a_schema_without_demand_sampling() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let database_name = format!("pgtask_outdated_{}", Uuid::new_v4().simple());
+    let options = PgConnectOptions::from_str(&database_url).unwrap();
+    let maintenance = PgPool::connect_with(options.clone().database("postgres"))
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database_name}")))
+        .execute(&maintenance)
+        .await
+        .unwrap();
+    let store = Store::from_pool(PgPool::connect_with(options.database(&database_name)).await.unwrap());
+    store.migrate().await.unwrap();
+    sqlx::query("DROP FUNCTION pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint)")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let queue_name = QueueName::new(format!("outdated-{}", Uuid::new_v4())).unwrap();
+    let task_name = TaskName::new("outdated-task").unwrap();
+    let worker = Worker::new(store, successful_registry(&task_name), WorkerConfig::new(queue_name)).unwrap();
+    assert!(matches!(
+        worker.run(CancellationToken::new()).await,
+        Err(WorkerError::OutdatedStorageSchema)
+    ));
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE {database_name} WITH (FORCE)"
+    )))
+    .execute(&maintenance)
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
