@@ -1099,6 +1099,71 @@ async fn supervisor_binding_failure_is_reported() {
 }
 
 #[tokio::test]
+async fn worker_claims_tasks_when_lease_recovery_is_unavailable() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let _guard = database_fault_guard().await;
+    let admin = Store::connect(&database_url).await.unwrap();
+    admin.migrate().await.unwrap();
+    let suffix = Uuid::new_v4().simple();
+    let role = format!("pgtask_recovery_fault_{suffix}");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role} LOGIN PASSWORD 'fault-test'"
+    )))
+    .execute(admin.pool())
+    .await
+    .unwrap();
+    let owner: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(admin.pool())
+        .await
+        .unwrap();
+    admin
+        .configure_grants(&owner, &role, &role, &role, &role)
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "REVOKE EXECUTE ON FUNCTION pgtask.recover_expired(text, integer) FROM {role}"
+    )))
+    .execute(admin.pool())
+    .await
+    .unwrap();
+
+    let options = PgConnectOptions::from_str(&database_url)
+        .unwrap()
+        .username(&role)
+        .password("fault-test")
+        .application_name(&role);
+    let worker_store = Store::from_pool(PgPool::connect_with(options).await.unwrap());
+    let queue_name = QueueName::new(format!("recovery-fault-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("recovery-fault-task-{suffix}")).unwrap();
+    let mut request = EnqueueRequest::new(task_name.clone(), json!(null));
+    request.queue_name = queue_name.clone();
+    let task_id = admin.enqueue(&request).await.unwrap().task_id;
+    let mut config = WorkerConfig::new(queue_name);
+    config.lease_duration = Duration::from_millis(90);
+    config.poll_interval = Duration::from_millis(20);
+    let worker = Worker::new(worker_store, successful_registry(&task_name), config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            if admin.get_task(task_id).await.unwrap().unwrap().state == TaskState::Succeeded {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.cancel();
+    worker_task.await.unwrap().unwrap();
+    drop_runtime_role(&admin, &role).await;
+}
+
+#[tokio::test]
 async fn worker_recovers_from_revoked_database_protocols() {
     let Some(database_url) = database_url() else {
         return;

@@ -349,6 +349,7 @@ impl Worker {
             self.config.lease_duration,
             runtime_shutdown.clone(),
         );
+        let recovery = recover_expired_leases(self.store.clone(), &self.config, runtime_shutdown.clone());
         let listener = listen_for_ready(
             self.store.clone(),
             self.config.queues.clone(),
@@ -395,7 +396,8 @@ impl Worker {
             self.health.set_admission(false);
             result
         };
-        let ((), (), (), (), (), result) = tokio::join!(renewer, listener, scheduler, retention, heartbeat, handlers);
+        let ((), (), (), (), (), (), result) =
+            tokio::join!(renewer, recovery, listener, scheduler, retention, heartbeat, handlers);
         result
     }
 
@@ -500,19 +502,6 @@ impl Worker {
             effective_concurrency,
             active_handlers,
         );
-        for queue_name in &self.config.queues {
-            if let Err(error) = self
-                .store
-                .recover_expired(queue_name, self.config.claim_batch_size.get())
-                .await
-            {
-                self.health.set_database(false);
-                warn!(%error, "could not recover expired task leases");
-                wait_after_database_error(shutdown, wakeup).await;
-                return None;
-            }
-        }
-        self.health.set_database(true);
         let available = usize::from(effective_concurrency).saturating_sub(active_handlers);
         let limit = available.min(usize::from(self.config.claim_batch_size.get()));
         if limit == 0 {
@@ -764,6 +753,23 @@ async fn renew_leases(
                         health.record_lease_renewal(false);
                         warn!(%error, "could not renew active task leases");
                         cancel_uncertain_leases(&active, &leases, lease_duration).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn recover_expired_leases(store: Store, config: &WorkerConfig, shutdown: CancellationToken) {
+    let mut interval = tokio::time::interval(config.lease_duration / 3);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            _ = interval.tick() => {
+                for queue_name in &config.queues {
+                    if let Err(error) = store.recover_expired(queue_name, config.claim_batch_size.get()).await {
+                        warn!(%error, "could not recover expired task leases");
                     }
                 }
             }
