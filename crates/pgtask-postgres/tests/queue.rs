@@ -12,7 +12,10 @@ use pgtask_core::{
 };
 use pgtask_postgres::{PostgresError, Store, StoreConfig};
 use serde_json::json;
-use sqlx::{Acquire, PgConnection, postgres::PgPoolOptions};
+use sqlx::{
+    Acquire, PgConnection,
+    postgres::{PgListener, PgPoolOptions},
+};
 use tokio::sync::Barrier;
 use uuid::Uuid;
 
@@ -498,6 +501,76 @@ async fn transactional_enqueue_rolls_back_with_its_caller() {
         Err(PostgresError::InvalidTask(_))
     ));
     transaction.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn task_transitions_only_notify_their_deterministic_shards() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("notification-shard-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("notification-shard-task-{suffix}")).unwrap();
+    let ready_channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
+        .bind(queue_name.as_str())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let mut listener = PgListener::connect(&database_url).await.unwrap();
+    listener.listen("pgtask_ready").await.unwrap();
+    listener.listen(&ready_channel).await.unwrap();
+
+    let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
+    request.queue_name = queue_name.clone();
+    let task_id = store.enqueue(&request).await.unwrap().task_id;
+    let notification = tokio::time::timeout(Duration::from_secs(1), listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notification.channel(), ready_channel);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.recv())
+            .await
+            .is_err()
+    );
+
+    let task = store
+        .claim(
+            &queue_name,
+            WorkerId::new(),
+            &[(task_name, HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let result_channel: String = sqlx::query_scalar("SELECT pgtask.result_channel($1)")
+        .bind(task_id.as_uuid())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    listener.listen("pgtask_result").await.unwrap();
+    listener.listen(&result_channel).await.unwrap();
+    assert!(
+        store
+            .complete(task.id, task.attempt, task.lease_token.unwrap(), Some(&json!(null)))
+            .await
+            .unwrap()
+    );
+    let notification = tokio::time::timeout(Duration::from_secs(1), listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notification.channel(), result_channel);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.recv())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
