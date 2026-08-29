@@ -44,6 +44,8 @@ asyncio.run(
 
 The Rust runtime owns claiming, PostgreSQL notifications, leases, retries, scheduling, shutdown, and OpenTelemetry spans. The registered Python coroutine only runs the task body.
 
+The worker fills its available handler slots with one claim per queue, up to `concurrency` tasks in total.
+
 `TaskRegistry` is explicit worker configuration. It owns one logical queue and does not discover modules or use global state. The decorator returns a `TaskDefinition`, so producers can import `render` without repeating its durable name, queue, handler version, payload type, or result type.
 
 Set `handler_version` when a long-lived task changes its durable protocol. An exception is retryable by default. Pass `retry_delay=None` for a terminal failure on the first exception.

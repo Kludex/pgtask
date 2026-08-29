@@ -126,6 +126,70 @@ async def test_python_worker_executes_a_registered_async_handler() -> None:
     await running
 
 
+async def wait_for_claim_batches(
+    connection: AsyncConnection[Any], task_ids: list[str], expected_claimed: int
+) -> list[int]:
+    async def poll() -> list[int]:
+        while True:
+            cursor = await connection.execute(
+                """
+                SELECT count(*)::integer
+                FROM pgtask.attempt_view
+                WHERE task_id = ANY(%s::uuid[])
+                GROUP BY started_at
+                ORDER BY started_at
+                """,
+                (task_ids,),
+            )
+            batches = [row[0] for row in await cursor.fetchall()]
+            if sum(batches) == expected_claimed:
+                return batches
+            await asyncio.sleep(0.005)
+
+    return await asyncio.wait_for(poll(), timeout=2)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("concurrency", "task_count", "expected_batches", "pending"),
+    [(12, 12, [12], 0), (3, 9, [3], 6)],
+)
+async def test_python_worker_matches_claim_batches_to_concurrency(
+    concurrency: int, task_count: int, expected_batches: list[int], pending: int
+) -> None:
+    database_url = os.environ["PGTASK_DATABASE_URL"]
+    client = await Client.connect(database_url)
+    await client.migrate()
+    queue_name = f"python-claim-batch-{os.urandom(8).hex()}"
+    registry = TaskRegistry(queue_name)
+    release = asyncio.Event()
+
+    @registry.task("python.claim-batch")
+    async def block(_task: Task, payload: None) -> None:
+        assert payload is None
+        await release.wait()
+
+    tasks = [await client.enqueue(block.request(None)) for _ in range(task_count)]
+    worker = Worker(database_url, registry, concurrency=concurrency, poll_interval=30.0)
+    running = asyncio.create_task(worker.run())
+    connection = await AsyncConnection.connect(database_url)
+    try:
+        assert (
+            await wait_for_claim_batches(connection, [task.id for task in tasks], task_count - pending)
+            == expected_batches
+        )
+        cursor = await connection.execute(
+            "SELECT count(*)::integer FROM pgtask.task_view WHERE id = ANY(%s::uuid[]) AND state = 'pending'",
+            ([task.id for task in tasks],),
+        )
+        assert (await cursor.fetchone()) == (pending,)
+    finally:
+        await connection.close()
+        worker.shutdown()
+        release.set()
+        await running
+
+
 @pytest.mark.anyio
 async def test_client_timeout_absence_signal_and_transactional_rollback() -> None:
     database_url = os.environ["PGTASK_DATABASE_URL"]
