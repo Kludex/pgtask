@@ -117,6 +117,38 @@ async def test_python_worker_executes_a_registered_async_handler() -> None:
 
 
 @pytest.mark.anyio
+async def test_python_worker_claims_up_to_its_configured_concurrency() -> None:
+    database_url = os.environ["PGTASK_DATABASE_URL"]
+    client = await Client.connect(database_url)
+    await client.migrate()
+    queue_name = f"python-claim-batch-{os.urandom(8).hex()}"
+    registry = TaskRegistry(queue_name)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    invocations = 0
+
+    @registry.task("python.claim-batch")
+    async def block(task: Task, payload: None) -> None:
+        nonlocal invocations
+        assert task
+        assert payload is None
+        invocations += 1
+        started.set()
+        await release.wait()
+
+    for _ in range(12):
+        await client.enqueue(block.request(None))
+    worker = Worker(database_url, registry, concurrency=12, poll_interval=30.0)
+    running = asyncio.create_task(worker.run())
+    await asyncio.wait_for(started.wait(), timeout=2)
+    worker.shutdown()
+    await asyncio.sleep(0.05)
+    release.set()
+    await running
+    assert invocations == 12
+
+
+@pytest.mark.anyio
 async def test_client_timeout_absence_signal_and_transactional_rollback() -> None:
     database_url = os.environ["PGTASK_DATABASE_URL"]
     client = await Client.connect(database_url)
