@@ -98,6 +98,7 @@ task, err := render.Enqueue(ctx, client, renderRequest{ReportID: "report-123"}, 
 The supported module is `github.com/Kludex/pgtask/sdks/go`. Its public surface is the typed task definition, request,
 and handle, `Client`, enqueue options and results, task results, and the query executor interfaces for transactional
 enqueueing. `EnqueueMany()` and `EnqueueManyOn()` preserve request order and commit a batch atomically.
+Each Go batch uses one task definition, so every request has the same payload and result types.
 
 TypeScript and Go are producer SDKs. They enqueue, inspect, wait, signal, cancel, propagate OpenTelemetry context, and
 join application transactions. Handler execution remains in the Rust and Python runtimes.

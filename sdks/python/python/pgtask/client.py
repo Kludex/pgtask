@@ -49,9 +49,13 @@ class EnqueueRequest(Generic[ResultT]):
     headers: dict[str, JSONValue] = field(default_factory=dict)
 
 
-def _request_value(request: EnqueueRequest[Any]) -> dict[str, Any]:
-    headers = dict(request.headers)
+def _headers_with_context(headers: dict[str, JSONValue]) -> dict[str, JSONValue]:
+    headers = dict(headers)
     inject(cast(dict[str, str], headers))
+    return headers
+
+
+def _request_value(request: EnqueueRequest[Any]) -> dict[str, Any]:
     return {
         "task_name": request.task_name,
         "payload": request.payload,
@@ -61,7 +65,7 @@ def _request_value(request: EnqueueRequest[Any]) -> dict[str, Any]:
         "priority": request.priority,
         "max_attempts": request.max_attempts,
         "idempotency_key": request.idempotency_key,
-        "headers": headers,
+        "headers": _headers_with_context(request.headers),
     }
 
 
@@ -321,7 +325,7 @@ class Client:
                 request.priority,
                 request.max_attempts,
                 request.idempotency_key,
-                Jsonb(request.headers),
+                Jsonb(_headers_with_context(request.headers)),
             ),
         )
         row = await cursor.fetchone()
