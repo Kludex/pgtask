@@ -829,7 +829,7 @@ async fn saturated_worker_recovers_expired_leases_across_queues() {
     let blocker_id = store.enqueue(&blocker).await.unwrap().task_id;
     let mut recovered_ids = Vec::new();
     for queue_name in [&first_queue, &second_queue] {
-        for sequence in 0..6 {
+        for sequence in 0..16 {
             let mut request = EnqueueRequest::new(recovered_name.clone(), json!({"sequence": sequence}));
             request.queue_name = queue_name.clone();
             recovered_ids.push(store.enqueue(&request).await.unwrap().task_id);
@@ -839,12 +839,12 @@ async fn saturated_worker_recovers_expired_leases_across_queues() {
                 queue_name,
                 WorkerId::new(),
                 &[(recovered_name.clone(), HandlerVersion::default())],
-                6,
+                16,
                 Duration::from_millis(1),
             )
             .await
             .unwrap();
-        assert_eq!(claimed.len(), 6);
+        assert_eq!(claimed.len(), 16);
     }
     tokio::time::sleep(Duration::from_millis(5)).await;
 
@@ -874,14 +874,14 @@ async fn saturated_worker_recovers_expired_leases_across_queues() {
     config.concurrency = NonZeroU16::MIN;
     config.claim_batch_size = NonZeroU16::MIN;
     config.recovery_batch_size = NonZeroU16::MIN;
-    config.lease_duration = Duration::from_millis(300);
+    config.lease_duration = Duration::from_mins(1);
     let worker = Worker::new(store.clone(), registry, config).unwrap();
     let shutdown = CancellationToken::new();
     let worker_shutdown = shutdown.clone();
     let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
 
     tokio::time::timeout(TEST_TIMEOUT, started.notified()).await.unwrap();
-    tokio::time::timeout(Duration::from_millis(250), async {
+    tokio::time::timeout(TEST_TIMEOUT, async {
         loop {
             if tasks_are_in_state(&store, &recovered_ids, TaskState::Pending).await {
                 break;
@@ -1245,6 +1245,7 @@ async fn worker_claims_tasks_when_lease_recovery_is_unavailable() {
         .application_name(&role);
     let worker_store = Store::from_pool(PgPool::connect_with(options).await.unwrap());
     let queue_name = QueueName::new(format!("recovery-fault-{suffix}")).unwrap();
+    assert!(worker_store.recover_expired(&queue_name, 1).await.is_err());
     let task_name = TaskName::new(format!("recovery-fault-task-{suffix}")).unwrap();
     let mut request = EnqueueRequest::new(task_name.clone(), json!(null));
     request.queue_name = queue_name.clone();

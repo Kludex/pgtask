@@ -31,6 +31,8 @@ use crate::{
     registry::RegisteredHandler,
 };
 
+const MAX_RECOVERY_DRAIN_BATCHES: usize = 16;
+
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
     /// Ordered by priority: the worker drains earlier queues before claiming from later ones.
@@ -771,18 +773,19 @@ async fn recover_expired_leases(store: Store, config: &WorkerConfig, shutdown: C
             _ = interval.tick() => {
                 for queue_name in &config.queues {
                     let limit = config.recovery_batch_size.get();
-                    for batch in 0..16 {
+                    for batch in 0..MAX_RECOVERY_DRAIN_BATCHES {
                         let result = tokio::select! {
                             () = shutdown.cancelled() => return,
                             result = store.recover_expired(queue_name, limit) => result,
                         };
                         match result {
                             Ok(recovered) if recovered < u64::from(limit) => break,
-                            Ok(_) if batch == 15 => {
+                            Ok(_) if batch + 1 == MAX_RECOVERY_DRAIN_BATCHES => {
                                 warn!(%queue_name, "lease recovery drain reached its batch budget");
                             }
                             Ok(_) => {}
                             Err(error) => {
+                                pgtask_otel::record_recovery_failure(queue_name.as_str());
                                 warn!(%error, %queue_name, "could not recover expired task leases");
                                 break;
                             }
