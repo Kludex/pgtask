@@ -17,7 +17,16 @@ from opentelemetry.trace import (
     get_current_span,
     set_span_in_context,
 )
-from pgtask import Client, EnqueueRequest, JSONValue, Task, TaskRegistry, TransactionConnection, Worker
+from pgtask import (
+    BatchTransactionConnection,
+    Client,
+    EnqueueRequest,
+    JSONValue,
+    Task,
+    TaskRegistry,
+    TransactionConnection,
+    Worker,
+)
 from psycopg import AsyncConnection
 
 
@@ -28,6 +37,7 @@ def anyio_backend() -> str:
 
 def test_public_python_contract() -> None:
     assert pgtask.__all__ == [
+        "BatchTransactionConnection",
         "Client",
         "EnqueueRequest",
         "JSONValue",
@@ -187,6 +197,13 @@ async def test_client_timeout_absence_signal_and_transactional_rollback() -> Non
     queue_name = f"python-client-{os.urandom(8).hex()}"
     request: EnqueueRequest[JSONValue] = EnqueueRequest("python.pending", {}, queue_name=queue_name)
     task = await client.enqueue(request)
+    batch_requests: list[EnqueueRequest[JSONValue]] = [
+        EnqueueRequest("python.pending", {"batch": 1}, queue_name=queue_name, idempotency_key=f"{queue_name}:1"),
+        EnqueueRequest("python.pending", {"batch": 2}, queue_name=queue_name, idempotency_key=f"{queue_name}:2"),
+    ]
+    expected_batch = [await client.enqueue(batch_request) for batch_request in batch_requests]
+    batched = await client.enqueue_many(batch_requests)
+    assert [handle.id for handle in batched] == [handle.id for handle in expected_batch]
     assert await task.result(timeout=0.001) is None
     assert await client.task("00000000-0000-0000-0000-000000000000").inspect() is None
     assert await task.signal("approval", {"approved": True}) == {"approved": True}
@@ -196,10 +213,21 @@ async def test_client_timeout_absence_signal_and_transactional_rollback() -> Non
         await connection.execute("BEGIN")
         rolled_back_id, created = await Client.enqueue_on(cast(TransactionConnection, connection), request)
         assert created
+        rolled_back_batch = await Client.enqueue_many_on(
+            cast(BatchTransactionConnection, connection),
+            [
+                EnqueueRequest("python.pending", {"batch": 3}, queue_name=queue_name),
+                EnqueueRequest("python.pending", {"batch": 4}, queue_name=queue_name),
+            ],
+        )
+        assert len(rolled_back_batch) == 2
+        assert all(created for _, created in rolled_back_batch)
         await connection.rollback()
     finally:
         await connection.close()
     assert await client.task_result(rolled_back_id) is None
+    for task_id, _ in rolled_back_batch:
+        assert await client.task_result(task_id) is None
 
 
 class EmptyCursor:
@@ -212,6 +240,24 @@ class EmptyConnection:
         assert "pgtask.enqueue" in query
         assert params
         return EmptyCursor()
+
+
+class BatchCursor:
+    def __init__(self, rows: list[tuple[int, str, bool]]) -> None:
+        self.rows = rows
+
+    async def fetchall(self) -> list[tuple[int, str, bool]]:
+        return self.rows
+
+
+class BatchConnection:
+    def __init__(self, rows: list[tuple[int, str, bool]]) -> None:
+        self.rows = rows
+
+    async def execute(self, query: str, params: tuple[Any, ...]) -> BatchCursor:
+        assert "pgtask.enqueue_many" in query
+        assert params
+        return BatchCursor(self.rows)
 
 
 @pytest.mark.anyio
@@ -315,6 +361,13 @@ async def test_worker_rejects_an_empty_registry_and_invalid_handler_results() ->
 async def test_transactional_enqueue_rejects_an_empty_database_response() -> None:
     with pytest.raises(RuntimeError, match="returned no result"):
         await Client.enqueue_on(EmptyConnection(), EnqueueRequest("python.empty", {}))
+    with pytest.raises(RuntimeError, match="invalid result set"):
+        await Client.enqueue_many_on(BatchConnection([]), [EnqueueRequest("python.empty", {})])
+    with pytest.raises(RuntimeError, match="invalid result set"):
+        await Client.enqueue_many_on(
+            BatchConnection([(1, "00000000-0000-0000-0000-000000000001", True)]),
+            [EnqueueRequest("python.empty", {})],
+        )
 
 
 @pytest.mark.anyio

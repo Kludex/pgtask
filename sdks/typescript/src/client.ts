@@ -10,6 +10,7 @@ export const STORAGE_PROTOCOL_MIN_VERSION = 1;
 export const STORAGE_PROTOCOL_MAX_VERSION = 1;
 
 type EnqueueRow = QueryResultRow & { task_id: string; created: boolean };
+type BatchEnqueueRow = EnqueueRow & { request_index: number };
 type SignalRow = QueryResultRow & { value: JSONValue };
 type CancelRow = QueryResultRow & { cancelled: boolean };
 type ChannelRow = QueryResultRow & { channel: string };
@@ -118,6 +119,11 @@ export class Client {
     return new TaskHandle<Result>(value.taskId, this);
   }
 
+  async enqueueMany<Payload, Result>(requests: readonly EnqueueRequest<Payload, Result>[]) {
+    const values = await Client.enqueueManyOn(this.#pool, requests);
+    return values.map((value) => new TaskHandle<Result>(value.taskId, this));
+  }
+
   task<Result = JSONValue>(taskId: string): TaskHandle<Result> {
     return new TaskHandle<Result>(taskId, this);
   }
@@ -148,6 +154,39 @@ export class Client {
       throw new Error("pgtask.enqueue returned no result");
     }
     return { taskId: row.task_id, created: row.created } satisfies EnqueueResult;
+  }
+
+  static async enqueueManyOn<Payload, Result>(
+    executor: QueryExecutor,
+    requests: readonly EnqueueRequest<Payload, Result>[],
+  ) {
+    await ensureStorageProtocol(executor);
+    const tasks = requests.map((request) => ({
+      task_name: request.taskName,
+      payload: request.payload,
+      queue_name: request.queueName,
+      handler_version: request.handlerVersion,
+      run_at: request.runAt,
+      priority: request.priority,
+      max_attempts: request.maxAttempts,
+      idempotency_key: request.idempotencyKey,
+      headers: injectHeaders(request.headers),
+    }));
+    const result = await executor.query<BatchEnqueueRow>(
+      `SELECT request_index::integer, task_id::text, created
+       FROM pgtask.enqueue_many($1::jsonb)
+       ORDER BY request_index`,
+      [JSON.stringify(tasks)],
+    );
+    if (
+      result.rows.length !== requests.length ||
+      result.rows.some((row, index) => row.request_index !== index)
+    ) {
+      throw new Error("pgtask.enqueue_many returned an invalid result set");
+    }
+    return result.rows.map(
+      (row) => ({ taskId: row.task_id, created: row.created }) satisfies EnqueueResult,
+    );
   }
 
   async taskResult<Result>(taskId: string): Promise<TaskResult<Result> | null> {

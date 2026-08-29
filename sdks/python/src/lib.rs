@@ -139,6 +139,18 @@ impl PythonClient {
         })
     }
 
+    fn enqueue_many<'py>(&self, py: Python<'py>, requests: &Bound<'_, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let requests: Vec<EnqueueRequest> = depythonize(requests).map_err(value_error)?;
+        let store = self.store.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let results = store.enqueue_many(&requests).await.map_err(runtime_error)?;
+            Ok(results
+                .into_iter()
+                .map(|result| (result.task_id.to_string(), result.created))
+                .collect::<Vec<_>>())
+        })
+    }
+
     fn task_result<'py>(&self, py: Python<'py>, task_id: &str) -> PyResult<Bound<'py, PyAny>> {
         let store = self.store.clone();
         let task_id = task_id.parse().map_err(value_error)?;
