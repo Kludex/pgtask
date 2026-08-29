@@ -1599,22 +1599,11 @@ impl Store {
                 })
                 .collect(),
         );
-        let rows: Vec<BatchCompletionRow> =
-            sqlx::query_as("SELECT request_index, completed FROM pgtask.complete_tasks($1) ORDER BY request_index")
-                .bind(payload)
-                .fetch_all(&self.pool)
-                .await?;
-        if rows.len() != completions.len()
-            || rows
-                .iter()
-                .enumerate()
-                .any(|(index, row)| usize::try_from(row.request_index) != Ok(index))
-        {
-            return Err(PostgresError::InvalidTask(
-                "batch completion result did not match its requests".to_owned(),
-            ));
-        }
-        Ok(rows.into_iter().map(|row| row.completed).collect())
+        let completed = sqlx::query_scalar("SELECT completed FROM pgtask.complete_tasks($1) ORDER BY request_index")
+            .bind(payload)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(completed)
     }
 
     pub async fn fail_many(&self, failures: &[TaskFailure]) -> Result<Vec<Option<TaskState>>, PostgresError> {
@@ -1652,23 +1641,14 @@ impl Store {
                 })
                 .collect::<Result<_, PostgresError>>()?,
         );
-        let rows: Vec<BatchFailureRow> =
-            sqlx::query_as("SELECT request_index, state FROM pgtask.fail_tasks($1) ORDER BY request_index")
+        let states: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT state FROM pgtask.fail_tasks($1) ORDER BY request_index")
                 .bind(payload)
                 .fetch_all(&self.pool)
                 .await?;
-        if rows.len() != failures.len()
-            || rows
-                .iter()
-                .enumerate()
-                .any(|(index, row)| usize::try_from(row.request_index) != Ok(index))
-        {
-            return Err(PostgresError::InvalidTask(
-                "batch failure result did not match its requests".to_owned(),
-            ));
-        }
-        rows.into_iter()
-            .map(|row| row.state.map(|state| parse_state(&state)).transpose())
+        states
+            .into_iter()
+            .map(|state| state.map(|state| parse_state(&state)).transpose())
             .collect()
     }
 
@@ -1710,18 +1690,6 @@ struct BatchEnqueueRow {
     request_index: i64,
     task_id: Uuid,
     created: bool,
-}
-
-#[derive(FromRow)]
-struct BatchCompletionRow {
-    request_index: i64,
-    completed: bool,
-}
-
-#[derive(FromRow)]
-struct BatchFailureRow {
-    request_index: i64,
-    state: Option<String>,
 }
 
 #[derive(FromRow)]

@@ -217,26 +217,20 @@ impl WorkerControl {
 
 type ActiveLeases = Arc<Mutex<HashMap<TaskId, ActiveLease>>>;
 
-type TransitionResponse = Result<TransitionOutcome, Arc<PostgresError>>;
-
 #[derive(Clone)]
 struct TransitionWriter {
     sender: mpsc::Sender<TransitionRequest>,
 }
 
-struct TransitionRequest {
-    transition: Transition,
-    response: oneshot::Sender<TransitionResponse>,
-}
-
-enum Transition {
-    Complete(TaskCompletion),
-    Fail(TaskFailure),
-}
-
-enum TransitionOutcome {
-    Completed(bool),
-    Failed(Option<TaskState>),
+enum TransitionRequest {
+    Complete {
+        completion: TaskCompletion,
+        response: oneshot::Sender<Result<bool, Arc<PostgresError>>>,
+    },
+    Fail {
+        failure: TaskFailure,
+        response: oneshot::Sender<Result<Option<TaskState>, Arc<PostgresError>>>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -249,23 +243,21 @@ enum TransitionError {
 
 impl TransitionWriter {
     async fn complete(&self, completion: TaskCompletion) -> Result<bool, TransitionError> {
-        match self.write(Transition::Complete(completion)).await? {
-            TransitionOutcome::Completed(completed) => Ok(completed),
-            TransitionOutcome::Failed(_) => unreachable!("completion requests return completion outcomes"),
-        }
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(TransitionRequest::Complete { completion, response })
+            .await
+            .map_err(|_| TransitionError::Closed)?;
+        receiver
+            .await
+            .map_err(|_| TransitionError::Closed)?
+            .map_err(TransitionError::Postgres)
     }
 
     async fn fail(&self, failure: TaskFailure) -> Result<Option<TaskState>, TransitionError> {
-        match self.write(Transition::Fail(failure)).await? {
-            TransitionOutcome::Completed(_) => unreachable!("failure requests return failure outcomes"),
-            TransitionOutcome::Failed(state) => Ok(state),
-        }
-    }
-
-    async fn write(&self, transition: Transition) -> Result<TransitionOutcome, TransitionError> {
         let (response, receiver) = oneshot::channel();
         self.sender
-            .send(TransitionRequest { transition, response })
+            .send(TransitionRequest::Fail { failure, response })
             .await
             .map_err(|_| TransitionError::Closed)?;
         receiver
@@ -918,14 +910,14 @@ async fn write_transition_batch(store: &Store, requests: Vec<TransitionRequest>,
     let mut failures = Vec::new();
     let mut failure_responses = Vec::new();
     for request in requests {
-        match request.transition {
-            Transition::Complete(completion) => {
+        match request {
+            TransitionRequest::Complete { completion, response } => {
                 completions.push(completion);
-                completion_responses.push(request.response);
+                completion_responses.push(response);
             }
-            Transition::Fail(failure) => {
+            TransitionRequest::Fail { failure, response } => {
                 failures.push(failure);
-                failure_responses.push(request.response);
+                failure_responses.push(response);
             }
         }
     }
@@ -936,7 +928,7 @@ async fn write_transition_batch(store: &Store, requests: Vec<TransitionRequest>,
     match completion_result {
         Ok(results) => {
             for (response, completed) in completion_responses.into_iter().zip(results) {
-                let _ = response.send(Ok(TransitionOutcome::Completed(completed)));
+                let _ = response.send(Ok(completed));
             }
         }
         Err(error) => {
@@ -953,7 +945,7 @@ async fn write_transition_batch(store: &Store, requests: Vec<TransitionRequest>,
     match failure_result {
         Ok(results) => {
             for (response, state) in failure_responses.into_iter().zip(results) {
-                let _ = response.send(Ok(TransitionOutcome::Failed(state)));
+                let _ = response.send(Ok(state));
             }
         }
         Err(error) => {

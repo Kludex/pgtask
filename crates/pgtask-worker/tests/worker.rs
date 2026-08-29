@@ -189,6 +189,7 @@ async fn complete_ready_child(store: &Store, queue_name: &QueueName, task_name: 
 struct DatabaseFaultWorker {
     admin: Store,
     fault_queue: QueueName,
+    fault_task: TaskName,
     owner: String,
     release: Arc<Semaphore>,
     role: String,
@@ -245,11 +246,13 @@ impl DatabaseFaultWorker {
                 let release = Arc::clone(&handler_release);
                 async move {
                     started.add_permits(1);
-                    if task.payload == json!("release") {
-                        release.acquire().await.unwrap().forget();
-                        Ok(json!(null))
-                    } else {
-                        std::future::pending().await
+                    match task.payload {
+                        payload if payload == json!("release") => {
+                            release.acquire().await.unwrap().forget();
+                            Ok(json!(null))
+                        }
+                        payload if payload == json!("fail") => Err(HandlerError::terminal("failed")),
+                        _ => std::future::pending().await,
                     }
                 }
             },
@@ -280,6 +283,7 @@ impl DatabaseFaultWorker {
         Self {
             admin,
             fault_queue,
+            fault_task: task_name,
             owner,
             release,
             role,
@@ -1261,6 +1265,19 @@ async fn worker_recovers_from_revoked_database_protocols() {
     .await
     .unwrap();
     fixture.release.add_permits(1);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    fixture.restore_grants().await;
+
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "REVOKE EXECUTE ON FUNCTION pgtask.fail_tasks(jsonb) FROM {}",
+        fixture.role
+    )))
+    .execute(fixture.admin.pool())
+    .await
+    .unwrap();
+    let mut failure = EnqueueRequest::new(fixture.fault_task.clone(), json!("fail"));
+    failure.queue_name = fixture.fault_queue.clone();
+    fixture.admin.enqueue(&failure).await.unwrap();
     tokio::time::sleep(Duration::from_millis(80)).await;
     fixture.restore_grants().await;
 
