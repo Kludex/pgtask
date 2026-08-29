@@ -93,7 +93,7 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             .await
             .unwrap();
     assert_eq!(capable_tasks, 1);
-    let maintenance_grants: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+    let maintenance_grants: (bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r"
         SELECT
             has_function_privilege(current_user, 'pgtask.put_schedule(uuid, text, text, bigint, text, text, integer, text, text, integer, jsonb, jsonb, smallint, integer, timestamptz)', 'EXECUTE'),
@@ -101,13 +101,14 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             has_function_privilege(current_user, 'pgtask.wait_for_result(uuid, integer, uuid, text, integer, uuid, bigint)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.recover_result_wait_timeouts(integer)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.register_worker(uuid, text, text, text[], integer[], text[], bigint[], integer[], bigint[], bigint)', 'EXECUTE'),
-            has_function_privilege(current_user, 'pgtask.delete_expired_idempotency_keys(text, integer)', 'EXECUTE')
+            has_function_privilege(current_user, 'pgtask.delete_expired_idempotency_keys(text, integer)', 'EXECUTE'),
+            has_function_privilege(current_user, 'pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint)', 'EXECUTE')
         ",
     )
     .fetch_one(&mut *connection)
     .await
     .unwrap();
-    assert_eq!(maintenance_grants, (true, true, true, true, true, true));
+    assert_eq!(maintenance_grants, (true, true, true, true, true, true, true));
 }
 
 async fn can_execute(connection: &mut PgConnection, function: &str) -> bool {
@@ -237,6 +238,12 @@ async fn invalid_runtime_limits_fail_before_mutating_storage() {
     assert!(matches!(
         store.heartbeat_worker(worker_id, Duration::ZERO, false).await,
         Err(PostgresError::InvalidLeaseDuration)
+    ));
+    assert!(matches!(
+        store
+            .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, Duration::ZERO)
+            .await,
+        Err(PostgresError::InvalidSampleInterval)
     ));
     assert!(matches!(
         store.next_task_delay(&queue_name, &[]).await,
@@ -1974,6 +1981,56 @@ async fn live_worker_count_follows_registration_and_expiry() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(store.live_worker_count(&queue_name).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn worker_heartbeats_elect_one_queue_demand_sampler_per_interval() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("heartbeat-sampler-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("heartbeat-sampler-task-{suffix}")).unwrap();
+    let registrations = [(task_name, HandlerVersion::default(), RetryPolicy::Never)];
+    let first = WorkerId::new();
+    let second = WorkerId::new();
+    for worker_id in [first, second] {
+        store
+            .register_worker(worker_id, &queue_name, "test", &registrations, Duration::from_secs(1))
+            .await
+            .unwrap();
+    }
+    let interval = Duration::from_millis(50);
+
+    let (first_heartbeat, second_heartbeat) = tokio::join!(
+        store.heartbeat_worker_with_sampling(first, Duration::from_secs(1), false, interval),
+        store.heartbeat_worker_with_sampling(second, Duration::from_secs(1), false, interval),
+    );
+    let heartbeats = [first_heartbeat.unwrap(), second_heartbeat.unwrap()];
+    assert!(heartbeats.iter().all(|heartbeat| heartbeat.updated));
+    assert_eq!(heartbeats.iter().filter(|heartbeat| heartbeat.should_sample).count(), 1);
+
+    let first_heartbeat = store
+        .heartbeat_worker_with_sampling(first, Duration::from_secs(1), false, interval)
+        .await
+        .unwrap();
+    assert!(!first_heartbeat.should_sample);
+
+    tokio::time::sleep(interval).await;
+    let second_heartbeat = store
+        .heartbeat_worker_with_sampling(second, Duration::from_secs(1), false, interval)
+        .await
+        .unwrap();
+    assert!(second_heartbeat.should_sample);
+
+    let missing = store
+        .heartbeat_worker_with_sampling(WorkerId::new(), Duration::from_secs(1), false, interval)
+        .await
+        .unwrap();
+    assert!(!missing.updated);
+    assert!(!missing.should_sample);
 }
 
 #[tokio::test]

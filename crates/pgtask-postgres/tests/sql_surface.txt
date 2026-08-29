@@ -70,6 +70,9 @@ function get_task(p_task_id uuid) -> SETOF pgtask.tasks STABLE SECURITY DEFINER 
 function heartbeat_worker(p_worker_id uuid, p_ttl_milliseconds bigint, p_draining boolean) -> boolean VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
 
+function heartbeat_worker_with_sampling(p_worker_id uuid, p_ttl_milliseconds bigint, p_draining boolean, p_sample_interval_milliseconds bigint) -> TABLE(updated boolean, should_sample boolean) VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
 function live_worker_count(p_queue_name text) -> bigint STABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_observer=X/{owner}, pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
 

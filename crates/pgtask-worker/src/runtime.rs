@@ -956,35 +956,46 @@ async fn heartbeat_worker(store: Store, config: HeartbeatConfig, shutdown: Cance
                 break;
             }
             _ = interval.tick() => {
-                match store.heartbeat_worker(config.worker_id, config.ttl, false).await {
-                    Ok(true) => {
+                let should_sample = match store
+                    .heartbeat_worker_with_sampling(config.worker_id, config.ttl, false, config.interval)
+                    .await
+                {
+                    Ok(heartbeat) if heartbeat.updated => {
                         health.set_database(true);
                         pgtask_otel::record_heartbeat(config.queue_name.as_str(), "ok");
+                        heartbeat.should_sample
                     }
-                    Ok(false) => {
+                    Ok(_) => {
                         health.set_database(false);
                         pgtask_otel::record_heartbeat(config.queue_name.as_str(), "missing");
                         warn!("worker registration disappeared");
+                        false
                     }
                     Err(error) => {
                         health.set_database(false);
                         pgtask_otel::record_heartbeat(config.queue_name.as_str(), "error");
                         warn!(%error, "could not update worker heartbeat");
+                        false
                     }
-                }
-                match store.live_worker_count(&config.queue_name).await {
-                    Ok(live) => pgtask_otel::record_live_workers(config.queue_name.as_str(), live),
-                    Err(error) => warn!(%error, "could not read the live worker count"),
-                }
-                match store.queue_demand(&config.queue_name, &config.capabilities).await {
-                    Ok(demand) => pgtask_otel::record_queue_demand(
-                        config.queue_name.as_str(),
-                        demand.capable_tasks,
-                        demand.unroutable_tasks,
-                    ),
-                    Err(error) => {
-                        health.set_database(false);
-                        warn!(%error, "could not read queue demand");
+                };
+                if should_sample {
+                    match store.live_worker_count(&config.queue_name).await {
+                        Ok(live) => pgtask_otel::record_live_workers(config.queue_name.as_str(), live),
+                        Err(error) => warn!(%error, "could not read the live worker count"),
+                    }
+                    match store.queue_demand(&config.queue_name, &config.capabilities).await {
+                        Ok(demand) => {
+                            let routable_tasks = demand.ready_tasks.saturating_sub(demand.unroutable_tasks);
+                            pgtask_otel::record_queue_demand(
+                                config.queue_name.as_str(),
+                                routable_tasks,
+                                demand.unroutable_tasks,
+                            );
+                        }
+                        Err(error) => {
+                            health.set_database(false);
+                            warn!(%error, "could not read queue demand");
+                        }
                     }
                 }
             }

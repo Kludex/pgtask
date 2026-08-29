@@ -42,6 +42,8 @@ pub enum PostgresError {
     InvalidRetentionLimit,
     #[error("lease duration must be greater than zero")]
     InvalidLeaseDuration,
+    #[error("demand sample interval must be greater than zero")]
+    InvalidSampleInterval,
     #[error("at least one handler capability is required")]
     MissingCapabilities,
     #[error("at least one queue is required")]
@@ -204,6 +206,12 @@ pub struct QueueDemand {
     pub ready_tasks: u64,
     pub capable_tasks: u64,
     pub unroutable_tasks: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WorkerHeartbeat {
+    pub updated: bool,
+    pub should_sample: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -521,6 +529,36 @@ impl Store {
             .fetch_one(&self.pool)
             .await?;
         Ok(updated)
+    }
+
+    pub async fn heartbeat_worker_with_sampling(
+        &self,
+        worker_id: WorkerId,
+        ttl: Duration,
+        draining: bool,
+        sample_interval: Duration,
+    ) -> Result<WorkerHeartbeat, PostgresError> {
+        let ttl_milliseconds = i64::try_from(ttl.as_millis()).map_err(|_| PostgresError::InvalidLeaseDuration)?;
+        if ttl_milliseconds == 0 {
+            return Err(PostgresError::InvalidLeaseDuration);
+        }
+        let sample_interval_milliseconds =
+            i64::try_from(sample_interval.as_millis()).map_err(|_| PostgresError::InvalidSampleInterval)?;
+        if sample_interval_milliseconds == 0 {
+            return Err(PostgresError::InvalidSampleInterval);
+        }
+        let row: WorkerHeartbeatRow =
+            sqlx::query_as("SELECT * FROM pgtask.heartbeat_worker_with_sampling($1, $2, $3, $4)")
+                .bind(worker_id.as_uuid())
+                .bind(ttl_milliseconds)
+                .bind(draining)
+                .bind(sample_interval_milliseconds)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(WorkerHeartbeat {
+            updated: row.updated,
+            should_sample: row.should_sample,
+        })
     }
 
     /// Counts workers the database still considers live, which is not the same as the number of
@@ -1584,6 +1622,12 @@ struct QueueDemandRow {
     capable: i64,
     #[sqlx(rename = "unroutable_tasks")]
     unroutable: i64,
+}
+
+#[derive(FromRow)]
+struct WorkerHeartbeatRow {
+    updated: bool,
+    should_sample: bool,
 }
 
 #[derive(FromRow)]

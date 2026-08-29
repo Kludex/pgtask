@@ -1120,7 +1120,7 @@ async fn worker_recovers_from_revoked_database_protocols() {
     let revoke_background = format!(
         "REVOKE EXECUTE ON FUNCTION \
          pgtask.renew_leases(uuid[], integer[], uuid[], bigint), \
-         pgtask.heartbeat_worker(uuid, bigint, boolean), \
+         pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint), \
          pgtask.claim_due_schedules(integer), \
          pgtask.recover_wait_timeouts(integer) FROM {}",
         fixture.role
