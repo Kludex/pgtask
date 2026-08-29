@@ -107,6 +107,18 @@ test("client operations use PostgreSQL transactions, notifications, and trace pr
     { idempotencyKey: randomUUID(), headers: { source: "typescript", structured: { value: 1 } } },
   );
   const handle = await client.enqueue(request);
+  const batchRequests = [
+    definition.request({ reportId: "batch-one" }, { idempotencyKey: randomUUID() }),
+    definition.request({ reportId: "batch-two" }, { idempotencyKey: randomUUID() }),
+  ];
+  const expectedBatch = await Promise.all(
+    batchRequests.map((batchRequest) => client.enqueue(batchRequest)),
+  );
+  const batch = await client.enqueueMany(batchRequests);
+  assert.deepEqual(
+    batch.map((batchHandle) => batchHandle.id),
+    expectedBatch.map((batchHandle) => batchHandle.id),
+  );
   assert.equal(client.task<RenderResult>(handle.id).id, handle.id);
   const pending = await handle.inspect();
   assert.equal(pending?.state, "pending");
@@ -144,6 +156,7 @@ test("client operations use PostgreSQL transactions, notifications, and trace pr
 
   const transaction = await pool.connect();
   let rolledBackId: string;
+  let rolledBackBatchIds: string[];
   try {
     await transaction.query("BEGIN");
     const first = await Client.enqueueOn(
@@ -152,11 +165,23 @@ test("client operations use PostgreSQL transactions, notifications, and trace pr
     );
     rolledBackId = first.taskId;
     assert.equal(first.created, true);
+    const batched = await Client.enqueueManyOn(transaction, [
+      definition.request({ reportId: "rolled-back-batch-one" }),
+      definition.request({ reportId: "rolled-back-batch-two" }),
+    ]);
+    rolledBackBatchIds = batched.map((result) => result.taskId);
+    assert.equal(
+      batched.every((result) => result.created),
+      true,
+    );
     await transaction.query("ROLLBACK");
   } finally {
     transaction.release();
   }
   assert.equal(await client.taskResult(rolledBackId), null);
+  for (const taskId of rolledBackBatchIds) {
+    assert.equal(await client.taskResult(taskId), null);
+  }
 
   const idempotencyKey = randomUUID();
   const first = await Client.enqueueOn(
@@ -224,6 +249,28 @@ test("database boundary failures remain explicit", async () => {
   await assert.rejects(
     Client.enqueueOn(emptyExecutor, new EnqueueRequest("typescript.empty", null)),
     /returned no result/,
+  );
+  await assert.rejects(
+    Client.enqueueManyOn(emptyExecutor, [new EnqueueRequest("typescript.empty", null)]),
+    /invalid result set/,
+  );
+
+  const misorderedBatchExecutor = {
+    async query(sql: string): Promise<QueryResult<never>> {
+      return {
+        rows: sql.includes("storage_protocol_range")
+          ? [{ minimum: 1, maximum: 1 }]
+          : [{ request_index: 1, task_id: randomUUID(), created: true }],
+        rowCount: 1,
+        command: "SELECT",
+        oid: 0,
+        fields: [],
+      } as unknown as QueryResult<never>;
+    },
+  } as QueryExecutor;
+  await assert.rejects(
+    Client.enqueueManyOn(misorderedBatchExecutor, [new EnqueueRequest("typescript.empty", null)]),
+    /invalid result set/,
   );
 
   const fakePool = {
