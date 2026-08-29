@@ -12,7 +12,7 @@ use std::{
 use chrono::{TimeDelta, Utc};
 use pgtask_core::{
     EnqueueRequest, HandlerVersion, QueueConfig, QueueName, RetryPolicy, ScheduleConfig, ScheduleDefinition,
-    ScheduleName, SignalName, StepName, TaskName, TaskState,
+    ScheduleName, SignalName, StepName, TaskId, TaskName, TaskState,
 };
 use pgtask_postgres::{PostgresError, Store};
 use pgtask_worker::{HandlerError, HandlerRegistry, Worker, WorkerConfig, WorkerError};
@@ -54,6 +54,81 @@ async fn drop_runtime_role(admin: &Store, role: &str) {
         .execute(admin.pool())
         .await
         .unwrap();
+}
+
+async fn observed_transition_store(database_url: &str) -> (Store, PgPool, String) {
+    let database_name = format!("pgtask_transition_batch_{}", Uuid::new_v4().simple());
+    let options = PgConnectOptions::from_str(database_url).unwrap();
+    let maintenance = PgPool::connect_with(options.clone().database("postgres"))
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database_name}")))
+        .execute(&maintenance)
+        .await
+        .unwrap();
+    let store = Store::from_pool(PgPool::connect_with(options.database(&database_name)).await.unwrap());
+    store.migrate().await.unwrap();
+    sqlx::query("ALTER FUNCTION pgtask.complete_tasks(jsonb) RENAME TO complete_tasks_unobserved")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        r"
+        CREATE TABLE public.transition_batch_observations (
+            id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+            size integer NOT NULL
+        )
+        ",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        r"
+        CREATE FUNCTION pgtask.complete_tasks(p_completions jsonb)
+        RETURNS TABLE(request_index bigint, completed boolean)
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, pgtask
+        AS $$
+        BEGIN
+            INSERT INTO public.transition_batch_observations (size)
+            VALUES (jsonb_array_length(p_completions));
+            RETURN QUERY
+            SELECT original.request_index, original.completed
+            FROM pgtask.complete_tasks_unobserved(p_completions) AS original;
+        END;
+        $$
+        ",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    (store, maintenance, database_name)
+}
+
+async fn wait_for_succeeded(store: &Store, task_ids: &[TaskId]) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let mut complete = true;
+            for task_id in task_ids {
+                complete &= store.get_task(*task_id).await.unwrap().unwrap().state == TaskState::Succeeded;
+            }
+            if complete {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn transition_batch_sizes(store: &Store) -> Vec<i32> {
+    sqlx::query_scalar("SELECT size FROM public.transition_batch_observations ORDER BY id")
+        .fetch_all(store.pool())
+        .await
+        .unwrap()
 }
 
 struct DropNotification(Arc<Notify>);
@@ -114,6 +189,7 @@ async fn complete_ready_child(store: &Store, queue_name: &QueueName, task_name: 
 struct DatabaseFaultWorker {
     admin: Store,
     fault_queue: QueueName,
+    fault_task: TaskName,
     owner: String,
     release: Arc<Semaphore>,
     role: String,
@@ -170,11 +246,13 @@ impl DatabaseFaultWorker {
                 let release = Arc::clone(&handler_release);
                 async move {
                     started.add_permits(1);
-                    if task.payload == json!("release") {
-                        release.acquire().await.unwrap().forget();
-                        Ok(json!(null))
-                    } else {
-                        std::future::pending().await
+                    match task.payload {
+                        payload if payload == json!("release") => {
+                            release.acquire().await.unwrap().forget();
+                            Ok(json!(null))
+                        }
+                        payload if payload == json!("fail") => Err(HandlerError::terminal("failed")),
+                        _ => std::future::pending().await,
                     }
                 }
             },
@@ -205,6 +283,7 @@ impl DatabaseFaultWorker {
         Self {
             admin,
             fault_queue,
+            fault_task: task_name,
             owner,
             release,
             role,
@@ -508,6 +587,78 @@ async fn worker_executes_registered_task_and_shuts_down() {
 
     shutdown.cancel();
     worker_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn worker_flushes_transitions_by_size_and_deadline() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let (store, maintenance, database_name) = observed_transition_store(&database_url).await;
+
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("transition-batch-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("transition-batch-task-{suffix}")).unwrap();
+    let requests: Vec<_> = (0..8)
+        .map(|_| {
+            let mut request = EnqueueRequest::new(task_name.clone(), json!("batch"));
+            request.queue_name = queue_name.clone();
+            request
+        })
+        .collect();
+    let task_ids: Vec<_> = store
+        .enqueue_many(&requests)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|result| result.task_id)
+        .collect();
+    let barrier = Arc::new(tokio::sync::Barrier::new(9));
+    let handler_barrier = Arc::clone(&barrier);
+    let mut registry = HandlerRegistry::new();
+    registry.register(
+        task_name.clone(),
+        HandlerVersion::default(),
+        RetryPolicy::Never,
+        move |task| {
+            let barrier = Arc::clone(&handler_barrier);
+            async move {
+                if task.payload == json!("batch") {
+                    barrier.wait().await;
+                }
+                Ok(json!(null))
+            }
+        },
+    );
+    let mut config = WorkerConfig::new(queue_name.clone());
+    config.concurrency = NonZeroU16::new(8).unwrap();
+    config.claim_batch_size = NonZeroU16::new(8).unwrap();
+    config.poll_interval = Duration::from_millis(5);
+    config.retention_enabled = false;
+    let worker = Worker::new(store.clone(), registry, config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+    tokio::time::timeout(TEST_TIMEOUT, barrier.wait()).await.unwrap();
+
+    wait_for_succeeded(&store, &task_ids).await;
+    assert_eq!(transition_batch_sizes(&store).await, [8]);
+
+    let mut request = EnqueueRequest::new(task_name, json!("single"));
+    request.queue_name = queue_name;
+    let single = store.enqueue(&request).await.unwrap().task_id;
+    wait_for_succeeded(&store, &[single]).await;
+    assert_eq!(transition_batch_sizes(&store).await, [8, 1]);
+
+    shutdown.cancel();
+    worker_task.await.unwrap().unwrap();
+    drop(store);
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE {database_name} WITH (FORCE)"
+    )))
+    .execute(&maintenance)
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1107,13 +1258,26 @@ async fn worker_recovers_from_revoked_database_protocols() {
     let fixture = DatabaseFaultWorker::start(&database_url).await;
 
     sqlx::query(sqlx::AssertSqlSafe(format!(
-        "REVOKE EXECUTE ON FUNCTION pgtask.complete_task(uuid, integer, uuid, jsonb) FROM {}",
+        "REVOKE EXECUTE ON FUNCTION pgtask.complete_tasks(jsonb) FROM {}",
         fixture.role
     )))
     .execute(fixture.admin.pool())
     .await
     .unwrap();
     fixture.release.add_permits(1);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    fixture.restore_grants().await;
+
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "REVOKE EXECUTE ON FUNCTION pgtask.fail_tasks(jsonb) FROM {}",
+        fixture.role
+    )))
+    .execute(fixture.admin.pool())
+    .await
+    .unwrap();
+    let mut failure = EnqueueRequest::new(fixture.fault_task.clone(), json!("fail"));
+    failure.queue_name = fixture.fault_queue.clone();
+    fixture.admin.enqueue(&failure).await.unwrap();
     tokio::time::sleep(Duration::from_millis(80)).await;
     fixture.restore_grants().await;
 

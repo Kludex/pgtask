@@ -65,7 +65,8 @@ Pass only what you can actually run. Tasks you do not declare stay `pending` rat
 
 ## Lease-owned transitions
 
-`renew_leases`, `complete_task`, `fail_task`, `suspend_task`, `commit_checkpoint`, `spawn_task`, `wait_for_signal`, and
+`renew_leases`, `complete_task`, `complete_tasks`, `fail_task`, `fail_tasks`, `suspend_task`, `commit_checkpoint`,
+`spawn_task`, `wait_for_signal`, and
 `wait_for_result` all require the task ID, the attempt number, **and** the lease token.
 
 They apply only while that exact lease still owns the task. A stalled worker that wakes after its lease expired matches
@@ -85,6 +86,9 @@ Emitting before or after the waiter registers gives the same result - there is n
 To wait rather than poll: resolve the task's deterministic `pgtask_result_*` shard, subscribe, **then** read the
 function. Subscribing first is what closes the race where the task finishes between your read and your subscribe. Every
 terminal transition notifies with the task identifier as the payload.
+
+Workers batch ordinary completions and failures with `complete_tasks` and `fail_tasks`. Each function accepts a JSON
+array and returns one ordered outcome per request. The attempt and lease-token fences remain unchanged.
 
 ## Value limits
 

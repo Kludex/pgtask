@@ -12,13 +12,13 @@ use std::{
 
 use futures::FutureExt;
 use pgtask_core::{
-    HandlerVersion, LeaseRenewal, QueueName, ScheduleConfig, Task, TaskId, TaskName, TaskState, WorkerId,
+    HandlerVersion, LeaseRenewal, QueueName, RetryPolicy, ScheduleConfig, Task, TaskId, TaskName, TaskState, WorkerId,
 };
-use pgtask_postgres::{PostgresError, ReadyListener, Store};
+use pgtask_postgres::{PostgresError, ReadyListener, Store, TaskCompletion, TaskFailure};
 use serde_json::json;
 use thiserror::Error;
 use tokio::{
-    sync::{Mutex, Notify},
+    sync::{Mutex, Notify, mpsc, oneshot},
     task::{JoinError, JoinSet},
     time::{Instant, MissedTickBehavior},
 };
@@ -218,6 +218,56 @@ impl WorkerControl {
 type ActiveLeases = Arc<Mutex<HashMap<TaskId, ActiveLease>>>;
 
 #[derive(Clone)]
+struct TransitionWriter {
+    sender: mpsc::Sender<TransitionRequest>,
+}
+
+enum TransitionRequest {
+    Complete {
+        completion: TaskCompletion,
+        response: oneshot::Sender<Result<bool, Arc<PostgresError>>>,
+    },
+    Fail {
+        failure: TaskFailure,
+        response: oneshot::Sender<Result<Option<TaskState>, Arc<PostgresError>>>,
+    },
+}
+
+#[derive(Debug, Error)]
+enum TransitionError {
+    #[error("task transition writer stopped")]
+    Closed,
+    #[error("database operation failed: {0}")]
+    Postgres(Arc<PostgresError>),
+}
+
+impl TransitionWriter {
+    async fn complete(&self, completion: TaskCompletion) -> Result<bool, TransitionError> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(TransitionRequest::Complete { completion, response })
+            .await
+            .map_err(|_| TransitionError::Closed)?;
+        receiver
+            .await
+            .map_err(|_| TransitionError::Closed)?
+            .map_err(TransitionError::Postgres)
+    }
+
+    async fn fail(&self, failure: TaskFailure) -> Result<Option<TaskState>, TransitionError> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(TransitionRequest::Fail { failure, response })
+            .await
+            .map_err(|_| TransitionError::Closed)?;
+        receiver
+            .await
+            .map_err(|_| TransitionError::Closed)?
+            .map_err(TransitionError::Postgres)
+    }
+}
+
+#[derive(Clone)]
 struct ActiveLease {
     renewal: LeaseRenewal,
     queue_name: QueueName,
@@ -301,29 +351,22 @@ impl Worker {
     }
 
     pub async fn run(self, shutdown: CancellationToken) -> Result<(), WorkerError> {
-        let database_protocol = self.store.storage_protocol_range().await?;
-        if !database_protocol.overlaps(pgtask_core::STORAGE_PROTOCOL_RANGE) {
-            return Err(WorkerError::IncompatibleStorageProtocol {
-                database_minimum: database_protocol.minimum,
-                database_maximum: database_protocol.maximum,
-                worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
-                worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
-            });
-        }
-        let _supervisor = Supervisor::start(
-            self.health.clone(),
-            self.config.queues[0].clone(),
-            self.config.supervisor_interval,
-            self.config.health_address,
-            self.control.clone(),
-            self.config.overload_protection.clone(),
-            self.config.lease_duration * 2 / 3,
-        )
-        .map_err(WorkerError::Supervisor)?;
+        self.ensure_storage_protocol().await?;
+        let _supervisor = self.start_supervisor()?;
         let active_leases = Arc::new(Mutex::new(HashMap::new()));
         let task_wakeup = Arc::new(Notify::new());
         let schedule_wakeup = Arc::new(Notify::new());
         let runtime_shutdown = CancellationToken::new();
+        let (transition_sender, transition_receiver) = mpsc::channel(usize::from(self.config.concurrency.get()));
+        let transition_writer = TransitionWriter {
+            sender: transition_sender,
+        };
+        let transitions = write_transitions(
+            self.store.clone(),
+            transition_receiver,
+            self.config.claim_batch_size,
+            runtime_shutdown.clone(),
+        );
         let capabilities = self.registry.capabilities();
         let registrations = self.registry.registrations();
         let ready_listener = self.store.ready_listener_for(&self.config.queues).await?;
@@ -389,14 +432,48 @@ impl Worker {
         );
         let handlers = async {
             let result = self
-                .run_handlers(shutdown, Arc::clone(&active_leases), task_wakeup)
+                .run_handlers(shutdown, Arc::clone(&active_leases), task_wakeup, transition_writer)
                 .await;
             runtime_shutdown.cancel();
             self.health.set_admission(false);
             result
         };
-        let ((), (), (), (), (), result) = tokio::join!(renewer, listener, scheduler, retention, heartbeat, handlers);
+        let ((), (), (), (), (), (), result) = tokio::join!(
+            transitions,
+            renewer,
+            listener,
+            scheduler,
+            retention,
+            heartbeat,
+            handlers
+        );
         result
+    }
+
+    fn start_supervisor(&self) -> Result<Supervisor, WorkerError> {
+        Supervisor::start(
+            self.health.clone(),
+            self.config.queues[0].clone(),
+            self.config.supervisor_interval,
+            self.config.health_address,
+            self.control.clone(),
+            self.config.overload_protection.clone(),
+            self.config.lease_duration * 2 / 3,
+        )
+        .map_err(WorkerError::Supervisor)
+    }
+
+    async fn ensure_storage_protocol(&self) -> Result<(), WorkerError> {
+        let database_protocol = self.store.storage_protocol_range().await?;
+        if database_protocol.overlaps(pgtask_core::STORAGE_PROTOCOL_RANGE) {
+            return Ok(());
+        }
+        Err(WorkerError::IncompatibleStorageProtocol {
+            database_minimum: database_protocol.minimum,
+            database_maximum: database_protocol.maximum,
+            worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
+            worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
+        })
     }
 
     async fn run_handlers(
@@ -404,6 +481,7 @@ impl Worker {
         shutdown: CancellationToken,
         active_leases: ActiveLeases,
         wakeup: Arc<Notify>,
+        transition_writer: TransitionWriter,
     ) -> Result<(), WorkerError> {
         let mut handlers = JoinSet::new();
         let capabilities = self.registry.capabilities();
@@ -424,7 +502,8 @@ impl Worker {
             };
             let claimed_any = !tasks.is_empty();
             for task in tasks {
-                self.spawn_task(&mut handlers, &active_leases, task).await?;
+                self.spawn_task(&mut handlers, &active_leases, &transition_writer, task)
+                    .await?;
             }
 
             if !claimed_any {
@@ -552,8 +631,9 @@ impl Worker {
 
     async fn spawn_task(
         &self,
-        handlers: &mut JoinSet<Result<(), PostgresError>>,
+        handlers: &mut JoinSet<Result<(), TransitionError>>,
         active_leases: &ActiveLeases,
+        transition_writer: &TransitionWriter,
         task: Task,
     ) -> Result<(), WorkerError> {
         let lease_token = task.lease_token.ok_or(WorkerError::MissingLeaseToken(task.id))?;
@@ -590,11 +670,12 @@ impl Worker {
             .unwrap_or_else(|error| warn!(%error, "could not attach the producer trace context"));
         let active_leases = Arc::clone(active_leases);
         let store = self.store.clone();
+        let transition_writer = transition_writer.clone();
         let health = self.health.clone();
         handlers.spawn(
             async move {
                 let task_id = task.id;
-                let result = execute(store, handler, task, lease_token, lost).await;
+                let result = execute(store, transition_writer, handler, task, lease_token, lost).await;
                 let mut leases = active_leases.lock().await;
                 leases.remove(&task_id);
                 health.set_active_leases(!leases.is_empty());
@@ -606,7 +687,7 @@ impl Worker {
     }
 }
 
-fn handle_handler_result(result: Result<Result<(), PostgresError>, JoinError>) {
+fn handle_handler_result(result: Result<Result<(), TransitionError>, JoinError>) {
     if let Err(error) = result.expect("engine execution tasks do not panic") {
         warn!(%error, "task state transition failed; its lease will be recovered");
     }
@@ -622,11 +703,12 @@ async fn wait_after_database_error(shutdown: &CancellationToken, wakeup: &Notify
 
 async fn execute(
     store: Store,
+    transition_writer: TransitionWriter,
     handler: RegisteredHandler,
     task: Task,
     lease_token: pgtask_core::LeaseToken,
     lease_lost: CancellationToken,
-) -> Result<(), PostgresError> {
+) -> Result<(), TransitionError> {
     let queue_latency = task
         .updated_at
         .signed_duration_since(task.created_at)
@@ -641,73 +723,28 @@ async fn execute(
     tokio::select! {
         result = &mut handler_future => {
             match result {
-                    Ok(Ok(result)) => {
-                        if store.complete(task.id, task.attempt, lease_token, Some(&result)).await? {
-                            pgtask_otel::record_succeeded(task.queue_name.as_str(), task.task_name.as_str());
-                            pgtask_otel::record_execution(
-                                task.queue_name.as_str(),
-                                task.task_name.as_str(),
-                                "succeeded",
-                                started_at.elapsed(),
-                            );
-                        } else {
-                            pgtask_otel::record_lease_lost(task.queue_name.as_str(), task.task_name.as_str());
-                            warn!("task completion lost its lease");
-                        }
-                    }
-                    Ok(Err(error)) => {
-                        if error.is_suspended() {
-                            pgtask_otel::record_execution(
-                                task.queue_name.as_str(),
-                                task.task_name.as_str(),
-                                "suspended",
-                                started_at.elapsed(),
-                            );
-                            return Ok(());
-                        }
-                        let retry_after = if error.retryable {
-                            task.retry_policy.unwrap_or(handler.retry_policy).delay_for(task.attempt)
-                        } else {
-                            None
-                        };
-                        let state = store.fail(task.id, task.attempt, lease_token, &error.error, retry_after).await?;
-                        if state.is_none() {
-                            pgtask_otel::record_lease_lost(task.queue_name.as_str(), task.task_name.as_str());
-                            warn!("task failure lost its lease");
-                        } else if state == Some(TaskState::Pending) {
-                            tracing::debug!("task scheduled for retry");
-                        }
-                        record_failure_state(&task, state);
-                        pgtask_otel::record_execution(
-                            task.queue_name.as_str(),
-                            task.task_name.as_str(),
-                            if state == Some(TaskState::Pending) { "retry" } else { "failed" },
-                            started_at.elapsed(),
-                        );
-                    }
-                    Err(_) => {
-                        let error = json!({"type": "handler_panic"});
-                        let state = store
-                            .fail(
-                                task.id,
-                                task.attempt,
-                                lease_token,
-                                &error,
-                                task.retry_policy.unwrap_or(handler.retry_policy).delay_for(task.attempt),
-                            )
-                            .await?;
-                        if state.is_none() {
-                            pgtask_otel::record_lease_lost(task.queue_name.as_str(), task.task_name.as_str());
-                            warn!("panicked task lost its lease");
-                        }
-                        record_failure_state(&task, state);
-                        pgtask_otel::record_execution(
-                            task.queue_name.as_str(),
-                            task.task_name.as_str(),
-                            "panic",
-                            started_at.elapsed(),
-                        );
-                    }
+                Ok(Ok(result)) => complete_execution(&transition_writer, &task, lease_token, result, started_at).await?,
+                Ok(Err(error)) if error.is_suspended() => pgtask_otel::record_execution(
+                    task.queue_name.as_str(),
+                    task.task_name.as_str(),
+                    "suspended",
+                    started_at.elapsed(),
+                ),
+                Ok(Err(error)) => fail_execution(
+                    &transition_writer,
+                    &task,
+                    lease_token,
+                    error,
+                    handler.retry_policy,
+                    started_at,
+                ).await?,
+                Err(_) => record_panicked_execution(
+                    &transition_writer,
+                    &task,
+                    lease_token,
+                    handler.retry_policy,
+                    started_at,
+                ).await?,
             }
         }
         () = lease_lost.cancelled() => {
@@ -723,12 +760,202 @@ async fn execute(
     Ok(())
 }
 
+async fn complete_execution(
+    writer: &TransitionWriter,
+    task: &Task,
+    lease_token: pgtask_core::LeaseToken,
+    result: serde_json::Value,
+    started_at: std::time::Instant,
+) -> Result<(), TransitionError> {
+    let completed = writer
+        .complete(TaskCompletion {
+            task_id: task.id,
+            attempt: task.attempt,
+            lease_token,
+            result: Some(result),
+        })
+        .await?;
+    if completed {
+        pgtask_otel::record_succeeded(task.queue_name.as_str(), task.task_name.as_str());
+        pgtask_otel::record_execution(
+            task.queue_name.as_str(),
+            task.task_name.as_str(),
+            "succeeded",
+            started_at.elapsed(),
+        );
+    } else {
+        pgtask_otel::record_lease_lost(task.queue_name.as_str(), task.task_name.as_str());
+        warn!("task completion lost its lease");
+    }
+    Ok(())
+}
+
+async fn fail_execution(
+    writer: &TransitionWriter,
+    task: &Task,
+    lease_token: pgtask_core::LeaseToken,
+    error: crate::HandlerError,
+    retry_policy: RetryPolicy,
+    started_at: std::time::Instant,
+) -> Result<(), TransitionError> {
+    let retry_after = if error.retryable {
+        task.retry_policy.unwrap_or(retry_policy).delay_for(task.attempt)
+    } else {
+        None
+    };
+    let state = writer
+        .fail(TaskFailure {
+            task_id: task.id,
+            attempt: task.attempt,
+            lease_token,
+            error: error.error,
+            retry_after,
+        })
+        .await?;
+    if state.is_none() {
+        pgtask_otel::record_lease_lost(task.queue_name.as_str(), task.task_name.as_str());
+        warn!("task failure lost its lease");
+    } else if state == Some(TaskState::Pending) {
+        tracing::debug!("task scheduled for retry");
+    }
+    record_failure_state(task, state);
+    pgtask_otel::record_execution(
+        task.queue_name.as_str(),
+        task.task_name.as_str(),
+        if state == Some(TaskState::Pending) {
+            "retry"
+        } else {
+            "failed"
+        },
+        started_at.elapsed(),
+    );
+    Ok(())
+}
+
+async fn record_panicked_execution(
+    writer: &TransitionWriter,
+    task: &Task,
+    lease_token: pgtask_core::LeaseToken,
+    retry_policy: RetryPolicy,
+    started_at: std::time::Instant,
+) -> Result<(), TransitionError> {
+    let state = writer
+        .fail(TaskFailure {
+            task_id: task.id,
+            attempt: task.attempt,
+            lease_token,
+            error: json!({"type": "handler_panic"}),
+            retry_after: task.retry_policy.unwrap_or(retry_policy).delay_for(task.attempt),
+        })
+        .await?;
+    if state.is_none() {
+        pgtask_otel::record_lease_lost(task.queue_name.as_str(), task.task_name.as_str());
+        warn!("panicked task lost its lease");
+    }
+    record_failure_state(task, state);
+    pgtask_otel::record_execution(
+        task.queue_name.as_str(),
+        task.task_name.as_str(),
+        "panic",
+        started_at.elapsed(),
+    );
+    Ok(())
+}
+
 fn record_failure_state(task: &Task, state: Option<TaskState>) {
     match state {
         Some(TaskState::Pending) => pgtask_otel::record_retried(task.queue_name.as_str(), task.task_name.as_str()),
         Some(_) => pgtask_otel::record_failed(task.queue_name.as_str(), task.task_name.as_str()),
         None => {}
     }
+}
+
+async fn write_transitions(
+    store: Store,
+    mut receiver: mpsc::Receiver<TransitionRequest>,
+    batch_size: NonZeroU16,
+    shutdown: CancellationToken,
+) {
+    loop {
+        let first = tokio::select! {
+            () = shutdown.cancelled() => return,
+            request = receiver.recv() => match request {
+                Some(request) => request,
+                None => return,
+            },
+        };
+        let mut requests = Vec::with_capacity(usize::from(batch_size.get()));
+        requests.push(first);
+        let deadline = tokio::time::sleep(Duration::from_millis(1));
+        tokio::pin!(deadline);
+        while requests.len() < usize::from(batch_size.get()) {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                request = receiver.recv() => match request {
+                    Some(request) => requests.push(request),
+                    None => break,
+                },
+                () = &mut deadline => break,
+            }
+        }
+        if !write_transition_batch(&store, requests, &shutdown).await {
+            return;
+        }
+    }
+}
+
+async fn write_transition_batch(store: &Store, requests: Vec<TransitionRequest>, shutdown: &CancellationToken) -> bool {
+    let mut completions = Vec::new();
+    let mut completion_responses = Vec::new();
+    let mut failures = Vec::new();
+    let mut failure_responses = Vec::new();
+    for request in requests {
+        match request {
+            TransitionRequest::Complete { completion, response } => {
+                completions.push(completion);
+                completion_responses.push(response);
+            }
+            TransitionRequest::Fail { failure, response } => {
+                failures.push(failure);
+                failure_responses.push(response);
+            }
+        }
+    }
+    let completion_result = tokio::select! {
+        () = shutdown.cancelled() => return false,
+        result = store.complete_many(&completions) => result,
+    };
+    match completion_result {
+        Ok(results) => {
+            for (response, completed) in completion_responses.into_iter().zip(results) {
+                let _ = response.send(Ok(completed));
+            }
+        }
+        Err(error) => {
+            let error = Arc::new(error);
+            for response in completion_responses {
+                let _ = response.send(Err(Arc::clone(&error)));
+            }
+        }
+    }
+    let failure_result = tokio::select! {
+        () = shutdown.cancelled() => return false,
+        result = store.fail_many(&failures) => result,
+    };
+    match failure_result {
+        Ok(results) => {
+            for (response, state) in failure_responses.into_iter().zip(results) {
+                let _ = response.send(Ok(state));
+            }
+        }
+        Err(error) => {
+            let error = Arc::new(error);
+            for response in failure_responses {
+                let _ = response.send(Err(Arc::clone(&error)));
+            }
+        }
+    }
+    true
 }
 
 async fn renew_leases(
