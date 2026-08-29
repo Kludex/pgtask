@@ -2002,7 +2002,7 @@ async fn worker_heartbeats_elect_one_queue_demand_sampler_per_interval() {
             .await
             .unwrap();
     }
-    let interval = Duration::from_millis(50);
+    let interval = Duration::from_secs(30);
 
     let (first_heartbeat, second_heartbeat) = tokio::join!(
         store.heartbeat_worker_with_sampling(first, Duration::from_secs(1), false, interval),
@@ -2018,7 +2018,13 @@ async fn worker_heartbeats_elect_one_queue_demand_sampler_per_interval() {
         .unwrap();
     assert!(!first_heartbeat.should_sample);
 
-    tokio::time::sleep(interval).await;
+    sqlx::query(
+        "UPDATE pgtask.queues SET demand_sampled_at = demand_sampled_at - interval '30 seconds' WHERE name = $1",
+    )
+    .bind(queue_name.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
     let second_heartbeat = store
         .heartbeat_worker_with_sampling(second, Duration::from_secs(1), false, interval)
         .await
