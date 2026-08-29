@@ -12,7 +12,7 @@ use pgtask_core::{
     ScheduleName, Signal, SignalName, StepName, StorageProtocolRange, Task, TaskId, TaskName, TaskResult, TaskState,
     WorkerId, WorkerRecord,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::{
     FromRow, PgConnection, PgPool,
     postgres::{PgListener, PgPoolOptions},
@@ -204,6 +204,23 @@ pub struct QueueDemand {
     pub ready_tasks: u64,
     pub capable_tasks: u64,
     pub unroutable_tasks: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaskCompletion {
+    pub task_id: TaskId,
+    pub attempt: u16,
+    pub lease_token: LeaseToken,
+    pub result: Option<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaskFailure {
+    pub task_id: TaskId,
+    pub attempt: u16,
+    pub lease_token: LeaseToken,
+    pub error: Value,
+    pub retry_after: Option<Duration>,
 }
 
 #[derive(Clone, Debug)]
@@ -1553,6 +1570,108 @@ impl Store {
         state.map(|value| parse_state(&value)).transpose()
     }
 
+    pub async fn complete_many(&self, completions: &[TaskCompletion]) -> Result<Vec<bool>, PostgresError> {
+        if completions.is_empty() {
+            return Ok(Vec::new());
+        }
+        if completions
+            .iter()
+            .map(|completion| completion.task_id)
+            .collect::<HashSet<_>>()
+            .len()
+            != completions.len()
+        {
+            return Err(PostgresError::InvalidTask(
+                "batch completions must contain unique task ids".to_owned(),
+            ));
+        }
+        let payload = Value::Array(
+            completions
+                .iter()
+                .map(|completion| {
+                    json!({
+                        "task_id": completion.task_id,
+                        "attempt": completion.attempt,
+                        "lease_token": completion.lease_token,
+                        "has_result": completion.result.is_some(),
+                        "result": completion.result,
+                    })
+                })
+                .collect(),
+        );
+        let rows: Vec<BatchCompletionRow> =
+            sqlx::query_as("SELECT request_index, completed FROM pgtask.complete_tasks($1) ORDER BY request_index")
+                .bind(payload)
+                .fetch_all(&self.pool)
+                .await?;
+        if rows.len() != completions.len()
+            || rows
+                .iter()
+                .enumerate()
+                .any(|(index, row)| usize::try_from(row.request_index) != Ok(index))
+        {
+            return Err(PostgresError::InvalidTask(
+                "batch completion result did not match its requests".to_owned(),
+            ));
+        }
+        Ok(rows.into_iter().map(|row| row.completed).collect())
+    }
+
+    pub async fn fail_many(&self, failures: &[TaskFailure]) -> Result<Vec<Option<TaskState>>, PostgresError> {
+        if failures.is_empty() {
+            return Ok(Vec::new());
+        }
+        if failures
+            .iter()
+            .map(|failure| failure.task_id)
+            .collect::<HashSet<_>>()
+            .len()
+            != failures.len()
+        {
+            return Err(PostgresError::InvalidTask(
+                "batch failures must contain unique task ids".to_owned(),
+            ));
+        }
+        let payload = Value::Array(
+            failures
+                .iter()
+                .map(|failure| {
+                    let retry_milliseconds = failure
+                        .retry_after
+                        .map(|duration| {
+                            i64::try_from(duration.as_millis()).map_err(|_| PostgresError::InvalidLeaseDuration)
+                        })
+                        .transpose()?;
+                    Ok(json!({
+                        "task_id": failure.task_id,
+                        "attempt": failure.attempt,
+                        "lease_token": failure.lease_token,
+                        "error": failure.error,
+                        "retry_milliseconds": retry_milliseconds,
+                    }))
+                })
+                .collect::<Result<_, PostgresError>>()?,
+        );
+        let rows: Vec<BatchFailureRow> =
+            sqlx::query_as("SELECT request_index, state FROM pgtask.fail_tasks($1) ORDER BY request_index")
+                .bind(payload)
+                .fetch_all(&self.pool)
+                .await?;
+        if rows.len() != failures.len()
+            || rows
+                .iter()
+                .enumerate()
+                .any(|(index, row)| usize::try_from(row.request_index) != Ok(index))
+        {
+            return Err(PostgresError::InvalidTask(
+                "batch failure result did not match its requests".to_owned(),
+            ));
+        }
+        rows.into_iter()
+            .map(|row| row.state.map(|state| parse_state(&state)).transpose())
+            .collect()
+    }
+
     pub async fn recover_expired(&self, queue_name: &QueueName, limit: u16) -> Result<u64, PostgresError> {
         if limit == 0 {
             return Err(PostgresError::InvalidClaimLimit);
@@ -1591,6 +1710,18 @@ struct BatchEnqueueRow {
     request_index: i64,
     task_id: Uuid,
     created: bool,
+}
+
+#[derive(FromRow)]
+struct BatchCompletionRow {
+    request_index: i64,
+    completed: bool,
+}
+
+#[derive(FromRow)]
+struct BatchFailureRow {
+    request_index: i64,
+    state: Option<String>,
 }
 
 #[derive(FromRow)]
