@@ -102,6 +102,9 @@ trap cleanup EXIT INT TERM
 PGTASK_QUEUE=coverage-smoke \
 PGTASK_CONCURRENCY=1 \
 PGTASK_HEALTH_ADDRESS=127.0.0.1:0 \
+PGTASK_LISTENER_DATABASE_URL="$PGTASK_DATABASE_URL" \
+PGTASK_MAX_QUERY_CONNECTIONS=2 \
+PGTASK_MAX_LISTENER_CONNECTIONS=1 \
     target/debug/pgtask-smoke worker >/dev/null 2>&1 &
 coverage_worker_pid=$!
 sleep 1
