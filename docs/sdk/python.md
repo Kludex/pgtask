@@ -152,6 +152,8 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+The worker claims up to `concurrency` tasks in one database round trip when all handler slots are available.
+
 `step` stores the operation result as JSON and reuses it after a retry or restart. `sleep_for`, `sleep_until`, `wait_for_signal`, and `wait_for_result` suspend the task and release its worker slot. `spawn` creates the child and records its identifier atomically.
 
 Keep names and occurrences stable. Code outside a completed `step` can run again. Use `handler_version` when a deployment changes the order or meaning of durable operations.
