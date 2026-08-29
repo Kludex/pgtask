@@ -122,10 +122,6 @@ pub enum WorkerError {
     InvalidPollInterval,
     #[error("worker heartbeat interval must be at least one millisecond and shorter than its time to live")]
     InvalidWorkerHeartbeat,
-    #[error(
-        "the database is missing pgtask.heartbeat_worker_with_sampling; apply pending migrations before starting workers"
-    )]
-    OutdatedStorageSchema,
     #[error("schedule reconciliation interval must be greater than zero")]
     InvalidScheduleReconciliationInterval,
     #[error("retention interval must be greater than zero")]
@@ -318,9 +314,6 @@ impl Worker {
                 worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
                 worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
             });
-        }
-        if !self.store.supports_demand_sampling().await? {
-            return Err(WorkerError::OutdatedStorageSchema);
         }
         Ok(())
     }
@@ -993,21 +986,26 @@ async fn heartbeat_worker(store: Store, config: HeartbeatConfig, shutdown: Cance
                 break;
             }
             _ = interval.tick() => {
-                match store
-                    .heartbeat_worker_with_sampling(config.worker_id, config.ttl, false, config.interval)
-                    .await
-                {
-                    Ok(heartbeat) if heartbeat.updated => {
+                match store.heartbeat_worker(config.worker_id, config.ttl, false).await {
+                    Ok(true) => {
                         health.set_database(true);
                         pgtask_otel::record_heartbeat(config.queue_name.as_str(), "ok");
-                        pgtask_otel::record_live_workers(config.queue_name.as_str(), heartbeat.live_workers);
-                        pgtask_otel::record_queue_demand(
-                            config.queue_name.as_str(),
-                            heartbeat.ready_tasks,
-                            heartbeat.unroutable_tasks,
-                        );
+                        match store.sample_queue_demand(&config.queue_name, config.interval).await {
+                            Ok(sample) => {
+                                pgtask_otel::record_live_workers(config.queue_name.as_str(), sample.live_workers);
+                                pgtask_otel::record_queue_demand(
+                                    config.queue_name.as_str(),
+                                    sample.routable_tasks,
+                                    sample.unroutable_tasks,
+                                );
+                            }
+                            Err(error) => {
+                                health.set_database(false);
+                                warn!(%error, "could not sample queue demand");
+                            }
+                        }
                     }
-                    Ok(_) => {
+                    Ok(false) => {
                         health.set_database(false);
                         pgtask_otel::record_heartbeat(config.queue_name.as_str(), "missing");
                         warn!("worker registration disappeared");

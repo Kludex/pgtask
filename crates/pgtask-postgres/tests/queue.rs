@@ -82,7 +82,7 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             .fetch_one(&mut *connection)
             .await
             .unwrap();
-    assert_eq!(storage_protocol_range, (1, 1));
+    assert_eq!(storage_protocol_range, (1, 2));
     let ready_channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
         .bind(queue_name)
         .fetch_one(&mut *connection)
@@ -105,7 +105,7 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             has_function_privilege(current_user, 'pgtask.recover_result_wait_timeouts(integer)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.register_worker(uuid, text, text, text[], integer[], text[], bigint[], integer[], bigint[], bigint)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.delete_expired_idempotency_keys(text, integer)', 'EXECUTE'),
-            has_function_privilege(current_user, 'pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint)', 'EXECUTE')
+            has_function_privilege(current_user, 'pgtask.sample_queue_demand(text, bigint)', 'EXECUTE')
         ",
     )
     .fetch_one(&mut *connection)
@@ -135,10 +135,11 @@ async fn reports_the_supported_storage_protocol() {
         store.storage_protocol_version().await.unwrap(),
         STORAGE_PROTOCOL_VERSION
     );
-    assert_eq!(store.storage_protocol_range().await.unwrap(), STORAGE_PROTOCOL_RANGE);
+    let database_protocol = store.storage_protocol_range().await.unwrap();
+    assert_eq!((database_protocol.minimum, database_protocol.maximum), (1, 2));
     assert_eq!(
         store.ensure_storage_protocol(STORAGE_PROTOCOL_RANGE).await.unwrap(),
-        Some(STORAGE_PROTOCOL_RANGE)
+        Some(database_protocol)
     );
 }
 
@@ -243,15 +244,11 @@ async fn invalid_runtime_limits_fail_before_mutating_storage() {
         Err(PostgresError::InvalidLeaseDuration)
     ));
     assert!(matches!(
-        store
-            .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, Duration::ZERO)
-            .await,
+        store.sample_queue_demand(&queue_name, Duration::ZERO).await,
         Err(PostgresError::InvalidSampleInterval)
     ));
     assert!(matches!(
-        store
-            .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, Duration::from_micros(500))
-            .await,
+        store.sample_queue_demand(&queue_name, Duration::from_micros(500)).await,
         Err(PostgresError::InvalidSampleInterval)
     ));
     assert!(matches!(
@@ -1940,7 +1937,7 @@ async fn runtime_roles_only_receive_their_protocol_capabilities() {
         .fetch_one(&mut *producer)
         .await
         .unwrap();
-    assert_eq!(producer_protocol, (1, 1));
+    assert_eq!(producer_protocol, (1, 2));
     assert!(!can_execute(&mut producer, "pgtask.put_queue(text, bigint, bigint, bigint, bigint)").await);
     let task_id: Uuid =
         sqlx::query_scalar("SELECT task_id FROM pgtask.enqueue('role-task', '{}'::jsonb, $1) WHERE created")
@@ -2063,7 +2060,7 @@ async fn live_worker_count_follows_registration_and_expiry() {
 }
 
 #[tokio::test]
-async fn worker_heartbeats_elect_one_queue_demand_sampler_per_interval() {
+async fn concurrent_workers_elect_one_queue_demand_sampler_per_interval() {
     let Some(database_url) = database_url() else {
         return;
     };
@@ -2088,12 +2085,9 @@ async fn worker_heartbeats_elect_one_queue_demand_sampler_per_interval() {
             .unwrap();
     }
     let interval = Duration::from_secs(30);
-    let seeded = store
-        .heartbeat_worker_with_sampling(worker_ids[0], Duration::from_secs(1), false, interval)
-        .await
-        .unwrap();
+    let seeded = store.sample_queue_demand(&queue_name, interval).await.unwrap();
     assert!(seeded.sampled);
-    assert_eq!((seeded.ready_tasks, seeded.unroutable_tasks), (1, 1));
+    assert_eq!((seeded.routable_tasks, seeded.unroutable_tasks), (1, 1));
     sqlx::query(
         "UPDATE pgtask.queues SET demand_sampled_at = statement_timestamp() - interval '1 hour' WHERE name = $1",
     )
@@ -2104,30 +2098,27 @@ async fn worker_heartbeats_elect_one_queue_demand_sampler_per_interval() {
 
     let barrier = Arc::new(Barrier::new(worker_ids.len() + 1));
     let mut tasks = tokio::task::JoinSet::new();
-    for worker_id in worker_ids {
+    for _ in worker_ids {
         let store = store.clone();
         let barrier = Arc::clone(&barrier);
+        let queue_name = queue_name.clone();
         tasks.spawn(async move {
             barrier.wait().await;
-            store
-                .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, interval)
-                .await
-                .unwrap()
+            store.sample_queue_demand(&queue_name, interval).await.unwrap()
         });
     }
     barrier.wait().await;
-    let mut heartbeats = Vec::new();
-    while let Some(heartbeat) = tasks.join_next().await {
-        heartbeats.push(heartbeat.unwrap());
+    let mut samples = Vec::new();
+    while let Some(sample) = tasks.join_next().await {
+        samples.push(sample.unwrap());
     }
-    assert!(heartbeats.iter().all(|heartbeat| heartbeat.updated));
-    assert!(heartbeats.iter().all(|heartbeat| heartbeat.live_workers == 4));
+    assert!(samples.iter().all(|sample| sample.live_workers == 4));
     assert!(
-        heartbeats
+        samples
             .iter()
-            .all(|heartbeat| (heartbeat.ready_tasks, heartbeat.unroutable_tasks) == (1, 1))
+            .all(|sample| (sample.routable_tasks, sample.unroutable_tasks) == (1, 1))
     );
-    assert_eq!(heartbeats.iter().filter(|heartbeat| heartbeat.sampled).count(), 1);
+    assert_eq!(samples.iter().filter(|sample| sample.sampled).count(), 1);
 }
 
 #[tokio::test]
@@ -2151,13 +2142,7 @@ async fn queue_demand_sampling_honors_its_window_without_waiting_for_the_electio
         .await
         .unwrap();
     let interval = Duration::from_secs(30);
-    assert!(
-        store
-            .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, interval)
-            .await
-            .unwrap()
-            .sampled
-    );
+    assert!(store.sample_queue_demand(&queue_name, interval).await.unwrap().sampled);
 
     sqlx::query(
         "UPDATE pgtask.queues SET demand_sampled_at = statement_timestamp() - interval '29 seconds' WHERE name = $1",
@@ -2166,10 +2151,7 @@ async fn queue_demand_sampling_honors_its_window_without_waiting_for_the_electio
     .execute(store.pool())
     .await
     .unwrap();
-    let early = store
-        .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, interval)
-        .await
-        .unwrap();
+    let early = store.sample_queue_demand(&queue_name, interval).await.unwrap();
     assert!(early.sampled);
 
     sqlx::query(
@@ -2179,10 +2161,7 @@ async fn queue_demand_sampling_honors_its_window_without_waiting_for_the_electio
     .execute(store.pool())
     .await
     .unwrap();
-    let inside_window = store
-        .heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, interval)
-        .await
-        .unwrap();
+    let inside_window = store.sample_queue_demand(&queue_name, interval).await.unwrap();
     assert!(!inside_window.sampled);
 
     sqlx::query(
@@ -2198,22 +2177,20 @@ async fn queue_demand_sampling_honors_its_window_without_waiting_for_the_electio
         .execute(&mut *lock)
         .await
         .unwrap();
-    let locked = tokio::time::timeout(
-        Duration::from_secs(5),
-        store.heartbeat_worker_with_sampling(worker_id, Duration::from_secs(1), false, interval),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let locked = tokio::time::timeout(Duration::from_secs(5), store.sample_queue_demand(&queue_name, interval))
+        .await
+        .unwrap()
+        .unwrap();
     assert!(!locked.sampled);
     lock.commit().await.unwrap();
 
-    let missing = store
-        .heartbeat_worker_with_sampling(WorkerId::new(), Duration::from_secs(1), false, interval)
-        .await
-        .unwrap();
-    assert!(!missing.updated);
+    let missing_queue = QueueName::new(format!("missing-sampling-{}", Uuid::new_v4())).unwrap();
+    let missing = store.sample_queue_demand(&missing_queue, interval).await.unwrap();
     assert!(!missing.sampled);
+    assert_eq!(
+        (missing.live_workers, missing.routable_tasks, missing.unroutable_tasks),
+        (0, 0, 0)
+    );
 }
 
 #[tokio::test]

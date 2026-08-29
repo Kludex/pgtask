@@ -56,10 +56,15 @@ Metric attributes include queue name, task name, transition state, execution out
 
 Worker-capacity gauges only use `pgtask.queue.name`. Configure a stable `service.instance.id` resource attribute for each process. Backends must retain that resource boundary when aggregating several workers for one queue.
 
-`pgtask.queue.ready.tasks` counts due tasks supported by any live, non-draining worker on the queue. Use it for queue
-autoscaling. `pgtask.queue.unroutable.tasks` counts due tasks with no such worker advertising the required capability.
-Alert when it remains nonzero. One worker scans queue demand per heartbeat interval and publishes the sample in
-PostgreSQL. Every worker reports that shared sample on its heartbeat tick. Take the maximum across worker instances.
+`pgtask.queue.ready.tasks` counts due tasks routable to any live, non-draining worker on the queue. Use it for queue
+autoscaling when one Deployment owns the queue. `pgtask.queue.unroutable.tasks` counts due tasks with no such worker
+advertising the required capability. Alert when it remains nonzero. One worker scans queue demand per heartbeat interval
+and publishes the sample in PostgreSQL. Every worker reports that shared sample on its heartbeat tick. Take the maximum
+across worker instances. A reported sample can be about two heartbeat intervals old, plus the query time.
+
+Do not autoscale separate Deployments with disjoint handlers from this queue-wide gauge when they share a queue. Each
+Deployment would scale on work only the other Deployment can run. Use a separate queue per Deployment or a
+capability-aware external metric.
 
 Configured concurrency is the hard process limit. Effective concurrency is the current in-memory admission limit. Available slots are `max(effective - active, 0)`. Lowering the effective limit stops new claims and never cancels an active handler. Event-loop lag measures delay beyond the one-second runtime sampling deadline. Lease-renewal age is the oldest active lease age at the renewal sampling point, or zero when the worker has no active lease.
 

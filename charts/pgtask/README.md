@@ -25,6 +25,9 @@ The default external autoscaling metric, `pgtask_queue_ready_tasks`, is the Prom
 instances. Alert on `pgtask_queue_unroutable_tasks` instead of scaling from it: those tasks require a deployment with the
 missing task name and handler version.
 
+Use this metric when one Deployment owns the queue. Deployments with disjoint handlers that share a queue need separate
+queues or a capability-aware external metric.
+
 The migration Job runs as a `pre-install` and `pre-upgrade` hook. The engine also takes a PostgreSQL advisory lock, so overlapping Helm operations cannot apply migrations concurrently.
 
 The chart does not start a worker by default. A worker image contains your registered handlers. The project image only

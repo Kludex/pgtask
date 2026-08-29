@@ -209,11 +209,10 @@ pub struct QueueDemand {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WorkerHeartbeat {
-    pub updated: bool,
+pub struct QueueDemandSample {
     pub sampled: bool,
     pub live_workers: u64,
-    pub ready_tasks: u64,
+    pub routable_tasks: u64,
     pub unroutable_tasks: u64,
 }
 
@@ -534,50 +533,29 @@ impl Store {
         Ok(updated)
     }
 
-    pub async fn heartbeat_worker_with_sampling(
+    pub async fn sample_queue_demand(
         &self,
-        worker_id: WorkerId,
-        ttl: Duration,
-        draining: bool,
+        queue_name: &QueueName,
         sample_interval: Duration,
-    ) -> Result<WorkerHeartbeat, PostgresError> {
-        let ttl_milliseconds = i64::try_from(ttl.as_millis()).map_err(|_| PostgresError::InvalidLeaseDuration)?;
-        if ttl_milliseconds == 0 {
-            return Err(PostgresError::InvalidLeaseDuration);
-        }
+    ) -> Result<QueueDemandSample, PostgresError> {
         let sample_interval_milliseconds =
             i64::try_from(sample_interval.as_millis()).map_err(|_| PostgresError::InvalidSampleInterval)?;
         if sample_interval_milliseconds == 0 {
             return Err(PostgresError::InvalidSampleInterval);
         }
-        let row: WorkerHeartbeatRow =
-            sqlx::query_as("SELECT * FROM pgtask.heartbeat_worker_with_sampling($1, $2, $3, $4)")
-                .bind(worker_id.as_uuid())
-                .bind(ttl_milliseconds)
-                .bind(draining)
-                .bind(sample_interval_milliseconds)
-                .fetch_one(&self.pool)
-                .await?;
-        Ok(WorkerHeartbeat {
-            updated: row.updated,
+        let row: QueueDemandSampleRow = sqlx::query_as("SELECT * FROM pgtask.sample_queue_demand($1, $2)")
+            .bind(queue_name.as_str())
+            .bind(sample_interval_milliseconds)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(QueueDemandSample {
             sampled: row.sampled,
             live_workers: u64::try_from(row.live_workers).map_err(invalid_number)?,
-            ready_tasks: u64::try_from(row.ready_tasks).map_err(invalid_number)?,
+            routable_tasks: u64::try_from(row.routable_tasks).map_err(invalid_number)?,
             unroutable_tasks: u64::try_from(row.unroutable_tasks).map_err(invalid_number)?,
         })
     }
 
-    pub async fn supports_demand_sampling(&self) -> Result<bool, PostgresError> {
-        let supported = sqlx::query_scalar(
-            "SELECT to_regprocedure('pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint)') IS NOT NULL",
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(supported)
-    }
-
-    /// Counts workers the database still considers live, which is not the same as the number of
-    /// processes reporting metrics: a worker whose heartbeat fails keeps reporting and stops counting.
     pub async fn live_worker_count(&self, queue_name: &QueueName) -> Result<u64, PostgresError> {
         let count: i64 = sqlx::query_scalar("SELECT pgtask.live_worker_count($1)")
             .bind(queue_name.as_str())
@@ -1640,11 +1618,10 @@ struct QueueDemandRow {
 }
 
 #[derive(FromRow)]
-struct WorkerHeartbeatRow {
-    updated: bool,
+struct QueueDemandSampleRow {
     sampled: bool,
     live_workers: i64,
-    ready_tasks: i64,
+    routable_tasks: i64,
     unroutable_tasks: i64,
 }
 

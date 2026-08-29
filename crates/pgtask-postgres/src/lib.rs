@@ -7,6 +7,6 @@ pub use pgtask_core::{
     StorageProtocolRange,
 };
 pub use store::{
-    Notification, PostgresError, QueueDemand, ReadyListener, ResultWait, ResultWaitRequest, SignalWait,
-    SignalWaitRequest, SpawnRequest, Store, StoreConfig, TaskResultWait, WorkerHeartbeat,
+    Notification, PostgresError, QueueDemand, QueueDemandSample, ReadyListener, ResultWait, ResultWaitRequest,
+    SignalWait, SignalWaitRequest, SpawnRequest, Store, StoreConfig, TaskResultWait,
 };

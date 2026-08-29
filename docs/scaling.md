@@ -48,6 +48,9 @@ gradually rather than slamming the database again.
 **Kubernetes replica scaling** adds or removes whole workers based on queue demand, using the published
 `pgtask.queue.ready.tasks` gauge or oldest-ready age.
 
+Use the ready-task gauge when one Deployment owns the queue. If Deployments with disjoint handlers share a queue, use
+separate queues or a capability-aware external metric so one Deployment does not scale on another Deployment's work.
+
 They are deliberately separate: one manages a single process against the database it can see, the other manages fleet
 size against a queue's backlog. Neither is part of task correctness. Turning both off changes throughput, not
 guarantees.

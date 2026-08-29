@@ -389,7 +389,7 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
         RETURNS TABLE(minimum integer, maximum integer)
         LANGUAGE sql
         IMMUTABLE
-        AS $$ SELECT 2, 3 $$
+        AS $$ SELECT 3, 4 $$
         ",
     )
     .execute(store.pool())
@@ -398,8 +398,8 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
     assert!(matches!(
         store.ensure_storage_protocol(pgtask_core::STORAGE_PROTOCOL_RANGE).await,
         Err(PostgresError::IncompatibleStorageProtocol {
-            database_minimum: 2,
-            database_maximum: 3,
+            database_minimum: 3,
+            database_maximum: 4,
             client_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
             client_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
         })
@@ -411,8 +411,8 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
     assert!(matches!(
         worker.run(CancellationToken::new()).await,
         Err(WorkerError::IncompatibleStorageProtocol {
-            database_minimum: 2,
-            database_maximum: 3,
+            database_minimum: 3,
+            database_maximum: 4,
             worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
             worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
         })
@@ -838,15 +838,16 @@ async fn workers_publish_shared_queue_demand_samples() {
 
     tokio::time::timeout(TEST_TIMEOUT, async {
         loop {
-            let sample: (bool, i64, i64) = sqlx::query_as(
-                "SELECT demand_sampled_at IS NOT NULL, demand_ready_tasks, demand_unroutable_tasks \
+            let sample: (bool, i64, i64, i64) = sqlx::query_as(
+                "SELECT demand_sampled_at IS NOT NULL, demand_live_workers, \
+                    demand_routable_tasks, demand_unroutable_tasks \
                  FROM pgtask.queues WHERE name = $1",
             )
             .bind(queue_name.as_str())
             .fetch_one(store.pool())
             .await
             .unwrap();
-            if sample == (true, 0, 1) {
+            if sample == (true, 2, 0, 1) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1344,7 +1345,7 @@ async fn worker_recovers_from_revoked_database_protocols() {
         "REVOKE EXECUTE ON FUNCTION \
          pgtask.renew_leases(uuid[], integer[], uuid[], bigint), \
          pgtask.heartbeat_worker(uuid, bigint, boolean), \
-         pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint), \
+         pgtask.sample_queue_demand(text, bigint), \
          pgtask.claim_due_schedules(integer), \
          pgtask.recover_wait_timeouts(integer) FROM {}",
         fixture.role
@@ -1389,7 +1390,7 @@ async fn worker_recovers_from_revoked_database_protocols() {
 }
 
 #[tokio::test]
-async fn worker_refuses_a_schema_without_demand_sampling() {
+async fn worker_refuses_a_schema_before_the_demand_sampling_protocol() {
     let Some(database_url) = database_url() else {
         return;
     };
@@ -1404,16 +1405,29 @@ async fn worker_refuses_a_schema_without_demand_sampling() {
         .unwrap();
     let store = Store::from_pool(PgPool::connect_with(options.database(&database_name)).await.unwrap());
     store.migrate().await.unwrap();
-    sqlx::query("DROP FUNCTION pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint)")
-        .execute(store.pool())
-        .await
-        .unwrap();
+    sqlx::query(
+        r"
+        CREATE OR REPLACE FUNCTION pgtask.storage_protocol_range()
+        RETURNS TABLE(minimum integer, maximum integer)
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$ SELECT 1, 1 $$
+        ",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
     let queue_name = QueueName::new(format!("outdated-{}", Uuid::new_v4())).unwrap();
     let task_name = TaskName::new("outdated-task").unwrap();
     let worker = Worker::new(store, successful_registry(&task_name), WorkerConfig::new(queue_name)).unwrap();
     assert!(matches!(
         worker.run(CancellationToken::new()).await,
-        Err(WorkerError::OutdatedStorageSchema)
+        Err(WorkerError::IncompatibleStorageProtocol {
+            database_minimum: 1,
+            database_maximum: 1,
+            worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
+            worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
+        })
     ));
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "DROP DATABASE {database_name} WITH (FORCE)"

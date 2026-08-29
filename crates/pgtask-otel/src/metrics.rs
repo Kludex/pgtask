@@ -84,7 +84,7 @@ fn metrics() -> &'static KernelMetrics {
                 .build(),
             queue_ready_tasks: meter
                 .u64_gauge("pgtask.queue.ready.tasks")
-                .with_description("Due tasks a live, non-draining worker on this queue can run")
+                .with_description("Due tasks routable to any live, non-draining worker on this queue")
                 .with_unit("{task}")
                 .build(),
             queue_unroutable_tasks: meter

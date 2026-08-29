@@ -1,19 +1,39 @@
 ALTER TABLE pgtask.queues
     ADD COLUMN demand_sampled_at timestamptz,
-    ADD COLUMN demand_ready_tasks bigint NOT NULL DEFAULT 0,
+    ADD COLUMN demand_live_workers bigint NOT NULL DEFAULT 0,
+    ADD COLUMN demand_routable_tasks bigint NOT NULL DEFAULT 0,
     ADD COLUMN demand_unroutable_tasks bigint NOT NULL DEFAULT 0;
 
-CREATE FUNCTION pgtask.heartbeat_worker_with_sampling(
-    p_worker_id uuid,
-    p_ttl_milliseconds bigint,
-    p_draining boolean,
+CREATE INDEX workers_queue_expiry_idx ON pgtask.workers(queue_name, expires_at);
+
+CREATE OR REPLACE FUNCTION pgtask.storage_protocol_version()
+RETURNS integer
+LANGUAGE sql
+IMMUTABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pgtask
+AS $$
+    SELECT 2;
+$$;
+
+CREATE OR REPLACE FUNCTION pgtask.storage_protocol_range()
+RETURNS TABLE(minimum integer, maximum integer)
+LANGUAGE sql
+IMMUTABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pgtask
+AS $$
+    SELECT 1, 2;
+$$;
+
+CREATE FUNCTION pgtask.sample_queue_demand(
+    p_queue_name text,
     p_sample_interval_milliseconds bigint
 )
 RETURNS TABLE(
-    updated boolean,
     sampled boolean,
     live_workers bigint,
-    ready_tasks bigint,
+    routable_tasks bigint,
     unroutable_tasks bigint
 )
 LANGUAGE plpgsql
@@ -21,93 +41,104 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pgtask
 AS $$
 DECLARE
-    target_queue text;
+    sampled_at timestamptz;
 BEGIN
     IF p_sample_interval_milliseconds <= 0 THEN
         RAISE EXCEPTION 'sample interval must be positive' USING ERRCODE = '22023';
     END IF;
 
-    SELECT pgtask.heartbeat_worker(p_worker_id, p_ttl_milliseconds, p_draining) INTO updated;
     sampled := false;
-    live_workers := 0;
-    ready_tasks := 0;
-    unroutable_tasks := 0;
-    IF NOT updated THEN
+    SELECT
+        queues.demand_sampled_at,
+        queues.demand_live_workers,
+        queues.demand_routable_tasks,
+        queues.demand_unroutable_tasks
+    INTO sampled_at, live_workers, routable_tasks, unroutable_tasks
+    FROM pgtask.queues
+    WHERE queues.name = p_queue_name;
+    IF NOT FOUND THEN
+        live_workers := 0;
+        routable_tasks := 0;
+        unroutable_tasks := 0;
         RETURN NEXT;
         RETURN;
     END IF;
 
-    SELECT workers.queue_name INTO target_queue
-    FROM pgtask.workers
-    WHERE workers.id = p_worker_id;
-    SELECT pgtask.live_worker_count(target_queue) INTO live_workers;
-
-    IF NOT p_draining
-        AND EXISTS (
-            SELECT 1
-            FROM pgtask.queues
-            WHERE name = target_queue
-                AND (
-                    demand_sampled_at IS NULL
-                    OR demand_sampled_at <= statement_timestamp()
-                        - (
-                            (p_sample_interval_milliseconds - p_sample_interval_milliseconds / 10)
-                            * interval '1 millisecond'
-                        )
-                )
-        )
-        AND pg_try_advisory_xact_lock(hashtextextended('pgtask.demand.' || target_queue, 0))
-    THEN
-        SELECT
-            count(tasks.id) FILTER (
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM pgtask.workers
-                    JOIN pgtask.worker_capabilities ON worker_capabilities.worker_id = workers.id
-                    WHERE workers.queue_name = tasks.queue_name
-                        AND workers.draining = false
-                        AND workers.expires_at > statement_timestamp()
-                        AND worker_capabilities.task_name = tasks.task_name
-                        AND worker_capabilities.handler_version = tasks.handler_version
-                )
-            ),
-            count(tasks.id) FILTER (
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM pgtask.workers
-                    JOIN pgtask.worker_capabilities ON worker_capabilities.worker_id = workers.id
-                    WHERE workers.queue_name = tasks.queue_name
-                        AND workers.draining = false
-                        AND workers.expires_at > statement_timestamp()
-                        AND worker_capabilities.task_name = tasks.task_name
-                        AND worker_capabilities.handler_version = tasks.handler_version
-                )
-            )
-        INTO ready_tasks, unroutable_tasks
-        FROM pgtask.tasks
-        JOIN pgtask.queues ON queues.name = tasks.queue_name
-        WHERE tasks.queue_name = target_queue
-            AND tasks.state = 'pending'
-            AND tasks.run_at <= statement_timestamp()
-            AND queues.paused_at IS NULL;
-
-        UPDATE pgtask.queues
-        SET demand_sampled_at = statement_timestamp(),
-            demand_ready_tasks = ready_tasks,
-            demand_unroutable_tasks = unroutable_tasks
-        WHERE name = target_queue;
-        sampled := true;
-    ELSE
-        SELECT demand_ready_tasks, demand_unroutable_tasks
-        INTO ready_tasks, unroutable_tasks
-        FROM pgtask.queues
-        WHERE name = target_queue;
+    IF NOT pg_try_advisory_xact_lock(hashtextextended('pgtask.demand.' || p_queue_name, 0)) THEN
+        RETURN NEXT;
+        RETURN;
     END IF;
+
+    SELECT
+        queues.demand_sampled_at,
+        queues.demand_live_workers,
+        queues.demand_routable_tasks,
+        queues.demand_unroutable_tasks
+    INTO sampled_at, live_workers, routable_tasks, unroutable_tasks
+    FROM pgtask.queues
+    WHERE queues.name = p_queue_name;
+    IF sampled_at IS NOT NULL
+        AND sampled_at > statement_timestamp()
+            - (
+                (p_sample_interval_milliseconds - p_sample_interval_milliseconds / 10)
+                * interval '1 millisecond'
+            )
+    THEN
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    SELECT count(*)
+    INTO live_workers
+    FROM pgtask.workers
+    WHERE workers.queue_name = p_queue_name
+        AND workers.expires_at > statement_timestamp();
+
+    SELECT
+        count(tasks.id) FILTER (
+            WHERE EXISTS (
+                SELECT 1
+                FROM pgtask.workers
+                JOIN pgtask.worker_capabilities ON worker_capabilities.worker_id = workers.id
+                WHERE workers.queue_name = tasks.queue_name
+                    AND workers.draining = false
+                    AND workers.expires_at > statement_timestamp()
+                    AND worker_capabilities.task_name = tasks.task_name
+                    AND worker_capabilities.handler_version = tasks.handler_version
+            )
+        ),
+        count(tasks.id) FILTER (
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM pgtask.workers
+                JOIN pgtask.worker_capabilities ON worker_capabilities.worker_id = workers.id
+                WHERE workers.queue_name = tasks.queue_name
+                    AND workers.draining = false
+                    AND workers.expires_at > statement_timestamp()
+                    AND worker_capabilities.task_name = tasks.task_name
+                    AND worker_capabilities.handler_version = tasks.handler_version
+            )
+        )
+    INTO routable_tasks, unroutable_tasks
+    FROM pgtask.tasks
+    JOIN pgtask.queues ON queues.name = tasks.queue_name
+    WHERE tasks.queue_name = p_queue_name
+        AND tasks.state = 'pending'
+        AND tasks.run_at <= statement_timestamp()
+        AND queues.paused_at IS NULL;
+
+    UPDATE pgtask.queues
+    SET demand_sampled_at = statement_timestamp(),
+        demand_live_workers = live_workers,
+        demand_routable_tasks = routable_tasks,
+        demand_unroutable_tasks = unroutable_tasks
+    WHERE name = p_queue_name;
+    sampled := true;
     RETURN NEXT;
 END;
 $$;
 
-REVOKE ALL ON FUNCTION pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint) FROM PUBLIC;
+REVOKE ALL ON FUNCTION pgtask.sample_queue_demand(text, bigint) FROM PUBLIC;
 
 DO $$
 DECLARE
@@ -121,18 +152,16 @@ BEGIN
         CROSS JOIN LATERAL aclexplode(pg_proc.proacl) AS privileges
         WHERE pg_proc.oid = 'pgtask.heartbeat_worker(uuid, bigint, boolean)'::regprocedure
             AND privileges.privilege_type = 'EXECUTE'
+            AND privileges.grantee <> 0
     LOOP
-        EXECUTE format(
-            'GRANT EXECUTE ON FUNCTION pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint) TO %s',
-            target
-        );
+        EXECUTE format('GRANT EXECUTE ON FUNCTION pgtask.sample_queue_demand(text, bigint) TO %s', target);
     END LOOP;
 
     definition := pg_get_functiondef('pgtask.configure_grants(regrole, regrole, regrole, regrole, regrole)'::regprocedure);
     rewritten := replace(
         definition,
         E'    EXECUTE format(''GRANT EXECUTE ON FUNCTION pgtask.heartbeat_worker(uuid, bigint, boolean) TO %s'', p_worker);\n',
-        E'    EXECUTE format(''GRANT EXECUTE ON FUNCTION pgtask.heartbeat_worker(uuid, bigint, boolean) TO %s'', p_worker);\n    EXECUTE format(''GRANT EXECUTE ON FUNCTION pgtask.heartbeat_worker_with_sampling(uuid, bigint, boolean, bigint) TO %s'', p_worker);\n'
+        E'    EXECUTE format(''GRANT EXECUTE ON FUNCTION pgtask.heartbeat_worker(uuid, bigint, boolean) TO %s'', p_worker);\n    EXECUTE format(''GRANT EXECUTE ON FUNCTION pgtask.sample_queue_demand(text, bigint) TO %s'', p_worker);\n'
     );
     IF rewritten = definition THEN
         RAISE EXCEPTION 'could not extend pgtask.configure_grants';

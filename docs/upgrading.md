@@ -27,8 +27,9 @@ corrupts something.
 **Workers never migrate.** Only the migration Job or `pgtask migrate` changes the schema. A worker
 that finds an old schema stops; it does not try to fix it.
 
-Workers that publish shared queue-demand samples require migration `0004`. They fail with an actionable error when the
-sampling function is missing. The Helm migration hook applies it before replacing workers.
+Workers that publish shared queue-demand samples require storage protocol 2 from migration `0004`. The migration expands
+the database range to `1..=2`, so old protocol 1 workers remain compatible during the rollout. New workers refuse to
+start before the migration is applied. The Helm migration hook applies it before replacing workers.
 
 !!! note "Schema version is not handler version"
 
@@ -40,9 +41,10 @@ sampling function is missing. The Helm migration hook applies it before replacin
 
 This release changes `pgtask.queue.ready.tasks` from the tasks supported by one process to the tasks supported by any
 live, non-draining worker on the queue. The queue-wide value is suitable for fleet autoscaling and remains aggregated by
-the maximum across worker instances.
+the maximum across worker instances. It must not drive separate Deployments with disjoint handlers on one shared queue,
+because each Deployment would scale on the other's work. Use separate queues or a capability-aware external metric.
 
-For an additive migration, which is every upgrade that does not raise the storage protocol:
+Apply the migration before rolling workers:
 
 ```console
 helm upgrade pgtask ./charts/pgtask --values production.yaml
