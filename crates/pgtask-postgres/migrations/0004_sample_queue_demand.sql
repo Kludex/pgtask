@@ -94,38 +94,29 @@ BEGIN
     WHERE workers.queue_name = p_queue_name
         AND workers.expires_at > statement_timestamp();
 
+    WITH demand AS MATERIALIZED (
+        SELECT EXISTS (
+                SELECT 1
+                FROM pgtask.workers
+                JOIN pgtask.worker_capabilities ON worker_capabilities.worker_id = workers.id
+                WHERE workers.queue_name = tasks.queue_name
+                    AND workers.draining = false
+                    AND workers.expires_at > statement_timestamp()
+                    AND worker_capabilities.task_name = tasks.task_name
+                    AND worker_capabilities.handler_version = tasks.handler_version
+            ) AS routable
+        FROM pgtask.tasks
+        JOIN pgtask.queues ON queues.name = tasks.queue_name
+        WHERE tasks.queue_name = p_queue_name
+            AND tasks.state = 'pending'
+            AND tasks.run_at <= statement_timestamp()
+            AND queues.paused_at IS NULL
+    )
     SELECT
-        count(tasks.id) FILTER (
-            WHERE EXISTS (
-                SELECT 1
-                FROM pgtask.workers
-                JOIN pgtask.worker_capabilities ON worker_capabilities.worker_id = workers.id
-                WHERE workers.queue_name = tasks.queue_name
-                    AND workers.draining = false
-                    AND workers.expires_at > statement_timestamp()
-                    AND worker_capabilities.task_name = tasks.task_name
-                    AND worker_capabilities.handler_version = tasks.handler_version
-            )
-        ),
-        count(tasks.id) FILTER (
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM pgtask.workers
-                JOIN pgtask.worker_capabilities ON worker_capabilities.worker_id = workers.id
-                WHERE workers.queue_name = tasks.queue_name
-                    AND workers.draining = false
-                    AND workers.expires_at > statement_timestamp()
-                    AND worker_capabilities.task_name = tasks.task_name
-                    AND worker_capabilities.handler_version = tasks.handler_version
-            )
-        )
+        count(*) FILTER (WHERE demand.routable),
+        count(*) - count(*) FILTER (WHERE demand.routable)
     INTO routable_tasks, unroutable_tasks
-    FROM pgtask.tasks
-    JOIN pgtask.queues ON queues.name = tasks.queue_name
-    WHERE tasks.queue_name = p_queue_name
-        AND tasks.state = 'pending'
-        AND tasks.run_at <= statement_timestamp()
-        AND queues.paused_at IS NULL;
+    FROM demand;
 
     UPDATE pgtask.queues
     SET demand_sampled_at = statement_timestamp(),

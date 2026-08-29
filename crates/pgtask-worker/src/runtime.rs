@@ -307,12 +307,12 @@ impl Worker {
 
     async fn validate_storage_schema(&self) -> Result<(), WorkerError> {
         let database_protocol = self.store.storage_protocol_range().await?;
-        if !database_protocol.overlaps(pgtask_core::STORAGE_PROTOCOL_RANGE) {
+        if !database_protocol.overlaps(crate::STORAGE_PROTOCOL_RANGE) {
             return Err(WorkerError::IncompatibleStorageProtocol {
                 database_minimum: database_protocol.minimum,
                 database_maximum: database_protocol.maximum,
-                worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
-                worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
+                worker_minimum: crate::STORAGE_PROTOCOL_MIN_VERSION,
+                worker_maximum: crate::STORAGE_PROTOCOL_MAX_VERSION,
             });
         }
         Ok(())
@@ -396,6 +396,13 @@ impl Worker {
             runtime_shutdown.clone(),
             self.health.clone(),
         );
+        let sampler = sample_queue_demand(
+            self.store.clone(),
+            self.config.queues[0].clone(),
+            self.config.worker_heartbeat_interval,
+            runtime_shutdown.clone(),
+            self.health.clone(),
+        );
         let handlers = async {
             let result = self
                 .run_handlers(shutdown, Arc::clone(&active_leases), task_wakeup)
@@ -404,8 +411,9 @@ impl Worker {
             self.health.set_admission(false);
             result
         };
-        let ((), (), (), (), (), (), result) =
-            tokio::join!(renewer, recovery, listener, scheduler, retention, heartbeat, handlers);
+        let ((), (), (), (), (), (), (), result) = tokio::join!(
+            renewer, recovery, listener, scheduler, retention, heartbeat, sampler, handlers
+        );
         result
     }
 
@@ -990,20 +998,6 @@ async fn heartbeat_worker(store: Store, config: HeartbeatConfig, shutdown: Cance
                     Ok(true) => {
                         health.set_database(true);
                         pgtask_otel::record_heartbeat(config.queue_name.as_str(), "ok");
-                        match store.sample_queue_demand(&config.queue_name, config.interval).await {
-                            Ok(sample) => {
-                                pgtask_otel::record_live_workers(config.queue_name.as_str(), sample.live_workers);
-                                pgtask_otel::record_queue_demand(
-                                    config.queue_name.as_str(),
-                                    sample.routable_tasks,
-                                    sample.unroutable_tasks,
-                                );
-                            }
-                            Err(error) => {
-                                health.set_database(false);
-                                warn!(%error, "could not sample queue demand");
-                            }
-                        }
                     }
                     Ok(false) => {
                         health.set_database(false);
@@ -1014,6 +1008,42 @@ async fn heartbeat_worker(store: Store, config: HeartbeatConfig, shutdown: Cance
                         health.set_database(false);
                         pgtask_otel::record_heartbeat(config.queue_name.as_str(), "error");
                         warn!(%error, "could not update worker heartbeat");
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn sample_queue_demand(
+    store: Store,
+    queue_name: QueueName,
+    sample_interval: Duration,
+    shutdown: CancellationToken,
+    health: Health,
+) {
+    let mut interval = tokio::time::interval(sample_interval);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            _ = interval.tick() => {
+                let sample = tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    sample = store.sample_queue_demand(&queue_name, sample_interval) => sample,
+                };
+                match sample {
+                    Ok(sample) => {
+                        pgtask_otel::record_live_workers(queue_name.as_str(), sample.live_workers);
+                        pgtask_otel::record_queue_demand(
+                            queue_name.as_str(),
+                            sample.routable_tasks,
+                            sample.unroutable_tasks,
+                        );
+                    }
+                    Err(error) => {
+                        health.set_database(false);
+                        warn!(%error, "could not sample queue demand");
                     }
                 }
             }

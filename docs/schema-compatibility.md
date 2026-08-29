@@ -47,8 +47,8 @@ rerun with `PGTASK_UPDATE_SQL_BASELINE=1` to rebase the baseline on the new mini
     the change a protocol bump exists for, and it remains a judgement you make rather than one the
     suite makes for you.
 
-Client access goes through functions and views. The surface record also includes table columns because some functions
-return table composite types. Rebasing the baseline after a protocol bump makes later shape changes explicit.
+Client access goes through functions and views only, so those signatures and their grants are the
+whole contract. Table columns are internal and can change freely.
 
 ## Rolling releases
 

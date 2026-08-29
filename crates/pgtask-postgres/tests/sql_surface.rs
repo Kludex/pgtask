@@ -130,11 +130,12 @@ async fn record_surface(store: &Store, owner: &str) -> String {
     for relation in relations {
         let kind: String = relation.get("kind");
         let name: String = relation.get("relname");
-        let columns: String = relation.get("columns");
+        // Views are the read contract, so their columns are recorded; table columns are not exposed.
         if kind == "v" {
+            let columns: String = relation.get("columns");
             writeln!(surface, "\nview {name}({columns})").unwrap();
         } else {
-            writeln!(surface, "\ntable {name}({columns})").unwrap();
+            writeln!(surface, "\ntable {name}").unwrap();
         }
         writeln!(surface, "  grants: {}", normalize(relation.get("acl"), owner)).unwrap();
     }

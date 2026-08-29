@@ -413,8 +413,8 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
         Err(WorkerError::IncompatibleStorageProtocol {
             database_minimum: 3,
             database_maximum: 4,
-            worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
-            worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
+            worker_minimum: pgtask_worker::STORAGE_PROTOCOL_MIN_VERSION,
+            worker_maximum: pgtask_worker::STORAGE_PROTOCOL_MAX_VERSION,
         })
     ));
     sqlx::query(
@@ -858,6 +858,49 @@ async fn workers_publish_shared_queue_demand_samples() {
     shutdown.cancel();
     first_task.await.unwrap().unwrap();
     second_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn blocked_demand_sampling_does_not_delay_heartbeats_or_shutdown() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("blocked-demand-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("blocked-demand-task-{suffix}")).unwrap();
+    let mut config = WorkerConfig::new(queue_name.clone());
+    config.worker_heartbeat_interval = Duration::from_millis(20);
+    config.worker_ttl = Duration::from_millis(100);
+    let worker = Worker::new(store.clone(), successful_registry(&task_name), config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while store.live_worker_count(&queue_name).await.unwrap() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut queue_lock = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM pgtask.queues WHERE name = $1 FOR UPDATE")
+        .bind(queue_name.as_str())
+        .execute(&mut *queue_lock)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(store.live_worker_count(&queue_name).await.unwrap(), 1);
+
+    shutdown.cancel();
+    tokio::time::timeout(TEST_TIMEOUT, worker_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    queue_lock.rollback().await.unwrap();
 }
 
 #[tokio::test]
@@ -1425,8 +1468,8 @@ async fn worker_refuses_a_schema_before_the_demand_sampling_protocol() {
         Err(WorkerError::IncompatibleStorageProtocol {
             database_minimum: 1,
             database_maximum: 1,
-            worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
-            worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
+            worker_minimum: pgtask_worker::STORAGE_PROTOCOL_MIN_VERSION,
+            worker_maximum: pgtask_worker::STORAGE_PROTOCOL_MAX_VERSION,
         })
     ));
     sqlx::query(sqlx::AssertSqlSafe(format!(

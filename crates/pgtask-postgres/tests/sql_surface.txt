@@ -166,43 +166,43 @@ function wait_for_result(p_task_id uuid, p_attempt integer, p_lease_token uuid, 
 function wait_for_signal(p_task_id uuid, p_attempt integer, p_lease_token uuid, p_step_name text, p_occurrence integer, p_signal_name text, p_signal_occurrence integer, p_timeout_milliseconds bigint) -> TABLE(status text, checkpoint jsonb) VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
 
-table administrator_audit(id bigint, actor text, action text, task_id uuid, schedule_id uuid, occurred_at timestamp with time zone)
+table administrator_audit
   grants: {owner}=arwdDxtm/{owner}
 
-table attempts(task_id uuid, attempt integer, lease_token uuid, worker_id uuid, state text, started_at timestamp with time zone, finished_at timestamp with time zone, error jsonb)
+table attempts
   grants: {owner}=arwdDxtm/{owner}
 
-table checkpoints(task_id uuid, handler_version integer, step_name text, occurrence integer, value jsonb, created_at timestamp with time zone)
+table checkpoints
   grants: {owner}=arwdDxtm/{owner}
 
-table handler_policies(queue_name text, task_name text, handler_version integer, retry_kind text, retry_base_delay_milliseconds bigint, retry_factor integer, retry_max_delay_milliseconds bigint, created_at timestamp with time zone)
+table handler_policies
   grants: {owner}=arwdDxtm/{owner}
 
-table idempotency_keys(queue_name text, idempotency_key text, task_id uuid, created_at timestamp with time zone, expires_at timestamp with time zone)
+table idempotency_keys
   grants: {owner}=arwdDxtm/{owner}
 
-table queues(name text, terminal_retention_seconds bigint, paused_at timestamp with time zone, created_at timestamp with time zone, updated_at timestamp with time zone, idempotency_retention_seconds bigint, max_outstanding_tasks bigint, starvation_timeout_seconds bigint, capacity_outstanding_tasks bigint, demand_sampled_at timestamp with time zone, demand_live_workers bigint, demand_routable_tasks bigint, demand_unroutable_tasks bigint)
+table queues
   grants: {owner}=arwdDxtm/{owner}
 
-table result_waits(task_id uuid, handler_version integer, step_name text, occurrence integer, result_task_id uuid, created_at timestamp with time zone, resolved_at timestamp with time zone, outcome text, timeout_at timestamp with time zone)
+table result_waits
   grants: {owner}=arwdDxtm/{owner}
 
-table schedules(id uuid, name text, kind text, interval_milliseconds bigint, cron_expression text, misfire_policy text, catch_up_limit integer, queue_name text, task_name text, handler_version integer, payload jsonb, headers jsonb, priority smallint, max_attempts integer, next_run_at timestamp with time zone, paused_at timestamp with time zone, created_at timestamp with time zone, updated_at timestamp with time zone)
+table schedules
   grants: {owner}=arwdDxtm/{owner}
 
-table signals(task_id uuid, signal_name text, occurrence integer, value jsonb, created_at timestamp with time zone)
+table signals
   grants: {owner}=arwdDxtm/{owner}
 
-table tasks(id uuid, queue_name text, task_name text, handler_version integer, payload jsonb, headers jsonb, state text, priority smallint, run_at timestamp with time zone, attempt integer, max_attempts integer, lease_token uuid, lease_owner uuid, lease_expires_at timestamp with time zone, cancel_requested_at timestamp with time zone, idempotency_key text, created_at timestamp with time zone, updated_at timestamp with time zone, completed_at timestamp with time zone, result jsonb, error jsonb, schedule_id uuid, scheduled_for timestamp with time zone, parent_task_id uuid, retry_kind text, retry_base_delay_milliseconds bigint, retry_factor integer, retry_max_delay_milliseconds bigint)
+table tasks
   grants: {owner}=arwdDxtm/{owner}
 
-table waits(task_id uuid, handler_version integer, step_name text, occurrence integer, signal_name text, signal_occurrence integer, timeout_at timestamp with time zone, created_at timestamp with time zone, resolved_at timestamp with time zone, outcome text)
+table waits
   grants: {owner}=arwdDxtm/{owner}
 
-table worker_capabilities(worker_id uuid, task_name text, handler_version integer)
+table worker_capabilities
   grants: {owner}=arwdDxtm/{owner}
 
-table workers(id uuid, queue_name text, version text, draining boolean, started_at timestamp with time zone, heartbeat_at timestamp with time zone, expires_at timestamp with time zone)
+table workers
   grants: {owner}=arwdDxtm/{owner}
 
 view administrator_audit_view(id bigint, actor text, action text, task_id uuid, schedule_id uuid, occurred_at timestamp with time zone)

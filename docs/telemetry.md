@@ -82,13 +82,12 @@ Set `WorkerConfig.health_address` to serve `/livez` and `/readyz` from the dedic
 
 ## Worker liveness
 
-`pgtask.workers.live` counts the workers the database still considers live for a queue, and every
-worker reports it on its heartbeat tick.
+`pgtask.workers.live` counts the workers the database still considers live for a queue. Every worker reports the shared
+sample on its demand-sampling tick. The value has the same staleness bound as the queue-demand gauges.
 
-That is deliberately not the same as counting the processes reporting metrics. A worker whose
-heartbeat is failing keeps exporting everything else and stops being live, which is exactly the
-failure worth alerting on. Compare the two and a divergence means workers are running but the
-database cannot see them.
+That is deliberately not the same as counting the processes reporting metrics. A worker whose registration expires but
+can still query PostgreSQL publishes the lower live count. A complete database failure freezes the last sampled gauge,
+so alert on heartbeat errors rather than relying on the gauge alone during an outage.
 
 `pgtask.worker.heartbeats` counts attempts with a `pgtask.heartbeat.outcome` attribute of `ok`,
 `missing` when the registration has gone, or `error` when the call failed.
