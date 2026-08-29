@@ -220,6 +220,20 @@ func TestClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	batch, err := definition.EnqueueMany(
+		ctx,
+		client,
+		[]pgtask.EnqueueRequest[reportPayload]{
+			{Payload: reportPayload{ReportID: "batch-one"}},
+			{Payload: reportPayload{ReportID: "batch-two"}},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batch) != 2 || batch[0].ID == batch[1].ID {
+		t.Fatalf("unexpected batch handles: %#v", batch)
+	}
 	if pgtask.Task[reportResult](client, handle.ID).ID != handle.ID {
 		t.Fatal("task handle did not preserve the ID")
 	}
@@ -308,12 +322,24 @@ func TestClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rolledBackBatch, err := definition.EnqueueManyOn(
+		ctx,
+		transaction,
+		[]pgtask.EnqueueRequest[reportPayload]{{Payload: reportPayload{ReportID: "batch-rollback"}}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := transaction.Rollback(ctx); err != nil {
 		t.Fatal(err)
 	}
 	rolledBackResult, err := pgtask.Task[reportResult](client, rolledBack.TaskID).Inspect(ctx)
 	if err != nil || rolledBackResult != nil {
 		t.Fatalf("rolled-back task exists: %#v %v", rolledBackResult, err)
+	}
+	rolledBackBatchResult, err := pgtask.Task[reportResult](client, rolledBackBatch[0].TaskID).Inspect(ctx)
+	if err != nil || rolledBackBatchResult != nil {
+		t.Fatalf("rolled-back batch task exists: %#v %v", rolledBackBatchResult, err)
 	}
 
 	first, err := definition.EnqueueOn(

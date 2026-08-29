@@ -23,6 +23,8 @@ TaskHandler: TypeAlias = Callable[["Task", PayloadT], Awaitable[ResultT]]
 class TransactionCursor(Protocol):
     async def fetchone(self) -> tuple[str, bool] | None: ...
 
+    async def fetchall(self) -> list[tuple[str, bool]]: ...
+
 
 class TransactionConnection(Protocol):
     async def execute(self, query: str, params: tuple[Any, ...]) -> TransactionCursor: ...
@@ -271,6 +273,10 @@ class Client:
         task_id, _ = await self._enqueue(request)
         return TaskHandle(task_id, self)
 
+    async def enqueue_many(self, requests: Sequence[EnqueueRequest[ResultT]]) -> list[TaskHandle[ResultT]]:
+        results = await self._native.enqueue_many([_request_value(request) for request in requests])
+        return [TaskHandle(task_id, self) for task_id, _ in results]
+
     def task(self, task_id: str) -> TaskHandle[JSONValue]:
         return TaskHandle(task_id, self)
 
@@ -316,6 +322,23 @@ class Client:
         if row is None:
             raise RuntimeError("pgtask.enqueue returned no result")
         return row
+
+    @staticmethod
+    async def enqueue_many_on(
+        connection: TransactionConnection,
+        requests: Sequence[EnqueueRequest[Any]],
+    ) -> list[tuple[str, bool]]:
+        from psycopg.types.json import Jsonb
+
+        cursor = await connection.execute(
+            """
+            SELECT task_id::text, created
+            FROM pgtask.enqueue_many(%s)
+            ORDER BY request_index
+            """,
+            (Jsonb([_request_value(request) for request in requests]),),
+        )
+        return await cursor.fetchall()
 
 
 class Worker:

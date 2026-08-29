@@ -123,6 +123,14 @@ async def test_client_timeout_absence_signal_and_transactional_rollback() -> Non
     queue_name = f"python-client-{os.urandom(8).hex()}"
     request: EnqueueRequest[JSONValue] = EnqueueRequest("python.pending", {}, queue_name=queue_name)
     task = await client.enqueue(request)
+    batched: list[pgtask.TaskHandle[JSONValue]] = await client.enqueue_many(
+        [
+            EnqueueRequest("python.pending", {"batch": 1}, queue_name=queue_name),
+            EnqueueRequest("python.pending", {"batch": 2}, queue_name=queue_name),
+        ]
+    )
+    assert len(batched) == 2
+    assert batched[0].id != batched[1].id
     assert await task.result(timeout=0.001) is None
     assert await client.task("00000000-0000-0000-0000-000000000000").inspect() is None
     assert await task.signal("approval", {"approved": True}) == {"approved": True}
@@ -132,15 +140,25 @@ async def test_client_timeout_absence_signal_and_transactional_rollback() -> Non
         await connection.execute("BEGIN")
         rolled_back_id, created = await Client.enqueue_on(cast(TransactionConnection, connection), request)
         assert created
+        rolled_back_batch = await Client.enqueue_many_on(
+            cast(TransactionConnection, connection),
+            [EnqueueRequest("python.pending", {"batch": 3}, queue_name=queue_name)],
+        )
+        assert len(rolled_back_batch) == 1
+        assert rolled_back_batch[0][1]
         await connection.rollback()
     finally:
         await connection.close()
     assert await client.task_result(rolled_back_id) is None
+    assert await client.task_result(rolled_back_batch[0][0]) is None
 
 
 class EmptyCursor:
     async def fetchone(self) -> tuple[str, bool] | None:
         return None
+
+    async def fetchall(self) -> list[tuple[str, bool]]:
+        return []
 
 
 class EmptyConnection:
@@ -251,6 +269,7 @@ async def test_worker_rejects_an_empty_registry_and_invalid_handler_results() ->
 async def test_transactional_enqueue_rejects_an_empty_database_response() -> None:
     with pytest.raises(RuntimeError, match="returned no result"):
         await Client.enqueue_on(EmptyConnection(), EnqueueRequest("python.empty", {}))
+    assert await Client.enqueue_many_on(EmptyConnection(), []) == []
 
 
 @pytest.mark.anyio
