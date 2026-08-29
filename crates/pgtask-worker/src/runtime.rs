@@ -309,7 +309,7 @@ impl Worker {
         self.control.clone()
     }
 
-    pub async fn run(self, shutdown: CancellationToken) -> Result<(), WorkerError> {
+    async fn validate_storage_schema(&self) -> Result<(), WorkerError> {
         let database_protocol = self.store.storage_protocol_range().await?;
         if !database_protocol.overlaps(pgtask_core::STORAGE_PROTOCOL_RANGE) {
             return Err(WorkerError::IncompatibleStorageProtocol {
@@ -322,6 +322,11 @@ impl Worker {
         if !self.store.supports_demand_sampling().await? {
             return Err(WorkerError::OutdatedStorageSchema);
         }
+        Ok(())
+    }
+
+    pub async fn run(self, shutdown: CancellationToken) -> Result<(), WorkerError> {
+        self.validate_storage_schema().await?;
         let _supervisor = Supervisor::start(
             self.health.clone(),
             self.config.queues[0].clone(),
