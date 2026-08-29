@@ -71,6 +71,57 @@ cannot provide this session.
 Use `ConnectWithConfig` to set a separate `ListenerURL`, `MaxQueryConnections`, and `MaxListenerConnections`. The
 listener URL defaults to the query URL. Use a direct PostgreSQL endpoint or a PgBouncer session pool for listeners.
 
+## Enqueue a batch
+
+Use one database round trip when you already have several tasks:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/Kludex/pgtask/sdks/go"
+)
+
+type renderRequest struct {
+	ReportID string `json:"report_id"`
+}
+
+type renderResult struct {
+	Rendered string `json:"rendered"`
+}
+
+func main() {
+	ctx := context.Background()
+	render, err := pgtask.DefineTask[renderRequest, renderResult](
+		"reports.render",
+		pgtask.DefinitionOptions{QueueName: "reports"},
+	)
+	if err != nil {
+		panic(err)
+	}
+	client, err := pgtask.Connect(ctx, os.Getenv("PGTASK_DATABASE_URL"))
+	if err != nil {
+		panic(err)
+	}
+	defer client.Close()
+	tasks, err := render.EnqueueMany(ctx, client, []pgtask.EnqueueRequest[renderRequest]{
+		{Payload: renderRequest{ReportID: "report-123"}},
+		{Payload: renderRequest{ReportID: "report-456"}},
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(tasks[0].ID, tasks[1].ID)
+}
+```
+
+`EnqueueMany()` preserves request order. PostgreSQL accepts the complete batch in one transaction, so another session
+never sees a partial batch.
+
 ## Enqueue in a transaction
 
 Pass an existing transaction and the task commits with your application writes:
@@ -129,6 +180,8 @@ func saveAndEnqueue(ctx context.Context, pool *pgxpool.Pool) error {
 `EnqueueOn()` accepts a pgx pool, connection, or transaction. It does not open another connection or commit for you.
 Call `CheckStorageProtocol()` once when you build a low-level transactional producer. `Connect()` and normal client
 operations perform this check for you.
+
+Use `EnqueueManyOn()` to enqueue a batch through the same pool, connection, or transaction.
 
 ## OpenTelemetry
 

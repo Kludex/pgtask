@@ -8,6 +8,7 @@ use opentelemetry::{
 struct KernelMetrics {
     tasks: Counter<u64>,
     lease_renewals: Counter<u64>,
+    lease_recovery_failures: Counter<u64>,
     queue_latency: Histogram<f64>,
     execution_duration: Histogram<f64>,
     schedule_occurrences: Counter<u64>,
@@ -39,6 +40,10 @@ fn metrics() -> &'static KernelMetrics {
             lease_renewals: meter
                 .u64_counter("pgtask.lease.renewals")
                 .with_description("Lease renewal outcomes")
+                .build(),
+            lease_recovery_failures: meter
+                .u64_counter("pgtask.lease.recovery.failures")
+                .with_description("Failed expired-lease recovery batches")
                 .build(),
             queue_latency: meter
                 .f64_histogram("pgtask.queue.latency")
@@ -163,6 +168,12 @@ pub fn record_retried(queue_name: &str, task_name: &str) {
 
 pub fn record_recovered(queue_name: &str, count: u64) {
     record_task_transition("recovered", queue_name, None, count);
+}
+
+pub fn record_recovery_failure(queue_name: &str) {
+    metrics()
+        .lease_recovery_failures
+        .add(1, &[KeyValue::new("pgtask.queue.name", queue_name.to_owned())]);
 }
 
 pub fn record_lease_lost(queue_name: &str, task_name: &str) {

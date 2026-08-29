@@ -31,12 +31,15 @@ use crate::{
     registry::RegisteredHandler,
 };
 
+const MAX_RECOVERY_DRAIN_BATCHES: usize = 16;
+
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
     /// Ordered by priority: the worker drains earlier queues before claiming from later ones.
     pub queues: Vec<QueueName>,
     pub concurrency: NonZeroU16,
     pub claim_batch_size: NonZeroU16,
+    pub recovery_batch_size: NonZeroU16,
     pub lease_duration: Duration,
     pub poll_interval: Duration,
     pub shutdown_grace: Duration,
@@ -88,6 +91,7 @@ impl WorkerConfig {
             queues,
             concurrency: NonZeroU16::new(10).expect("10 is nonzero"),
             claim_batch_size: NonZeroU16::new(10).expect("10 is nonzero"),
+            recovery_batch_size: NonZeroU16::new(10).expect("10 is nonzero"),
             lease_duration: Duration::from_secs(30),
             poll_interval: Duration::from_secs(30),
             shutdown_grace: Duration::from_secs(30),
@@ -356,6 +360,7 @@ impl Worker {
             self.config.lease_duration,
             runtime_shutdown.clone(),
         );
+        let recovery = recover_expired_leases(self.store.clone(), &self.config, runtime_shutdown.clone());
         let listener = listen_for_ready(
             self.store.clone(),
             self.config.queues.clone(),
@@ -401,7 +406,8 @@ impl Worker {
             self.health.set_admission(false);
             result
         };
-        let ((), (), (), (), (), result) = tokio::join!(renewer, listener, scheduler, retention, heartbeat, handlers);
+        let ((), (), (), (), (), (), result) =
+            tokio::join!(renewer, recovery, listener, scheduler, retention, heartbeat, handlers);
         result
     }
 
@@ -506,19 +512,6 @@ impl Worker {
             effective_concurrency,
             active_handlers,
         );
-        for queue_name in &self.config.queues {
-            if let Err(error) = self
-                .store
-                .recover_expired(queue_name, self.config.claim_batch_size.get())
-                .await
-            {
-                self.health.set_database(false);
-                warn!(%error, "could not recover expired task leases");
-                wait_after_database_error(shutdown, wakeup).await;
-                return None;
-            }
-        }
-        self.health.set_database(true);
         let available = usize::from(effective_concurrency).saturating_sub(active_handlers);
         let limit = available.min(usize::from(self.config.claim_batch_size.get()));
         if limit == 0 {
@@ -770,6 +763,39 @@ async fn renew_leases(
                         health.record_lease_renewal(false);
                         warn!(%error, "could not renew active task leases");
                         cancel_uncertain_leases(&active, &leases, lease_duration).await;
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn recover_expired_leases(store: Store, config: &WorkerConfig, shutdown: CancellationToken) {
+    let mut interval = tokio::time::interval(config.lease_duration / 3);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            _ = interval.tick() => {
+                for queue_name in &config.queues {
+                    let limit = config.recovery_batch_size.get();
+                    for batch in 0..MAX_RECOVERY_DRAIN_BATCHES {
+                        let result = tokio::select! {
+                            () = shutdown.cancelled() => return,
+                            result = store.recover_expired(queue_name, limit) => result,
+                        };
+                        match result {
+                            Ok(recovered) if recovered < u64::from(limit) => break,
+                            Ok(_) if batch + 1 == MAX_RECOVERY_DRAIN_BATCHES => {
+                                warn!(%queue_name, "lease recovery drain reached its batch budget");
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                pgtask_otel::record_recovery_failure(queue_name.as_str());
+                                warn!(%error, %queue_name, "could not recover expired task leases");
+                                break;
+                            }
+                        }
                     }
                 }
             }

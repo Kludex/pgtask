@@ -50,6 +50,34 @@ PostgreSQL session multiplexes every result wait owned by the client. This order
 lost between subscription and inspection. A transaction-pooling proxy cannot provide this session. Pass
 `listenerConnectionString` when the query URL uses transaction pooling.
 
+## Enqueue a batch
+
+Use one database round trip when you already have several tasks:
+
+```typescript
+import { Client, defineTask } from "@pgtask/client";
+
+type RenderRequest = { reportId: string };
+type RenderResult = { rendered: string };
+
+const render = defineTask<RenderRequest, RenderResult>("reports.render", {
+  queueName: "reports",
+});
+const client = await Client.connect(process.env.PGTASK_DATABASE_URL!);
+try {
+  const tasks = await client.enqueueMany([
+    render.request({ reportId: "report-123" }),
+    render.request({ reportId: "report-456" }),
+  ]);
+  console.log(tasks.map((task) => task.id));
+} finally {
+  await client.close();
+}
+```
+
+`enqueueMany()` preserves request order. PostgreSQL accepts the complete batch in one transaction, so another session
+never sees a partial batch.
+
 ## Enqueue in a transaction
 
 Pass a `pg` client that is already inside a transaction:
@@ -89,6 +117,7 @@ try {
 
 `Client.enqueueOn()` uses the connection you pass. It does not open another connection or commit for you.
 It checks the storage protocol once for each executor. `Client.connect()` also checks compatibility before returning.
+Use `Client.enqueueManyOn(connection, requests)` to enqueue a batch in the same application transaction.
 
 ## OpenTelemetry
 
