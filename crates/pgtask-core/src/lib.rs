@@ -20,7 +20,7 @@ pub use task::{
 pub const STORAGE_PROTOCOL_MIN_VERSION: u32 = 1;
 
 /// Newest storage protocol understood by this release.
-pub const STORAGE_PROTOCOL_MAX_VERSION: u32 = 1;
+pub const STORAGE_PROTOCOL_MAX_VERSION: u32 = 2;
 
 /// Current storage protocol emitted by this release.
 pub const STORAGE_PROTOCOL_VERSION: u32 = STORAGE_PROTOCOL_MAX_VERSION;

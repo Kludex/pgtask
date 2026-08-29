@@ -24,8 +24,9 @@ The `pgtask` crate is the supported entry point. It exposes `core`, `postgres`, 
 
 The Rust contract includes:
 
-- Domain identifiers, task and schedule values, retry policy, and the `STORAGE_PROTOCOL_MIN_VERSION` and
-  `STORAGE_PROTOCOL_MAX_VERSION` compatibility bounds.
+- Domain identifiers, task and schedule values, retry policy, and storage protocol bounds. The `core` and `postgres`
+  bounds describe producers, including the Python client's exported constants. The `worker` bounds describe both Rust
+  and Python worker runtimes and can require a newer protocol.
 - `Store` construction, migrations, enqueueing, inspection, scheduling, signals, and administrative operations.
 - `HandlerRegistry`, `TaskContext`, `Worker`, `WorkerConfig`, `WorkerControl`, and their error types.
 - OpenTelemetry propagation and metric recording functions.

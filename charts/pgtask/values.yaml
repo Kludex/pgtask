@@ -102,6 +102,8 @@ workers:
       maxReplicas: 10
       targetCPUUtilizationPercentage: 70
       queueDemand:
+        # This queue-wide metric requires one Deployment to own the queue. Use a capability-aware
+        # external metric when Deployments with disjoint handlers share a queue.
         enabled: false
         metricName: pgtask_queue_ready_tasks
         targetAverageValue: "100"

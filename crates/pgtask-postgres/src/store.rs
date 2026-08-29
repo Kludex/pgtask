@@ -42,6 +42,8 @@ pub enum PostgresError {
     InvalidRetentionLimit,
     #[error("lease duration must be greater than zero")]
     InvalidLeaseDuration,
+    #[error("demand sample interval must be greater than zero")]
+    InvalidSampleInterval,
     #[error("at least one handler capability is required")]
     MissingCapabilities,
     #[error("at least one queue is required")]
@@ -203,6 +205,14 @@ pub enum TaskResultWait {
 pub struct QueueDemand {
     pub ready_tasks: u64,
     pub capable_tasks: u64,
+    pub unroutable_tasks: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueDemandSample {
+    pub sampled: bool,
+    pub live_workers: u64,
+    pub routable_tasks: u64,
     pub unroutable_tasks: u64,
 }
 
@@ -523,8 +533,29 @@ impl Store {
         Ok(updated)
     }
 
-    /// Counts workers the database still considers live, which is not the same as the number of
-    /// processes reporting metrics: a worker whose heartbeat fails keeps reporting and stops counting.
+    pub async fn sample_queue_demand(
+        &self,
+        queue_name: &QueueName,
+        sample_interval: Duration,
+    ) -> Result<QueueDemandSample, PostgresError> {
+        let sample_interval_milliseconds =
+            i64::try_from(sample_interval.as_millis()).map_err(|_| PostgresError::InvalidSampleInterval)?;
+        if sample_interval_milliseconds == 0 {
+            return Err(PostgresError::InvalidSampleInterval);
+        }
+        let row: QueueDemandSampleRow = sqlx::query_as("SELECT * FROM pgtask.sample_queue_demand($1, $2)")
+            .bind(queue_name.as_str())
+            .bind(sample_interval_milliseconds)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(QueueDemandSample {
+            sampled: row.sampled,
+            live_workers: u64::try_from(row.live_workers).map_err(invalid_number)?,
+            routable_tasks: u64::try_from(row.routable_tasks).map_err(invalid_number)?,
+            unroutable_tasks: u64::try_from(row.unroutable_tasks).map_err(invalid_number)?,
+        })
+    }
+
     pub async fn live_worker_count(&self, queue_name: &QueueName) -> Result<u64, PostgresError> {
         let count: i64 = sqlx::query_scalar("SELECT pgtask.live_worker_count($1)")
             .bind(queue_name.as_str())
@@ -1584,6 +1615,14 @@ struct QueueDemandRow {
     capable: i64,
     #[sqlx(rename = "unroutable_tasks")]
     unroutable: i64,
+}
+
+#[derive(FromRow)]
+struct QueueDemandSampleRow {
+    sampled: bool,
+    live_workers: i64,
+    routable_tasks: i64,
+    unroutable_tasks: i64,
 }
 
 #[derive(FromRow)]

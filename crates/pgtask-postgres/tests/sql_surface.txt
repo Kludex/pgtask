@@ -133,6 +133,9 @@ function resolve_task_result() -> trigger VOLATILE SECURITY DEFINER SET search_p
 function result_channel(p_task_id uuid) -> text IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_producer=X/{owner}, {owner}=X/{owner}
 
+function sample_queue_demand(p_queue_name text, p_sample_interval_milliseconds bigint) -> TABLE(sampled boolean, live_workers bigint, routable_tasks bigint, unroutable_tasks bigint) VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask lock_timeout=100ms
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
 function set_queue_paused(p_name text, p_paused boolean) -> SETOF pgtask.queues VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: pgtask_surface_administrator=X/{owner}, {owner}=X/{owner}
 

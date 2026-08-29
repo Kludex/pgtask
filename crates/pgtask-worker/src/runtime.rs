@@ -120,7 +120,7 @@ pub enum WorkerError {
     InvalidLeaseDuration,
     #[error("poll interval must be greater than zero")]
     InvalidPollInterval,
-    #[error("worker heartbeat interval must be nonzero and shorter than its time to live")]
+    #[error("worker heartbeat interval must be at least one millisecond and shorter than its time to live")]
     InvalidWorkerHeartbeat,
     #[error("schedule reconciliation interval must be greater than zero")]
     InvalidScheduleReconciliationInterval,
@@ -233,7 +233,6 @@ struct ActiveLease {
 struct HeartbeatConfig {
     worker_id: WorkerId,
     queue_name: QueueName,
-    capabilities: Vec<(TaskName, HandlerVersion)>,
     interval: Duration,
     ttl: Duration,
 }
@@ -246,7 +245,9 @@ impl Worker {
         if config.poll_interval.is_zero() {
             return Err(WorkerError::InvalidPollInterval);
         }
-        if config.worker_heartbeat_interval.is_zero() || config.worker_heartbeat_interval >= config.worker_ttl {
+        if config.worker_heartbeat_interval < Duration::from_millis(1)
+            || config.worker_heartbeat_interval >= config.worker_ttl
+        {
             return Err(WorkerError::InvalidWorkerHeartbeat);
         }
         if config.schedule_reconciliation_interval.is_zero() {
@@ -304,16 +305,21 @@ impl Worker {
         self.control.clone()
     }
 
-    pub async fn run(self, shutdown: CancellationToken) -> Result<(), WorkerError> {
+    async fn validate_storage_schema(&self) -> Result<(), WorkerError> {
         let database_protocol = self.store.storage_protocol_range().await?;
-        if !database_protocol.overlaps(pgtask_core::STORAGE_PROTOCOL_RANGE) {
+        if !database_protocol.overlaps(crate::STORAGE_PROTOCOL_RANGE) {
             return Err(WorkerError::IncompatibleStorageProtocol {
                 database_minimum: database_protocol.minimum,
                 database_maximum: database_protocol.maximum,
-                worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
-                worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
+                worker_minimum: crate::STORAGE_PROTOCOL_MIN_VERSION,
+                worker_maximum: crate::STORAGE_PROTOCOL_MAX_VERSION,
             });
         }
+        Ok(())
+    }
+
+    pub async fn run(self, shutdown: CancellationToken) -> Result<(), WorkerError> {
+        self.validate_storage_schema().await?;
         let _supervisor = Supervisor::start(
             self.health.clone(),
             self.config.queues[0].clone(),
@@ -328,7 +334,6 @@ impl Worker {
         let task_wakeup = Arc::new(Notify::new());
         let schedule_wakeup = Arc::new(Notify::new());
         let runtime_shutdown = CancellationToken::new();
-        let capabilities = self.registry.capabilities();
         let registrations = self.registry.registrations();
         let ready_listener = self.store.ready_listener_for(&self.config.queues).await?;
         self.health.set_listener(true);
@@ -385,12 +390,17 @@ impl Worker {
             HeartbeatConfig {
                 worker_id: self.id,
                 queue_name: self.config.queues[0].clone(),
-                capabilities: capabilities.clone(),
                 interval: self.config.worker_heartbeat_interval,
                 ttl: self.config.worker_ttl,
             },
             runtime_shutdown.clone(),
             self.health.clone(),
+        );
+        let sampler = sample_queue_demand(
+            self.store.clone(),
+            self.config.queues[0].clone(),
+            self.config.worker_heartbeat_interval,
+            runtime_shutdown.clone(),
         );
         let handlers = async {
             let result = self
@@ -400,8 +410,9 @@ impl Worker {
             self.health.set_admission(false);
             result
         };
-        let ((), (), (), (), (), (), result) =
-            tokio::join!(renewer, recovery, listener, scheduler, retention, heartbeat, handlers);
+        let ((), (), (), (), (), (), (), result) = tokio::join!(
+            renewer, recovery, listener, scheduler, retention, heartbeat, sampler, handlers
+        );
         result
     }
 
@@ -998,19 +1009,38 @@ async fn heartbeat_worker(store: Store, config: HeartbeatConfig, shutdown: Cance
                         warn!(%error, "could not update worker heartbeat");
                     }
                 }
-                match store.live_worker_count(&config.queue_name).await {
-                    Ok(live) => pgtask_otel::record_live_workers(config.queue_name.as_str(), live),
-                    Err(error) => warn!(%error, "could not read the live worker count"),
-                }
-                match store.queue_demand(&config.queue_name, &config.capabilities).await {
-                    Ok(demand) => pgtask_otel::record_queue_demand(
-                        config.queue_name.as_str(),
-                        demand.capable_tasks,
-                        demand.unroutable_tasks,
-                    ),
+            }
+        }
+    }
+}
+
+async fn sample_queue_demand(
+    store: Store,
+    queue_name: QueueName,
+    sample_interval: Duration,
+    shutdown: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(sample_interval);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            _ = interval.tick() => {
+                let sample = tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    sample = store.sample_queue_demand(&queue_name, sample_interval) => sample,
+                };
+                match sample {
+                    Ok(sample) => {
+                        pgtask_otel::record_live_workers(queue_name.as_str(), sample.live_workers);
+                        pgtask_otel::record_queue_demand(
+                            queue_name.as_str(),
+                            sample.routable_tasks,
+                            sample.unroutable_tasks,
+                        );
+                    }
                     Err(error) => {
-                        health.set_database(false);
-                        warn!(%error, "could not read queue demand");
+                        warn!(%error, "could not sample queue demand");
                     }
                 }
             }

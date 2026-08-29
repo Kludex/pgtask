@@ -13,11 +13,12 @@ PGTASK_DATABASE_URL=postgresql://pgtask_owner:secret@postgres/pgtask pgtask migr
 
 ## When the protocol changes
 
-The storage protocol changes **only** when a worker cannot safely share the schema with the previous protocol.
+The storage protocol changes when an old client cannot safely use the new schema or a new client requires a shape the old
+schema does not provide.
 
-Additive tables, columns, indexes, views, and functions do not require a protocol change, because an old worker can
-ignore them. Reserve the protocol bump for changes that would make an old worker behave incorrectly rather than merely
-miss a feature.
+Additive tables, columns, indexes, views, and functions do not require a protocol change when new clients can run without
+them. Raise the new client's minimum when it requires an additive shape, while the database keeps advertising the old
+protocol during the rollout.
 
 Check compatibility with the range. Do not compare `pgtask.storage_protocol_version()` for equality - that is the
 current identifier, useful for reporting, not a compatibility test.

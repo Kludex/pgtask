@@ -315,7 +315,7 @@ async fn worker_configuration_rejects_every_invalid_invariant() {
         Err(WorkerError::InvalidPollInterval)
     ));
 
-    for heartbeat in [Duration::ZERO, Duration::from_secs(30)] {
+    for heartbeat in [Duration::ZERO, Duration::from_micros(500), Duration::from_secs(30)] {
         let mut config = WorkerConfig::new(queue_name.clone());
         config.worker_heartbeat_interval = heartbeat;
         assert!(matches!(
@@ -389,7 +389,7 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
         RETURNS TABLE(minimum integer, maximum integer)
         LANGUAGE sql
         IMMUTABLE
-        AS $$ SELECT 2, 3 $$
+        AS $$ SELECT 3, 4 $$
         ",
     )
     .execute(store.pool())
@@ -398,8 +398,8 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
     assert!(matches!(
         store.ensure_storage_protocol(pgtask_core::STORAGE_PROTOCOL_RANGE).await,
         Err(PostgresError::IncompatibleStorageProtocol {
-            database_minimum: 2,
-            database_maximum: 3,
+            database_minimum: 3,
+            database_maximum: 4,
             client_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
             client_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
         })
@@ -411,10 +411,10 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
     assert!(matches!(
         worker.run(CancellationToken::new()).await,
         Err(WorkerError::IncompatibleStorageProtocol {
-            database_minimum: 2,
-            database_maximum: 3,
-            worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
-            worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
+            database_minimum: 3,
+            database_maximum: 4,
+            worker_minimum: pgtask_worker::STORAGE_PROTOCOL_MIN_VERSION,
+            worker_maximum: pgtask_worker::STORAGE_PROTOCOL_MAX_VERSION,
         })
     ));
     sqlx::query(
@@ -809,6 +809,98 @@ async fn another_worker_recovers_a_task_after_runtime_termination() {
 
     shutdown.cancel();
     second_worker_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn workers_publish_shared_queue_demand_samples() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("shared-demand-{suffix}")).unwrap();
+    let supported_name = TaskName::new(format!("shared-demand-supported-{suffix}")).unwrap();
+    let missing_name = TaskName::new(format!("shared-demand-missing-{suffix}")).unwrap();
+    let mut request = EnqueueRequest::new(missing_name, json!({}));
+    request.queue_name = queue_name.clone();
+    store.enqueue(&request).await.unwrap();
+    let mut config = WorkerConfig::new(queue_name.clone());
+    config.worker_heartbeat_interval = Duration::from_millis(50);
+    config.worker_ttl = Duration::from_secs(1);
+    let first = Worker::new(store.clone(), successful_registry(&supported_name), config.clone()).unwrap();
+    let second = Worker::new(store.clone(), successful_registry(&supported_name), config).unwrap();
+    let shutdown = CancellationToken::new();
+    let first_shutdown = shutdown.clone();
+    let second_shutdown = shutdown.clone();
+    let first_task = tokio::spawn(async move { first.run(first_shutdown).await });
+    let second_task = tokio::spawn(async move { second.run(second_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let sample: (bool, i64, i64, i64) = sqlx::query_as(
+                "SELECT demand_sampled_at IS NOT NULL, demand_live_workers, \
+                    demand_routable_tasks, demand_unroutable_tasks \
+                 FROM pgtask.queues WHERE name = $1",
+            )
+            .bind(queue_name.as_str())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            if sample == (true, 2, 0, 1) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.cancel();
+    first_task.await.unwrap().unwrap();
+    second_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn blocked_demand_sampling_does_not_delay_heartbeats_or_shutdown() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("blocked-demand-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("blocked-demand-task-{suffix}")).unwrap();
+    let mut config = WorkerConfig::new(queue_name.clone());
+    config.worker_heartbeat_interval = Duration::from_millis(20);
+    config.worker_ttl = Duration::from_millis(100);
+    let worker = Worker::new(store.clone(), successful_registry(&task_name), config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while store.live_worker_count(&queue_name).await.unwrap() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut queue_lock = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM pgtask.queues WHERE name = $1 FOR UPDATE")
+        .bind(queue_name.as_str())
+        .execute(&mut *queue_lock)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(store.live_worker_count(&queue_name).await.unwrap(), 1);
+
+    shutdown.cancel();
+    tokio::time::timeout(TEST_TIMEOUT, worker_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    queue_lock.rollback().await.unwrap();
 }
 
 #[tokio::test]
@@ -1296,6 +1388,7 @@ async fn worker_recovers_from_revoked_database_protocols() {
         "REVOKE EXECUTE ON FUNCTION \
          pgtask.renew_leases(uuid[], integer[], uuid[], bigint), \
          pgtask.heartbeat_worker(uuid, bigint, boolean), \
+         pgtask.sample_queue_demand(text, bigint), \
          pgtask.claim_due_schedules(integer), \
          pgtask.recover_wait_timeouts(integer) FROM {}",
         fixture.role
@@ -1337,6 +1430,54 @@ async fn worker_recovers_from_revoked_database_protocols() {
     .await
     .unwrap();
     fixture.stop().await;
+}
+
+#[tokio::test]
+async fn worker_refuses_a_schema_before_the_demand_sampling_protocol() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let database_name = format!("pgtask_outdated_{}", Uuid::new_v4().simple());
+    let options = PgConnectOptions::from_str(&database_url).unwrap();
+    let maintenance = PgPool::connect_with(options.clone().database("postgres"))
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database_name}")))
+        .execute(&maintenance)
+        .await
+        .unwrap();
+    let store = Store::from_pool(PgPool::connect_with(options.database(&database_name)).await.unwrap());
+    store.migrate().await.unwrap();
+    sqlx::query(
+        r"
+        CREATE OR REPLACE FUNCTION pgtask.storage_protocol_range()
+        RETURNS TABLE(minimum integer, maximum integer)
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$ SELECT 1, 1 $$
+        ",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let queue_name = QueueName::new(format!("outdated-{}", Uuid::new_v4())).unwrap();
+    let task_name = TaskName::new("outdated-task").unwrap();
+    let worker = Worker::new(store, successful_registry(&task_name), WorkerConfig::new(queue_name)).unwrap();
+    assert!(matches!(
+        worker.run(CancellationToken::new()).await,
+        Err(WorkerError::IncompatibleStorageProtocol {
+            database_minimum: 1,
+            database_maximum: 1,
+            worker_minimum: pgtask_worker::STORAGE_PROTOCOL_MIN_VERSION,
+            worker_maximum: pgtask_worker::STORAGE_PROTOCOL_MAX_VERSION,
+        })
+    ));
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE {database_name} WITH (FORCE)"
+    )))
+    .execute(&maintenance)
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
