@@ -88,7 +88,7 @@ crates/
   pgtask-web         Optional UI service
 ```
 
-The worker runtime has separate supervised loops for claims, batched lease renewal, worker heartbeats, schedule materialization, notification listening, retention, and graceful shutdown. A handler is an async Rust function registered under an explicit stable name and version.
+The worker runtime has separate supervised loops for claims, expired-lease recovery, batched lease renewal, worker heartbeats, schedule materialization, notification listening, retention, and graceful shutdown. Claim and recovery batches are sized independently. A handler is an async Rust function registered under an explicit stable name and version.
 
 ### Language SDKs
 

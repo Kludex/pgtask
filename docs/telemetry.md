@@ -33,6 +33,7 @@ Trace context is stored in the task `headers` JSON object. Existing application 
 | --- | --- | --- |
 | `pgtask.tasks` | Counter | Tasks |
 | `pgtask.lease.renewals` | Counter | Renewals |
+| `pgtask.lease.recovery.failures` | Counter | Failures |
 | `pgtask.queue.latency` | Histogram | Seconds |
 | `pgtask.execution.duration` | Histogram | Seconds |
 | `pgtask.schedule.occurrences` | Counter | Tasks |
