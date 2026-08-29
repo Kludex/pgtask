@@ -60,8 +60,9 @@ async def run(database_url: str) -> None:
     assert result is not None
 ```
 
-The supported imports are `Client`, `EnqueueRequest`, `JSONValue`, `Task`, `TaskDefinition`, `TaskHandle`, `TaskHandler`,
-`TaskRegistry`, `TaskResult`, `TaskState`, `TransactionConnection`, `Worker`, and `get_current_task`. `pgtask._native` is
+The supported imports are `BatchTransactionConnection`, `Client`, `EnqueueRequest`, `JSONValue`, `Task`, `TaskDefinition`,
+`TaskHandle`, `TaskHandler`, `TaskRegistry`, `TaskResult`, `TaskState`, `TransactionConnection`, `Worker`, and
+`get_current_task`. `pgtask._native` is
 private. `Client.enqueue_many()` and `Client.enqueue_many_on()` preserve request order and commit a batch atomically.
 
 Task registration is explicit. A registry owns one queue. A definition owns the stable task name, handler version, payload type, result type, and retry policy. There is no global discovery or ARQ compatibility API.

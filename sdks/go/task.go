@@ -11,7 +11,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-var namePattern = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
+var (
+	namePattern           = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
+	errInvalidBatchResult = errors.New("pgtask.enqueue_many returned an invalid result set")
+)
 
 // DefinitionOptions configures every request made from a task definition.
 type DefinitionOptions struct {
@@ -185,7 +188,7 @@ func (definition TaskDefinition[Payload, Result]) EnqueueManyOn(
 			return nil, fmt.Errorf("read enqueue result: %w", err)
 		}
 		if requestIndex != len(results) {
-			return nil, errors.New("pgtask.enqueue_many returned results out of order")
+			return nil, errInvalidBatchResult
 		}
 		results = append(results, result)
 	}
@@ -193,7 +196,7 @@ func (definition TaskDefinition[Payload, Result]) EnqueueManyOn(
 		return nil, fmt.Errorf("read enqueue results: %w", err)
 	}
 	if len(results) != len(requests) {
-		return nil, errors.New("pgtask.enqueue_many returned an incomplete result set")
+		return nil, errInvalidBatchResult
 	}
 	return results, nil
 }

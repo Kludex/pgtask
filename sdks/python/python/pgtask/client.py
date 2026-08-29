@@ -23,11 +23,17 @@ TaskHandler: TypeAlias = Callable[["Task", PayloadT], Awaitable[ResultT]]
 class TransactionCursor(Protocol):
     async def fetchone(self) -> tuple[str, bool] | None: ...
 
-    async def fetchall(self) -> list[tuple[str, bool]]: ...
-
 
 class TransactionConnection(Protocol):
     async def execute(self, query: str, params: tuple[Any, ...]) -> TransactionCursor: ...
+
+
+class BatchTransactionCursor(Protocol):
+    async def fetchall(self) -> list[tuple[int, str, bool]]: ...
+
+
+class BatchTransactionConnection(Protocol):
+    async def execute(self, query: str, params: tuple[Any, ...]) -> BatchTransactionCursor: ...
 
 
 @dataclass(frozen=True)
@@ -325,20 +331,25 @@ class Client:
 
     @staticmethod
     async def enqueue_many_on(
-        connection: TransactionConnection,
+        connection: BatchTransactionConnection,
         requests: Sequence[EnqueueRequest[Any]],
     ) -> list[tuple[str, bool]]:
         from psycopg.types.json import Jsonb
 
         cursor = await connection.execute(
             """
-            SELECT task_id::text, created
+            SELECT request_index, task_id::text, created
             FROM pgtask.enqueue_many(%s)
             ORDER BY request_index
             """,
             (Jsonb([_request_value(request) for request in requests]),),
         )
-        return await cursor.fetchall()
+        rows = await cursor.fetchall()
+        if len(rows) != len(requests) or any(
+            request_index != index for index, (request_index, _, _) in enumerate(rows)
+        ):
+            raise RuntimeError("pgtask.enqueue_many returned an invalid result set")
+        return [(task_id, created) for _, task_id, created in rows]
 
 
 class Worker:

@@ -107,12 +107,18 @@ test("client operations use PostgreSQL transactions, notifications, and trace pr
     { idempotencyKey: randomUUID(), headers: { source: "typescript", structured: { value: 1 } } },
   );
   const handle = await client.enqueue(request);
-  const batch = await client.enqueueMany([
-    definition.request({ reportId: "batch-one" }),
-    definition.request({ reportId: "batch-two" }),
-  ]);
-  assert.equal(batch.length, 2);
-  assert.notEqual(batch[0]!.id, batch[1]!.id);
+  const batchRequests = [
+    definition.request({ reportId: "batch-one" }, { idempotencyKey: randomUUID() }),
+    definition.request({ reportId: "batch-two" }, { idempotencyKey: randomUUID() }),
+  ];
+  const expectedBatch = await Promise.all(
+    batchRequests.map((batchRequest) => client.enqueue(batchRequest)),
+  );
+  const batch = await client.enqueueMany(batchRequests);
+  assert.deepEqual(
+    batch.map((batchHandle) => batchHandle.id),
+    expectedBatch.map((batchHandle) => batchHandle.id),
+  );
   assert.equal(client.task<RenderResult>(handle.id).id, handle.id);
   const pending = await handle.inspect();
   assert.equal(pending?.state, "pending");
@@ -150,7 +156,7 @@ test("client operations use PostgreSQL transactions, notifications, and trace pr
 
   const transaction = await pool.connect();
   let rolledBackId: string;
-  let rolledBackBatchId: string;
+  let rolledBackBatchIds: string[];
   try {
     await transaction.query("BEGIN");
     const first = await Client.enqueueOn(
@@ -160,16 +166,22 @@ test("client operations use PostgreSQL transactions, notifications, and trace pr
     rolledBackId = first.taskId;
     assert.equal(first.created, true);
     const batched = await Client.enqueueManyOn(transaction, [
-      definition.request({ reportId: "rolled-back-batch" }),
+      definition.request({ reportId: "rolled-back-batch-one" }),
+      definition.request({ reportId: "rolled-back-batch-two" }),
     ]);
-    rolledBackBatchId = batched[0]!.taskId;
-    assert.equal(batched[0]!.created, true);
+    rolledBackBatchIds = batched.map((result) => result.taskId);
+    assert.equal(
+      batched.every((result) => result.created),
+      true,
+    );
     await transaction.query("ROLLBACK");
   } finally {
     transaction.release();
   }
   assert.equal(await client.taskResult(rolledBackId), null);
-  assert.equal(await client.taskResult(rolledBackBatchId), null);
+  for (const taskId of rolledBackBatchIds) {
+    assert.equal(await client.taskResult(taskId), null);
+  }
 
   const idempotencyKey = randomUUID();
   const first = await Client.enqueueOn(
