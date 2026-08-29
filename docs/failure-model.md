@@ -52,7 +52,10 @@ The runtime records a structured failure for the active attempt and applies the 
 
 ### Runtime termination
 
-No completion is written. Automatic renewal stops. Another worker may claim the task after lease expiry and create a new attempt.
+No completion is written. Automatic renewal stops. Another worker returns the task to pending after lease expiry, or
+marks it failed when no attempts remain. A pending task can then be claimed with a new attempt.
+
+Lease recovery runs independently from claiming. A failed recovery pass leaves expired leases for a later pass and does not block claims.
 
 ### Unknown handler
 

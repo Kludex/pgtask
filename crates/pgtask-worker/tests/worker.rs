@@ -12,7 +12,7 @@ use std::{
 use chrono::{TimeDelta, Utc};
 use pgtask_core::{
     EnqueueRequest, HandlerVersion, QueueConfig, QueueName, RetryPolicy, ScheduleConfig, ScheduleDefinition,
-    ScheduleName, SignalName, StepName, TaskId, TaskName, TaskState,
+    ScheduleName, SignalName, StepName, TaskId, TaskName, TaskState, WorkerId,
 };
 use pgtask_postgres::{PostgresError, Store};
 use pgtask_worker::{HandlerError, HandlerRegistry, Worker, WorkerConfig, WorkerError};
@@ -159,6 +159,15 @@ fn successful_registry(task_name: &TaskName) -> HandlerRegistry {
         |_| async move { Ok(json!(null)) },
     );
     registry
+}
+
+async fn tasks_are_in_state(store: &Store, task_ids: &[TaskId], state: TaskState) -> bool {
+    for task_id in task_ids {
+        if store.get_task(*task_id).await.unwrap().unwrap().state != state {
+            return false;
+        }
+    }
+    true
 }
 
 async fn complete_ready_child(store: &Store, queue_name: &QueueName, task_name: &TaskName) -> Result<(), HandlerError> {
@@ -385,7 +394,7 @@ async fn worker_configuration_rejects_every_invalid_invariant() {
         Err(WorkerError::InvalidPollInterval)
     ));
 
-    for heartbeat in [Duration::ZERO, Duration::from_secs(30)] {
+    for heartbeat in [Duration::ZERO, Duration::from_micros(500), Duration::from_secs(30)] {
         let mut config = WorkerConfig::new(queue_name.clone());
         config.worker_heartbeat_interval = heartbeat;
         assert!(matches!(
@@ -459,7 +468,7 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
         RETURNS TABLE(minimum integer, maximum integer)
         LANGUAGE sql
         IMMUTABLE
-        AS $$ SELECT 2, 3 $$
+        AS $$ SELECT 3, 4 $$
         ",
     )
     .execute(store.pool())
@@ -468,8 +477,8 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
     assert!(matches!(
         store.ensure_storage_protocol(pgtask_core::STORAGE_PROTOCOL_RANGE).await,
         Err(PostgresError::IncompatibleStorageProtocol {
-            database_minimum: 2,
-            database_maximum: 3,
+            database_minimum: 3,
+            database_maximum: 4,
             client_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
             client_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
         })
@@ -481,10 +490,10 @@ async fn worker_rejects_an_incompatible_storage_protocol() {
     assert!(matches!(
         worker.run(CancellationToken::new()).await,
         Err(WorkerError::IncompatibleStorageProtocol {
-            database_minimum: 2,
-            database_maximum: 3,
-            worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
-            worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
+            database_minimum: 3,
+            database_maximum: 4,
+            worker_minimum: pgtask_worker::STORAGE_PROTOCOL_MIN_VERSION,
+            worker_maximum: pgtask_worker::STORAGE_PROTOCOL_MAX_VERSION,
         })
     ));
     sqlx::query(
@@ -954,6 +963,198 @@ async fn another_worker_recovers_a_task_after_runtime_termination() {
 }
 
 #[tokio::test]
+async fn workers_publish_shared_queue_demand_samples() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("shared-demand-{suffix}")).unwrap();
+    let supported_name = TaskName::new(format!("shared-demand-supported-{suffix}")).unwrap();
+    let missing_name = TaskName::new(format!("shared-demand-missing-{suffix}")).unwrap();
+    let mut request = EnqueueRequest::new(missing_name, json!({}));
+    request.queue_name = queue_name.clone();
+    store.enqueue(&request).await.unwrap();
+    let mut config = WorkerConfig::new(queue_name.clone());
+    config.worker_heartbeat_interval = Duration::from_millis(50);
+    config.worker_ttl = Duration::from_secs(1);
+    let first = Worker::new(store.clone(), successful_registry(&supported_name), config.clone()).unwrap();
+    let second = Worker::new(store.clone(), successful_registry(&supported_name), config).unwrap();
+    let shutdown = CancellationToken::new();
+    let first_shutdown = shutdown.clone();
+    let second_shutdown = shutdown.clone();
+    let first_task = tokio::spawn(async move { first.run(first_shutdown).await });
+    let second_task = tokio::spawn(async move { second.run(second_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let sample: (bool, i64, i64, i64) = sqlx::query_as(
+                "SELECT demand_sampled_at IS NOT NULL, demand_live_workers, \
+                    demand_routable_tasks, demand_unroutable_tasks \
+                 FROM pgtask.queues WHERE name = $1",
+            )
+            .bind(queue_name.as_str())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+            if sample == (true, 2, 0, 1) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.cancel();
+    first_task.await.unwrap().unwrap();
+    second_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn blocked_demand_sampling_does_not_delay_heartbeats_or_shutdown() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("blocked-demand-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("blocked-demand-task-{suffix}")).unwrap();
+    let mut config = WorkerConfig::new(queue_name.clone());
+    config.worker_heartbeat_interval = Duration::from_millis(20);
+    config.worker_ttl = Duration::from_millis(100);
+    let worker = Worker::new(store.clone(), successful_registry(&task_name), config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while store.live_worker_count(&queue_name).await.unwrap() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut queue_lock = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT 1 FROM pgtask.queues WHERE name = $1 FOR UPDATE")
+        .bind(queue_name.as_str())
+        .execute(&mut *queue_lock)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(store.live_worker_count(&queue_name).await.unwrap(), 1);
+
+    shutdown.cancel();
+    tokio::time::timeout(TEST_TIMEOUT, worker_task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    queue_lock.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn saturated_worker_recovers_expired_leases_across_queues() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let first_queue = QueueName::new(format!("recovery-first-{suffix}")).unwrap();
+    let second_queue = QueueName::new(format!("recovery-second-{suffix}")).unwrap();
+    let blocker_name = TaskName::new(format!("recovery-blocker-{suffix}")).unwrap();
+    let recovered_name = TaskName::new(format!("recovery-task-{suffix}")).unwrap();
+    let mut blocker = EnqueueRequest::new(blocker_name.clone(), json!({}));
+    blocker.queue_name = first_queue.clone();
+    blocker.priority = i16::MAX;
+    let blocker_id = store.enqueue(&blocker).await.unwrap().task_id;
+    let mut recovered_ids = Vec::new();
+    for queue_name in [&first_queue, &second_queue] {
+        for sequence in 0..16 {
+            let mut request = EnqueueRequest::new(recovered_name.clone(), json!({"sequence": sequence}));
+            request.queue_name = queue_name.clone();
+            recovered_ids.push(store.enqueue(&request).await.unwrap().task_id);
+        }
+        let claimed = store
+            .claim(
+                queue_name,
+                WorkerId::new(),
+                &[(recovered_name.clone(), HandlerVersion::default())],
+                16,
+                Duration::from_millis(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 16);
+    }
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Semaphore::new(0));
+    let mut registry = HandlerRegistry::new();
+    registry.register(blocker_name, HandlerVersion::default(), RetryPolicy::Never, {
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        move |_| {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            async move {
+                started.notify_one();
+                release.acquire().await.unwrap().forget();
+                Ok(json!({"released": true}))
+            }
+        }
+    });
+    registry.register(
+        recovered_name,
+        HandlerVersion::default(),
+        RetryPolicy::Never,
+        |_| async move { Ok(json!({"recovered": true})) },
+    );
+    let mut config = WorkerConfig::with_queues(vec![first_queue, second_queue]);
+    config.concurrency = NonZeroU16::MIN;
+    config.claim_batch_size = NonZeroU16::MIN;
+    config.recovery_batch_size = NonZeroU16::MIN;
+    config.lease_duration = Duration::from_mins(1);
+    let worker = Worker::new(store.clone(), registry, config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, started.notified()).await.unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            if tasks_are_in_state(&store, &recovered_ids, TaskState::Pending).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        store.get_task(blocker_id).await.unwrap().unwrap().state,
+        TaskState::Running
+    );
+
+    release.add_permits(1);
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            if tasks_are_in_state(&store, &recovered_ids, TaskState::Succeeded).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.cancel();
+    worker_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn queue_runtimes_have_independent_concurrency() {
     let Some(database_url) = database_url() else {
         return;
@@ -1250,6 +1451,72 @@ async fn supervisor_binding_failure_is_reported() {
 }
 
 #[tokio::test]
+async fn worker_claims_tasks_when_lease_recovery_is_unavailable() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let _guard = database_fault_guard().await;
+    let admin = Store::connect(&database_url).await.unwrap();
+    admin.migrate().await.unwrap();
+    let suffix = Uuid::new_v4().simple();
+    let role = format!("pgtask_recovery_fault_{suffix}");
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "CREATE ROLE {role} LOGIN PASSWORD 'fault-test'"
+    )))
+    .execute(admin.pool())
+    .await
+    .unwrap();
+    let owner: String = sqlx::query_scalar("SELECT current_user")
+        .fetch_one(admin.pool())
+        .await
+        .unwrap();
+    admin
+        .configure_grants(&owner, &role, &role, &role, &role)
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "REVOKE EXECUTE ON FUNCTION pgtask.recover_expired(text, integer) FROM {role}"
+    )))
+    .execute(admin.pool())
+    .await
+    .unwrap();
+
+    let options = PgConnectOptions::from_str(&database_url)
+        .unwrap()
+        .username(&role)
+        .password("fault-test")
+        .application_name(&role);
+    let worker_store = Store::from_pool(PgPool::connect_with(options).await.unwrap());
+    let queue_name = QueueName::new(format!("recovery-fault-{suffix}")).unwrap();
+    assert!(worker_store.recover_expired(&queue_name, 1).await.is_err());
+    let task_name = TaskName::new(format!("recovery-fault-task-{suffix}")).unwrap();
+    let mut request = EnqueueRequest::new(task_name.clone(), json!(null));
+    request.queue_name = queue_name.clone();
+    let task_id = admin.enqueue(&request).await.unwrap().task_id;
+    let mut config = WorkerConfig::new(queue_name);
+    config.lease_duration = Duration::from_millis(90);
+    config.poll_interval = Duration::from_millis(20);
+    let worker = Worker::new(worker_store, successful_registry(&task_name), config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            if admin.get_task(task_id).await.unwrap().unwrap().state == TaskState::Succeeded {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.cancel();
+    worker_task.await.unwrap().unwrap();
+    drop_runtime_role(&admin, &role).await;
+}
+
+#[tokio::test]
 async fn worker_recovers_from_revoked_database_protocols() {
     let Some(database_url) = database_url() else {
         return;
@@ -1285,6 +1552,7 @@ async fn worker_recovers_from_revoked_database_protocols() {
         "REVOKE EXECUTE ON FUNCTION \
          pgtask.renew_leases(uuid[], integer[], uuid[], bigint), \
          pgtask.heartbeat_worker(uuid, bigint, boolean), \
+         pgtask.sample_queue_demand(text, bigint), \
          pgtask.claim_due_schedules(integer), \
          pgtask.recover_wait_timeouts(integer) FROM {}",
         fixture.role
@@ -1326,6 +1594,54 @@ async fn worker_recovers_from_revoked_database_protocols() {
     .await
     .unwrap();
     fixture.stop().await;
+}
+
+#[tokio::test]
+async fn worker_refuses_a_schema_before_the_demand_sampling_protocol() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let database_name = format!("pgtask_outdated_{}", Uuid::new_v4().simple());
+    let options = PgConnectOptions::from_str(&database_url).unwrap();
+    let maintenance = PgPool::connect_with(options.clone().database("postgres"))
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database_name}")))
+        .execute(&maintenance)
+        .await
+        .unwrap();
+    let store = Store::from_pool(PgPool::connect_with(options.database(&database_name)).await.unwrap());
+    store.migrate().await.unwrap();
+    sqlx::query(
+        r"
+        CREATE OR REPLACE FUNCTION pgtask.storage_protocol_range()
+        RETURNS TABLE(minimum integer, maximum integer)
+        LANGUAGE sql
+        IMMUTABLE
+        AS $$ SELECT 1, 1 $$
+        ",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let queue_name = QueueName::new(format!("outdated-{}", Uuid::new_v4())).unwrap();
+    let task_name = TaskName::new("outdated-task").unwrap();
+    let worker = Worker::new(store, successful_registry(&task_name), WorkerConfig::new(queue_name)).unwrap();
+    assert!(matches!(
+        worker.run(CancellationToken::new()).await,
+        Err(WorkerError::IncompatibleStorageProtocol {
+            database_minimum: 1,
+            database_maximum: 1,
+            worker_minimum: pgtask_worker::STORAGE_PROTOCOL_MIN_VERSION,
+            worker_maximum: pgtask_worker::STORAGE_PROTOCOL_MAX_VERSION,
+        })
+    ));
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE {database_name} WITH (FORCE)"
+    )))
+    .execute(&maintenance)
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

@@ -88,6 +88,10 @@ If `unroutable_count` is nonzero, deploy a worker with the missing task name and
 paused tasks. If `run_at` is in the future, check PostgreSQL time before changing task rows. If workers are live but
 readiness fails, inspect database, listener, and lease-renewal telemetry.
 
+If expired tasks remain running, inspect `pgtask.lease.recovery.failures`, recovery warnings, and the `recovered`
+task-transition metric. Recovery continues while handler concurrency is saturated. Each pass drains at most 16 batches
+of `WorkerConfig.recovery_batch_size` tasks per queue before yielding until the next lease-recovery interval.
+
 ## Respond to PostgreSQL loss
 
 Keep worker processes running. They reconnect with bounded backoff, and active handlers remain fenced by their leases. Restore a session-capable endpoint for `LISTEN`; a transaction-pooling endpoint is not sufficient. After recovery, check lease-lost totals, duplicate attempts, oldest-ready age, and PostgreSQL WAL and connection pressure.

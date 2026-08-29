@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pgtask.client import (
+    BatchTransactionConnection,
     Client,
     EnqueueRequest,
     JSONValue,
@@ -17,6 +18,7 @@ from pgtask.client import (
 )
 
 __all__ = [
+    "BatchTransactionConnection",
     "Client",
     "EnqueueRequest",
     "JSONValue",

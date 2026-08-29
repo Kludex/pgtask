@@ -137,9 +137,11 @@ async fn negotiates_the_storage_protocol_before_and_after_migrating() {
     );
 
     store.migrate().await.unwrap();
+    let database_protocol = store.storage_protocol_range().await.unwrap();
+    assert_eq!((database_protocol.minimum, database_protocol.maximum), (1, 2));
     assert_eq!(
         store.ensure_storage_protocol(STORAGE_PROTOCOL_RANGE).await.unwrap(),
-        Some(STORAGE_PROTOCOL_RANGE)
+        Some(database_protocol)
     );
 
     drop_isolated_store(store, &maintenance, &database_name).await;

@@ -44,6 +44,8 @@ asyncio.run(
 
 The Rust runtime owns claiming, PostgreSQL notifications, leases, retries, scheduling, shutdown, and OpenTelemetry spans. The registered Python coroutine only runs the task body.
 
+The worker fills its available handler slots with one claim per queue, up to `concurrency` tasks in total.
+
 `TaskRegistry` is explicit worker configuration. It owns one logical queue and does not discover modules or use global state. The decorator returns a `TaskDefinition`, so producers can import `render` without repeating its durable name, queue, handler version, payload type, or result type.
 
 Set `handler_version` when a long-lived task changes its durable protocol. An exception is retryable by default. Pass `retry_delay=None` for a terminal failure on the first exception.
@@ -88,6 +90,37 @@ asyncio.run(main())
 The query and listener endpoints default to the same URL. Set `listener_url` when queries use a transaction-pooling proxy. The listener endpoint must support PostgreSQL sessions. `max_query_connections` defaults to 10. `max_listener_connections` defaults to 1 because the Rust engine multiplexes subscriptions.
 
 The client injects the active Python OpenTelemetry context into task headers. The worker restores that context around the Python handler. Database cancellation cancels the Python coroutine and runs its `finally` blocks.
+
+## Enqueue a batch
+
+Use one database round trip when you already have several tasks:
+
+```python
+from __future__ import annotations
+
+import asyncio
+import os
+
+from pgtask import Client
+from worker import render
+
+
+async def main() -> None:
+    client = await Client.connect(os.environ["PGTASK_DATABASE_URL"])
+    tasks = await client.enqueue_many(
+        [
+            render.request({"report_id": "report-123"}),
+            render.request({"report_id": "report-456"}),
+        ]
+    )
+    print([task.id for task in tasks])
+
+
+asyncio.run(main())
+```
+
+`enqueue_many` preserves request order. PostgreSQL accepts the complete batch in one transaction, so another session
+never sees a partial batch.
 
 ## Run a durable workflow
 
@@ -216,6 +249,9 @@ asyncio.run(main())
 ```
 
 `enqueue_on` uses the existing Psycopg connection. The task commit and the application write succeed or roll back together. It does not open another connection or commit the caller's transaction.
+
+Use `Client.enqueue_many_on(connection, requests)` to enqueue a batch in the same application transaction. The
+connection satisfies `BatchTransactionConnection`.
 
 `Client.connect()` checks the storage protocol before returning. `enqueue_on` is the low-level transaction escape hatch.
 Use it only after the application has established a compatible normal client during startup.

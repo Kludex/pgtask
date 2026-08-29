@@ -12,7 +12,10 @@ use pgtask_core::{
 };
 use pgtask_postgres::{PostgresError, Store, StoreConfig, TaskCompletion, TaskFailure};
 use serde_json::json;
-use sqlx::{Acquire, PgConnection, postgres::PgPoolOptions};
+use sqlx::{
+    Acquire, PgConnection,
+    postgres::{PgListener, PgPoolOptions},
+};
 use tokio::sync::Barrier;
 use uuid::Uuid;
 
@@ -79,7 +82,7 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             .fetch_one(&mut *connection)
             .await
             .unwrap();
-    assert_eq!(storage_protocol_range, (1, 1));
+    assert_eq!(storage_protocol_range, (1, 2));
     let ready_channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
         .bind(queue_name)
         .fetch_one(&mut *connection)
@@ -93,7 +96,7 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             .await
             .unwrap();
     assert_eq!(capable_tasks, 1);
-    let maintenance_grants: (bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+    let maintenance_grants: (bool, bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r"
         SELECT
             has_function_privilege(current_user, 'pgtask.put_schedule(uuid, text, text, bigint, text, text, integer, text, text, integer, jsonb, jsonb, smallint, integer, timestamptz)', 'EXECUTE'),
@@ -103,13 +106,17 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             has_function_privilege(current_user, 'pgtask.register_worker(uuid, text, text, text[], integer[], text[], bigint[], integer[], bigint[], bigint)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.delete_expired_idempotency_keys(text, integer)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.complete_tasks(jsonb)', 'EXECUTE'),
-            has_function_privilege(current_user, 'pgtask.fail_tasks(jsonb)', 'EXECUTE')
+            has_function_privilege(current_user, 'pgtask.fail_tasks(jsonb)', 'EXECUTE'),
+            has_function_privilege(current_user, 'pgtask.sample_queue_demand(text, bigint)', 'EXECUTE')
         ",
     )
     .fetch_one(&mut *connection)
     .await
     .unwrap();
-    assert_eq!(maintenance_grants, (true, true, true, true, true, true, true, true));
+    assert_eq!(
+        maintenance_grants,
+        (true, true, true, true, true, true, true, true, true)
+    );
 }
 
 async fn can_execute(connection: &mut PgConnection, function: &str) -> bool {
@@ -133,10 +140,11 @@ async fn reports_the_supported_storage_protocol() {
         store.storage_protocol_version().await.unwrap(),
         STORAGE_PROTOCOL_VERSION
     );
-    assert_eq!(store.storage_protocol_range().await.unwrap(), STORAGE_PROTOCOL_RANGE);
+    let database_protocol = store.storage_protocol_range().await.unwrap();
+    assert_eq!((database_protocol.minimum, database_protocol.maximum), (1, 2));
     assert_eq!(
         store.ensure_storage_protocol(STORAGE_PROTOCOL_RANGE).await.unwrap(),
-        Some(STORAGE_PROTOCOL_RANGE)
+        Some(database_protocol)
     );
 }
 
@@ -239,6 +247,14 @@ async fn invalid_runtime_limits_fail_before_mutating_storage() {
     assert!(matches!(
         store.heartbeat_worker(worker_id, Duration::ZERO, false).await,
         Err(PostgresError::InvalidLeaseDuration)
+    ));
+    assert!(matches!(
+        store.sample_queue_demand(&queue_name, Duration::ZERO).await,
+        Err(PostgresError::InvalidSampleInterval)
+    ));
+    assert!(matches!(
+        store.sample_queue_demand(&queue_name, Duration::from_micros(500)).await,
+        Err(PostgresError::InvalidSampleInterval)
     ));
     assert!(matches!(
         store.next_task_delay(&queue_name, &[]).await,
@@ -500,6 +516,76 @@ async fn transactional_enqueue_rolls_back_with_its_caller() {
         Err(PostgresError::InvalidTask(_))
     ));
     transaction.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn task_transitions_only_notify_their_deterministic_shards() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("notification-shard-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("notification-shard-task-{suffix}")).unwrap();
+    let ready_channel: String = sqlx::query_scalar("SELECT pgtask.ready_channel($1)")
+        .bind(queue_name.as_str())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let mut listener = PgListener::connect(&database_url).await.unwrap();
+    listener.listen("pgtask_ready").await.unwrap();
+    listener.listen(&ready_channel).await.unwrap();
+
+    let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
+    request.queue_name = queue_name.clone();
+    let task_id = store.enqueue(&request).await.unwrap().task_id;
+    let notification = tokio::time::timeout(Duration::from_secs(1), listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notification.channel(), ready_channel);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.recv())
+            .await
+            .is_err()
+    );
+
+    let task = store
+        .claim(
+            &queue_name,
+            WorkerId::new(),
+            &[(task_name, HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let result_channel: String = sqlx::query_scalar("SELECT pgtask.result_channel($1)")
+        .bind(task_id.as_uuid())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    listener.listen("pgtask_result").await.unwrap();
+    listener.listen(&result_channel).await.unwrap();
+    assert!(
+        store
+            .complete(task.id, task.attempt, task.lease_token.unwrap(), Some(&json!(null)))
+            .await
+            .unwrap()
+    );
+    let notification = tokio::time::timeout(Duration::from_secs(1), listener.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(notification.channel(), result_channel);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.recv())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -1953,7 +2039,7 @@ async fn runtime_roles_only_receive_their_protocol_capabilities() {
         .fetch_one(&mut *producer)
         .await
         .unwrap();
-    assert_eq!(producer_protocol, (1, 1));
+    assert_eq!(producer_protocol, (1, 2));
     assert!(!can_execute(&mut producer, "pgtask.put_queue(text, bigint, bigint, bigint, bigint)").await);
     let task_id: Uuid =
         sqlx::query_scalar("SELECT task_id FROM pgtask.enqueue('role-task', '{}'::jsonb, $1) WHERE created")
@@ -2073,6 +2159,140 @@ async fn live_worker_count_follows_registration_and_expiry() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
     assert_eq!(store.live_worker_count(&queue_name).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn concurrent_workers_elect_one_queue_demand_sampler_per_interval() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("heartbeat-sampler-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("heartbeat-sampler-task-{suffix}")).unwrap();
+    let missing_name = TaskName::new(format!("heartbeat-missing-task-{suffix}")).unwrap();
+    let registrations = [(task_name.clone(), HandlerVersion::default(), RetryPolicy::Never)];
+    let mut routable = EnqueueRequest::new(task_name, json!({}));
+    routable.queue_name = queue_name.clone();
+    store.enqueue(&routable).await.unwrap();
+    let mut unroutable = EnqueueRequest::new(missing_name, json!({}));
+    unroutable.queue_name = queue_name.clone();
+    store.enqueue(&unroutable).await.unwrap();
+    let worker_ids = [WorkerId::new(), WorkerId::new(), WorkerId::new(), WorkerId::new()];
+    for worker_id in worker_ids {
+        store
+            .register_worker(worker_id, &queue_name, "test", &registrations, Duration::from_secs(1))
+            .await
+            .unwrap();
+    }
+    let interval = Duration::from_secs(30);
+    let seeded = store.sample_queue_demand(&queue_name, interval).await.unwrap();
+    assert!(seeded.sampled);
+    assert_eq!((seeded.routable_tasks, seeded.unroutable_tasks), (1, 1));
+    sqlx::query(
+        "UPDATE pgtask.queues SET demand_sampled_at = statement_timestamp() - interval '1 hour' WHERE name = $1",
+    )
+    .bind(queue_name.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let barrier = Arc::new(Barrier::new(worker_ids.len() + 1));
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in worker_ids {
+        let store = store.clone();
+        let barrier = Arc::clone(&barrier);
+        let queue_name = queue_name.clone();
+        tasks.spawn(async move {
+            barrier.wait().await;
+            store.sample_queue_demand(&queue_name, interval).await.unwrap()
+        });
+    }
+    barrier.wait().await;
+    let mut samples = Vec::new();
+    while let Some(sample) = tasks.join_next().await {
+        samples.push(sample.unwrap());
+    }
+    assert!(samples.iter().all(|sample| sample.live_workers == 4));
+    assert!(
+        samples
+            .iter()
+            .all(|sample| (sample.routable_tasks, sample.unroutable_tasks) == (1, 1))
+    );
+    assert_eq!(samples.iter().filter(|sample| sample.sampled).count(), 1);
+}
+
+#[tokio::test]
+async fn queue_demand_sampling_honors_its_window_without_waiting_for_the_election_lock() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let queue_name = QueueName::new(format!("sampling-window-{}", Uuid::new_v4())).unwrap();
+    let task_name = TaskName::new(format!("sampling-window-task-{}", Uuid::new_v4())).unwrap();
+    let worker_id = WorkerId::new();
+    store
+        .register_worker(
+            worker_id,
+            &queue_name,
+            "test",
+            &[(task_name, HandlerVersion::default(), RetryPolicy::Never)],
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    let interval = Duration::from_secs(30);
+    assert!(store.sample_queue_demand(&queue_name, interval).await.unwrap().sampled);
+
+    sqlx::query(
+        "UPDATE pgtask.queues SET demand_sampled_at = statement_timestamp() - interval '29 seconds' WHERE name = $1",
+    )
+    .bind(queue_name.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let early = store.sample_queue_demand(&queue_name, interval).await.unwrap();
+    assert!(early.sampled);
+
+    sqlx::query(
+        "UPDATE pgtask.queues SET demand_sampled_at = statement_timestamp() - interval '15 seconds' WHERE name = $1",
+    )
+    .bind(queue_name.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let inside_window = store.sample_queue_demand(&queue_name, interval).await.unwrap();
+    assert!(!inside_window.sampled);
+
+    sqlx::query(
+        "UPDATE pgtask.queues SET demand_sampled_at = statement_timestamp() - interval '1 hour' WHERE name = $1",
+    )
+    .bind(queue_name.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let mut lock = store.pool().begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('pgtask.demand.' || $1, 0))")
+        .bind(queue_name.as_str())
+        .execute(&mut *lock)
+        .await
+        .unwrap();
+    let locked = tokio::time::timeout(Duration::from_secs(5), store.sample_queue_demand(&queue_name, interval))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!locked.sampled);
+    lock.commit().await.unwrap();
+
+    let missing_queue = QueueName::new(format!("missing-sampling-{}", Uuid::new_v4())).unwrap();
+    let missing = store.sample_queue_demand(&missing_queue, interval).await.unwrap();
+    assert!(!missing.sampled);
+    assert_eq!(
+        (missing.live_workers, missing.routable_tasks, missing.unroutable_tasks),
+        (0, 0, 0)
+    );
 }
 
 #[tokio::test]

@@ -8,6 +8,7 @@ use opentelemetry::{
 struct KernelMetrics {
     tasks: Counter<u64>,
     lease_renewals: Counter<u64>,
+    lease_recovery_failures: Counter<u64>,
     queue_latency: Histogram<f64>,
     execution_duration: Histogram<f64>,
     schedule_occurrences: Counter<u64>,
@@ -39,6 +40,10 @@ fn metrics() -> &'static KernelMetrics {
             lease_renewals: meter
                 .u64_counter("pgtask.lease.renewals")
                 .with_description("Lease renewal outcomes")
+                .build(),
+            lease_recovery_failures: meter
+                .u64_counter("pgtask.lease.recovery.failures")
+                .with_description("Failed expired-lease recovery batches")
                 .build(),
             queue_latency: meter
                 .f64_histogram("pgtask.queue.latency")
@@ -79,12 +84,12 @@ fn metrics() -> &'static KernelMetrics {
                 .build(),
             queue_ready_tasks: meter
                 .u64_gauge("pgtask.queue.ready.tasks")
-                .with_description("Due tasks supported by this worker process")
+                .with_description("Due tasks routable to any live, non-draining worker on this queue")
                 .with_unit("{task}")
                 .build(),
             queue_unroutable_tasks: meter
                 .u64_gauge("pgtask.queue.unroutable.tasks")
-                .with_description("Due tasks with no live capable worker")
+                .with_description("Due tasks with no live capable worker on this queue")
                 .with_unit("{task}")
                 .build(),
             worker_configured_concurrency: meter
@@ -165,6 +170,12 @@ pub fn record_recovered(queue_name: &str, count: u64) {
     record_task_transition("recovered", queue_name, None, count);
 }
 
+pub fn record_recovery_failure(queue_name: &str) {
+    metrics()
+        .lease_recovery_failures
+        .add(1, &[KeyValue::new("pgtask.queue.name", queue_name.to_owned())]);
+}
+
 pub fn record_lease_lost(queue_name: &str, task_name: &str) {
     record_task_transition("lease_lost", queue_name, Some(task_name), 1);
 }
@@ -190,9 +201,9 @@ pub fn record_queue_latency(queue_name: &str, task_name: &str, duration: Duratio
     );
 }
 
-pub fn record_queue_demand(queue_name: &str, capable_tasks: u64, unroutable_tasks: u64) {
+pub fn record_queue_demand(queue_name: &str, ready_tasks: u64, unroutable_tasks: u64) {
     let attributes = [KeyValue::new("pgtask.queue.name", queue_name.to_owned())];
-    metrics().queue_ready_tasks.record(capable_tasks, &attributes);
+    metrics().queue_ready_tasks.record(ready_tasks, &attributes);
     metrics().queue_unroutable_tasks.record(unroutable_tasks, &attributes);
 }
 

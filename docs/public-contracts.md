@@ -24,8 +24,9 @@ The `pgtask` crate is the supported entry point. It exposes `core`, `postgres`, 
 
 The Rust contract includes:
 
-- Domain identifiers, task and schedule values, retry policy, and the `STORAGE_PROTOCOL_MIN_VERSION` and
-  `STORAGE_PROTOCOL_MAX_VERSION` compatibility bounds.
+- Domain identifiers, task and schedule values, retry policy, and storage protocol bounds. The `core` and `postgres`
+  bounds describe producers, including the Python client's exported constants. The `worker` bounds describe both Rust
+  and Python worker runtimes and can require a newer protocol.
 - `Store` construction, migrations, enqueueing, inspection, scheduling, signals, and administrative operations.
 - `HandlerRegistry`, `TaskContext`, `Worker`, `WorkerConfig`, `WorkerControl`, and their error types.
 - OpenTelemetry propagation and metric recording functions.
@@ -60,7 +61,10 @@ async def run(database_url: str) -> None:
     assert result is not None
 ```
 
-The supported imports are `Client`, `EnqueueRequest`, `JSONValue`, `Task`, `TaskDefinition`, `TaskHandle`, `TaskHandler`, `TaskRegistry`, `TaskResult`, `TaskState`, `TransactionConnection`, `Worker`, and `get_current_task`. `pgtask._native` is private.
+The supported imports are `BatchTransactionConnection`, `Client`, `EnqueueRequest`, `JSONValue`, `Task`, `TaskDefinition`,
+`TaskHandle`, `TaskHandler`, `TaskRegistry`, `TaskResult`, `TaskState`, `TransactionConnection`, `Worker`, and
+`get_current_task`. `pgtask._native` is
+private. `Client.enqueue_many()` and `Client.enqueue_many_on()` preserve request order and commit a batch atomically.
 
 Task registration is explicit. A registry owns one queue. A definition owns the stable task name, handler version, payload type, result type, and retry policy. There is no global discovery or ARQ compatibility API.
 
@@ -78,6 +82,7 @@ const result = await task.result({ timeoutMs: 30_000 });
 
 The supported entry point is `@pgtask/client`. Its public surface is `Client`, `EnqueueRequest`, `TaskDefinition`,
 `TaskHandle`, `defineTask`, and their exported JSON, option, request, and result types.
+`Client.enqueueMany()` and `Client.enqueueManyOn()` preserve request order and commit a batch atomically.
 
 ## Go
 
@@ -91,8 +96,10 @@ if err != nil {
 task, err := render.Enqueue(ctx, client, renderRequest{ReportID: "report-123"}, pgtask.EnqueueOptions{})
 ```
 
-The supported module is `github.com/Kludex/pgtask/sdks/go`. Its public surface is the typed task definition and handle,
-`Client`, enqueue options and results, task results, and `QueryRowExecutor` for transactional enqueueing.
+The supported module is `github.com/Kludex/pgtask/sdks/go`. Its public surface is the typed task definition, request,
+and handle, `Client`, enqueue options and results, task results, and the query executor interfaces for transactional
+enqueueing. `EnqueueMany()` and `EnqueueManyOn()` preserve request order and commit a batch atomically.
+Each Go batch uses one task definition, so every request has the same payload and result types.
 
 TypeScript and Go are producer SDKs. They enqueue, inspect, wait, signal, cancel, propagate OpenTelemetry context, and
 join application transactions. Handler execution remains in the Rust and Python runtimes.

@@ -88,7 +88,7 @@ crates/
   pgtask-web         Optional UI service
 ```
 
-The worker runtime has separate supervised loops for claims, batched lease renewal, worker heartbeats, schedule materialization, notification listening, retention, and graceful shutdown. A handler is an async Rust function registered under an explicit stable name and version.
+The worker runtime has separate supervised loops for claims, expired-lease recovery, batched lease renewal, worker heartbeats, queue-demand sampling, schedule materialization, notification listening, retention, and graceful shutdown. Claim and recovery batches are sized independently. One process scans queue demand for the interval and publishes the sample for every worker to report without delaying heartbeats. A handler is an async Rust function registered under an explicit stable name and version.
 
 ### Language SDKs
 
@@ -144,7 +144,7 @@ Comparable designs include [Azure Functions dynamic concurrency](https://learn.m
 
 ## Wake-up strategy
 
-Every worker owns a session connection that runs `LISTEN pgtask_ready`, `LISTEN pgtask_schedule`, and `LISTEN pgtask_wait`. Result clients use `LISTEN pgtask_result`. Enqueue and reschedule transactions notify the ready channel. Schedule mutations notify the schedule channel so replicas recalculate their database-derived deadline. Signal-wait registration notifies the wait channel so replicas recalculate the next database timeout. Terminal transitions notify result clients and resume durable result waits. Notifications are the normal dispatch path.
+Every worker owns a session connection that listens to the deterministic `pgtask_ready_*` shards for its queues, plus `pgtask_schedule` and `pgtask_wait`. Result clients listen to the deterministic `pgtask_result_*` shard for the task. Enqueue and reschedule transactions notify the matching ready shard. Schedule mutations notify the schedule channel so replicas recalculate their database-derived deadline. Signal-wait registration notifies the wait channel so replicas recalculate the next database timeout. Terminal transitions notify the matching result shard and resume durable result waits. Notifications are the normal dispatch path.
 
 The listener connects and commits `LISTEN` before the worker starts claiming. It reconnects automatically after failover. A low-frequency reconciliation poll covers notifications lost during disconnects because PostgreSQL notifications are not durable. Deployments must provide session-capable connections for listeners; transaction-pooling proxies cannot replace this runtime requirement.
 

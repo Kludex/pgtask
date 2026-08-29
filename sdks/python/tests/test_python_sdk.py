@@ -17,7 +17,16 @@ from opentelemetry.trace import (
     get_current_span,
     set_span_in_context,
 )
-from pgtask import Client, EnqueueRequest, JSONValue, Task, TaskRegistry, TransactionConnection, Worker
+from pgtask import (
+    BatchTransactionConnection,
+    Client,
+    EnqueueRequest,
+    JSONValue,
+    Task,
+    TaskRegistry,
+    TransactionConnection,
+    Worker,
+)
 from psycopg import AsyncConnection
 
 
@@ -28,6 +37,7 @@ def anyio_backend() -> str:
 
 def test_public_python_contract() -> None:
     assert pgtask.__all__ == [
+        "BatchTransactionConnection",
         "Client",
         "EnqueueRequest",
         "JSONValue",
@@ -116,6 +126,70 @@ async def test_python_worker_executes_a_registered_async_handler() -> None:
     await running
 
 
+async def wait_for_claim_batches(
+    connection: AsyncConnection[Any], task_ids: list[str], expected_claimed: int
+) -> list[int]:
+    async def poll() -> list[int]:
+        while True:
+            cursor = await connection.execute(
+                """
+                SELECT count(*)::integer
+                FROM pgtask.attempt_view
+                WHERE task_id = ANY(%s::uuid[])
+                GROUP BY started_at
+                ORDER BY started_at
+                """,
+                (task_ids,),
+            )
+            batches = [row[0] for row in await cursor.fetchall()]
+            if sum(batches) == expected_claimed:
+                return batches
+            await asyncio.sleep(0.005)
+
+    return await asyncio.wait_for(poll(), timeout=2)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("concurrency", "task_count", "expected_batches", "pending"),
+    [(12, 12, [12], 0), (3, 9, [3], 6)],
+)
+async def test_python_worker_matches_claim_batches_to_concurrency(
+    concurrency: int, task_count: int, expected_batches: list[int], pending: int
+) -> None:
+    database_url = os.environ["PGTASK_DATABASE_URL"]
+    client = await Client.connect(database_url)
+    await client.migrate()
+    queue_name = f"python-claim-batch-{os.urandom(8).hex()}"
+    registry = TaskRegistry(queue_name)
+    release = asyncio.Event()
+
+    @registry.task("python.claim-batch")
+    async def block(_task: Task, payload: None) -> None:
+        assert payload is None
+        await release.wait()
+
+    tasks = [await client.enqueue(block.request(None)) for _ in range(task_count)]
+    worker = Worker(database_url, registry, concurrency=concurrency, poll_interval=30.0)
+    running = asyncio.create_task(worker.run())
+    connection = await AsyncConnection.connect(database_url)
+    try:
+        assert (
+            await wait_for_claim_batches(connection, [task.id for task in tasks], task_count - pending)
+            == expected_batches
+        )
+        cursor = await connection.execute(
+            "SELECT count(*)::integer FROM pgtask.task_view WHERE id = ANY(%s::uuid[]) AND state = 'pending'",
+            ([task.id for task in tasks],),
+        )
+        assert (await cursor.fetchone()) == (pending,)
+    finally:
+        await connection.close()
+        worker.shutdown()
+        release.set()
+        await running
+
+
 @pytest.mark.anyio
 async def test_client_timeout_absence_signal_and_transactional_rollback() -> None:
     database_url = os.environ["PGTASK_DATABASE_URL"]
@@ -123,6 +197,13 @@ async def test_client_timeout_absence_signal_and_transactional_rollback() -> Non
     queue_name = f"python-client-{os.urandom(8).hex()}"
     request: EnqueueRequest[JSONValue] = EnqueueRequest("python.pending", {}, queue_name=queue_name)
     task = await client.enqueue(request)
+    batch_requests: list[EnqueueRequest[JSONValue]] = [
+        EnqueueRequest("python.pending", {"batch": 1}, queue_name=queue_name, idempotency_key=f"{queue_name}:1"),
+        EnqueueRequest("python.pending", {"batch": 2}, queue_name=queue_name, idempotency_key=f"{queue_name}:2"),
+    ]
+    expected_batch = [await client.enqueue(batch_request) for batch_request in batch_requests]
+    batched = await client.enqueue_many(batch_requests)
+    assert [handle.id for handle in batched] == [handle.id for handle in expected_batch]
     assert await task.result(timeout=0.001) is None
     assert await client.task("00000000-0000-0000-0000-000000000000").inspect() is None
     assert await task.signal("approval", {"approved": True}) == {"approved": True}
@@ -132,10 +213,21 @@ async def test_client_timeout_absence_signal_and_transactional_rollback() -> Non
         await connection.execute("BEGIN")
         rolled_back_id, created = await Client.enqueue_on(cast(TransactionConnection, connection), request)
         assert created
+        rolled_back_batch = await Client.enqueue_many_on(
+            cast(BatchTransactionConnection, connection),
+            [
+                EnqueueRequest("python.pending", {"batch": 3}, queue_name=queue_name),
+                EnqueueRequest("python.pending", {"batch": 4}, queue_name=queue_name),
+            ],
+        )
+        assert len(rolled_back_batch) == 2
+        assert all(created for _, created in rolled_back_batch)
         await connection.rollback()
     finally:
         await connection.close()
     assert await client.task_result(rolled_back_id) is None
+    for task_id, _ in rolled_back_batch:
+        assert await client.task_result(task_id) is None
 
 
 class EmptyCursor:
@@ -148,6 +240,24 @@ class EmptyConnection:
         assert "pgtask.enqueue" in query
         assert params
         return EmptyCursor()
+
+
+class BatchCursor:
+    def __init__(self, rows: list[tuple[int, str, bool]]) -> None:
+        self.rows = rows
+
+    async def fetchall(self) -> list[tuple[int, str, bool]]:
+        return self.rows
+
+
+class BatchConnection:
+    def __init__(self, rows: list[tuple[int, str, bool]]) -> None:
+        self.rows = rows
+
+    async def execute(self, query: str, params: tuple[Any, ...]) -> BatchCursor:
+        assert "pgtask.enqueue_many" in query
+        assert params
+        return BatchCursor(self.rows)
 
 
 @pytest.mark.anyio
@@ -251,6 +361,13 @@ async def test_worker_rejects_an_empty_registry_and_invalid_handler_results() ->
 async def test_transactional_enqueue_rejects_an_empty_database_response() -> None:
     with pytest.raises(RuntimeError, match="returned no result"):
         await Client.enqueue_on(EmptyConnection(), EnqueueRequest("python.empty", {}))
+    with pytest.raises(RuntimeError, match="invalid result set"):
+        await Client.enqueue_many_on(BatchConnection([]), [EnqueueRequest("python.empty", {})])
+    with pytest.raises(RuntimeError, match="invalid result set"):
+        await Client.enqueue_many_on(
+            BatchConnection([(1, "00000000-0000-0000-0000-000000000001", True)]),
+            [EnqueueRequest("python.empty", {})],
+        )
 
 
 @pytest.mark.anyio

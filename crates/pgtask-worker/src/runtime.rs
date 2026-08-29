@@ -31,12 +31,15 @@ use crate::{
     registry::RegisteredHandler,
 };
 
+const MAX_RECOVERY_DRAIN_BATCHES: usize = 16;
+
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
     /// Ordered by priority: the worker drains earlier queues before claiming from later ones.
     pub queues: Vec<QueueName>,
     pub concurrency: NonZeroU16,
     pub claim_batch_size: NonZeroU16,
+    pub recovery_batch_size: NonZeroU16,
     pub lease_duration: Duration,
     pub poll_interval: Duration,
     pub shutdown_grace: Duration,
@@ -88,6 +91,7 @@ impl WorkerConfig {
             queues,
             concurrency: NonZeroU16::new(10).expect("10 is nonzero"),
             claim_batch_size: NonZeroU16::new(10).expect("10 is nonzero"),
+            recovery_batch_size: NonZeroU16::new(10).expect("10 is nonzero"),
             lease_duration: Duration::from_secs(30),
             poll_interval: Duration::from_secs(30),
             shutdown_grace: Duration::from_secs(30),
@@ -116,7 +120,7 @@ pub enum WorkerError {
     InvalidLeaseDuration,
     #[error("poll interval must be greater than zero")]
     InvalidPollInterval,
-    #[error("worker heartbeat interval must be nonzero and shorter than its time to live")]
+    #[error("worker heartbeat interval must be at least one millisecond and shorter than its time to live")]
     InvalidWorkerHeartbeat,
     #[error("schedule reconciliation interval must be greater than zero")]
     InvalidScheduleReconciliationInterval,
@@ -279,7 +283,6 @@ struct ActiveLease {
 struct HeartbeatConfig {
     worker_id: WorkerId,
     queue_name: QueueName,
-    capabilities: Vec<(TaskName, HandlerVersion)>,
     interval: Duration,
     ttl: Duration,
 }
@@ -292,7 +295,9 @@ impl Worker {
         if config.poll_interval.is_zero() {
             return Err(WorkerError::InvalidPollInterval);
         }
-        if config.worker_heartbeat_interval.is_zero() || config.worker_heartbeat_interval >= config.worker_ttl {
+        if config.worker_heartbeat_interval < Duration::from_millis(1)
+            || config.worker_heartbeat_interval >= config.worker_ttl
+        {
             return Err(WorkerError::InvalidWorkerHeartbeat);
         }
         if config.schedule_reconciliation_interval.is_zero() {
@@ -364,10 +369,9 @@ impl Worker {
         let transitions = write_transitions(
             self.store.clone(),
             transition_receiver,
-            self.config.claim_batch_size,
+            self.config.concurrency,
             runtime_shutdown.clone(),
         );
-        let capabilities = self.registry.capabilities();
         let registrations = self.registry.registrations();
         let ready_listener = self.store.ready_listener_for(&self.config.queues).await?;
         self.health.set_listener(true);
@@ -392,6 +396,7 @@ impl Worker {
             self.config.lease_duration,
             runtime_shutdown.clone(),
         );
+        let recovery = recover_expired_leases(self.store.clone(), &self.config, runtime_shutdown.clone());
         let listener = listen_for_ready(
             self.store.clone(),
             self.config.queues.clone(),
@@ -423,12 +428,17 @@ impl Worker {
             HeartbeatConfig {
                 worker_id: self.id,
                 queue_name: self.config.queues[0].clone(),
-                capabilities: capabilities.clone(),
                 interval: self.config.worker_heartbeat_interval,
                 ttl: self.config.worker_ttl,
             },
             runtime_shutdown.clone(),
             self.health.clone(),
+        );
+        let sampler = sample_queue_demand(
+            self.store.clone(),
+            self.config.queues[0].clone(),
+            self.config.worker_heartbeat_interval,
+            runtime_shutdown.clone(),
         );
         let handlers = async {
             let result = self
@@ -438,13 +448,15 @@ impl Worker {
             self.health.set_admission(false);
             result
         };
-        let ((), (), (), (), (), (), result) = tokio::join!(
+        let ((), (), (), (), (), (), (), (), result) = tokio::join!(
             transitions,
             renewer,
+            recovery,
             listener,
             scheduler,
             retention,
             heartbeat,
+            sampler,
             handlers
         );
         result
@@ -465,17 +477,16 @@ impl Worker {
 
     async fn ensure_storage_protocol(&self) -> Result<(), WorkerError> {
         let database_protocol = self.store.storage_protocol_range().await?;
-        if database_protocol.overlaps(pgtask_core::STORAGE_PROTOCOL_RANGE) {
+        if database_protocol.overlaps(crate::STORAGE_PROTOCOL_RANGE) {
             return Ok(());
         }
         Err(WorkerError::IncompatibleStorageProtocol {
             database_minimum: database_protocol.minimum,
             database_maximum: database_protocol.maximum,
-            worker_minimum: pgtask_core::STORAGE_PROTOCOL_MIN_VERSION,
-            worker_maximum: pgtask_core::STORAGE_PROTOCOL_MAX_VERSION,
+            worker_minimum: crate::STORAGE_PROTOCOL_MIN_VERSION,
+            worker_maximum: crate::STORAGE_PROTOCOL_MAX_VERSION,
         })
     }
-
     async fn run_handlers(
         &self,
         shutdown: CancellationToken,
@@ -579,19 +590,6 @@ impl Worker {
             effective_concurrency,
             active_handlers,
         );
-        for queue_name in &self.config.queues {
-            if let Err(error) = self
-                .store
-                .recover_expired(queue_name, self.config.claim_batch_size.get())
-                .await
-            {
-                self.health.set_database(false);
-                warn!(%error, "could not recover expired task leases");
-                wait_after_database_error(shutdown, wakeup).await;
-                return None;
-            }
-        }
-        self.health.set_database(true);
         let available = usize::from(effective_concurrency).saturating_sub(active_handlers);
         let limit = available.min(usize::from(self.config.claim_batch_size.get()));
         if limit == 0 {
@@ -998,6 +996,39 @@ async fn renew_leases(
     }
 }
 
+async fn recover_expired_leases(store: Store, config: &WorkerConfig, shutdown: CancellationToken) {
+    let mut interval = tokio::time::interval(config.lease_duration / 3);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            _ = interval.tick() => {
+                for queue_name in &config.queues {
+                    let limit = config.recovery_batch_size.get();
+                    for batch in 0..MAX_RECOVERY_DRAIN_BATCHES {
+                        let result = tokio::select! {
+                            () = shutdown.cancelled() => return,
+                            result = store.recover_expired(queue_name, limit) => result,
+                        };
+                        match result {
+                            Ok(recovered) if recovered < u64::from(limit) => break,
+                            Ok(_) if batch + 1 == MAX_RECOVERY_DRAIN_BATCHES => {
+                                warn!(%queue_name, "lease recovery drain reached its batch budget");
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                pgtask_otel::record_recovery_failure(queue_name.as_str());
+                                warn!(%error, %queue_name, "could not recover expired task leases");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn update_renewed_leases(active: &ActiveLeases, leases: &[ActiveLease], renewed: &[TaskId]) {
     let now = Instant::now();
     let mut active = active.lock().await;
@@ -1199,19 +1230,38 @@ async fn heartbeat_worker(store: Store, config: HeartbeatConfig, shutdown: Cance
                         warn!(%error, "could not update worker heartbeat");
                     }
                 }
-                match store.live_worker_count(&config.queue_name).await {
-                    Ok(live) => pgtask_otel::record_live_workers(config.queue_name.as_str(), live),
-                    Err(error) => warn!(%error, "could not read the live worker count"),
-                }
-                match store.queue_demand(&config.queue_name, &config.capabilities).await {
-                    Ok(demand) => pgtask_otel::record_queue_demand(
-                        config.queue_name.as_str(),
-                        demand.capable_tasks,
-                        demand.unroutable_tasks,
-                    ),
+            }
+        }
+    }
+}
+
+async fn sample_queue_demand(
+    store: Store,
+    queue_name: QueueName,
+    sample_interval: Duration,
+    shutdown: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(sample_interval);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            _ = interval.tick() => {
+                let sample = tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    sample = store.sample_queue_demand(&queue_name, sample_interval) => sample,
+                };
+                match sample {
+                    Ok(sample) => {
+                        pgtask_otel::record_live_workers(queue_name.as_str(), sample.live_workers);
+                        pgtask_otel::record_queue_demand(
+                            queue_name.as_str(),
+                            sample.routable_tasks,
+                            sample.unroutable_tasks,
+                        );
+                    }
                     Err(error) => {
-                        health.set_database(false);
-                        warn!(%error, "could not read queue demand");
+                        warn!(%error, "could not sample queue demand");
                     }
                 }
             }
