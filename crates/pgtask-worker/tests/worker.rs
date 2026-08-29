@@ -12,7 +12,7 @@ use std::{
 use chrono::{TimeDelta, Utc};
 use pgtask_core::{
     EnqueueRequest, HandlerVersion, QueueConfig, QueueName, RetryPolicy, ScheduleConfig, ScheduleDefinition,
-    ScheduleName, SignalName, StepName, TaskName, TaskState,
+    ScheduleName, SignalName, StepName, TaskId, TaskName, TaskState, WorkerId,
 };
 use pgtask_postgres::{PostgresError, Store};
 use pgtask_worker::{HandlerError, HandlerRegistry, Worker, WorkerConfig, WorkerError};
@@ -84,6 +84,15 @@ fn successful_registry(task_name: &TaskName) -> HandlerRegistry {
         |_| async move { Ok(json!(null)) },
     );
     registry
+}
+
+async fn tasks_are_in_state(store: &Store, task_ids: &[TaskId], state: TaskState) -> bool {
+    for task_id in task_ids {
+        if store.get_task(*task_id).await.unwrap().unwrap().state != state {
+            return false;
+        }
+    }
+    true
 }
 
 async fn complete_ready_child(store: &Store, queue_name: &QueueName, task_name: &TaskName) -> Result<(), HandlerError> {
@@ -800,6 +809,106 @@ async fn another_worker_recovers_a_task_after_runtime_termination() {
 
     shutdown.cancel();
     second_worker_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn saturated_worker_recovers_expired_leases_across_queues() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let first_queue = QueueName::new(format!("recovery-first-{suffix}")).unwrap();
+    let second_queue = QueueName::new(format!("recovery-second-{suffix}")).unwrap();
+    let blocker_name = TaskName::new(format!("recovery-blocker-{suffix}")).unwrap();
+    let recovered_name = TaskName::new(format!("recovery-task-{suffix}")).unwrap();
+    let mut blocker = EnqueueRequest::new(blocker_name.clone(), json!({}));
+    blocker.queue_name = first_queue.clone();
+    blocker.priority = i16::MAX;
+    let blocker_id = store.enqueue(&blocker).await.unwrap().task_id;
+    let mut recovered_ids = Vec::new();
+    for queue_name in [&first_queue, &second_queue] {
+        for sequence in 0..6 {
+            let mut request = EnqueueRequest::new(recovered_name.clone(), json!({"sequence": sequence}));
+            request.queue_name = queue_name.clone();
+            recovered_ids.push(store.enqueue(&request).await.unwrap().task_id);
+        }
+        let claimed = store
+            .claim(
+                queue_name,
+                WorkerId::new(),
+                &[(recovered_name.clone(), HandlerVersion::default())],
+                6,
+                Duration::from_millis(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 6);
+    }
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Semaphore::new(0));
+    let mut registry = HandlerRegistry::new();
+    registry.register(blocker_name, HandlerVersion::default(), RetryPolicy::Never, {
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        move |_| {
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            async move {
+                started.notify_one();
+                release.acquire().await.unwrap().forget();
+                Ok(json!({"released": true}))
+            }
+        }
+    });
+    registry.register(
+        recovered_name,
+        HandlerVersion::default(),
+        RetryPolicy::Never,
+        |_| async move { Ok(json!({"recovered": true})) },
+    );
+    let mut config = WorkerConfig::with_queues(vec![first_queue, second_queue]);
+    config.concurrency = NonZeroU16::MIN;
+    config.claim_batch_size = NonZeroU16::MIN;
+    config.recovery_batch_size = NonZeroU16::MIN;
+    config.lease_duration = Duration::from_millis(300);
+    let worker = Worker::new(store.clone(), registry, config).unwrap();
+    let shutdown = CancellationToken::new();
+    let worker_shutdown = shutdown.clone();
+    let worker_task = tokio::spawn(async move { worker.run(worker_shutdown).await });
+
+    tokio::time::timeout(TEST_TIMEOUT, started.notified()).await.unwrap();
+    tokio::time::timeout(Duration::from_millis(250), async {
+        loop {
+            if tasks_are_in_state(&store, &recovered_ids, TaskState::Pending).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        store.get_task(blocker_id).await.unwrap().unwrap().state,
+        TaskState::Running
+    );
+
+    release.add_permits(1);
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            if tasks_are_in_state(&store, &recovered_ids, TaskState::Succeeded).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    shutdown.cancel();
+    worker_task.await.unwrap().unwrap();
 }
 
 #[tokio::test]

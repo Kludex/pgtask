@@ -37,6 +37,7 @@ pub struct WorkerConfig {
     pub queues: Vec<QueueName>,
     pub concurrency: NonZeroU16,
     pub claim_batch_size: NonZeroU16,
+    pub recovery_batch_size: NonZeroU16,
     pub lease_duration: Duration,
     pub poll_interval: Duration,
     pub shutdown_grace: Duration,
@@ -88,6 +89,7 @@ impl WorkerConfig {
             queues,
             concurrency: NonZeroU16::new(10).expect("10 is nonzero"),
             claim_batch_size: NonZeroU16::new(10).expect("10 is nonzero"),
+            recovery_batch_size: NonZeroU16::new(10).expect("10 is nonzero"),
             lease_duration: Duration::from_secs(30),
             poll_interval: Duration::from_secs(30),
             shutdown_grace: Duration::from_secs(30),
@@ -768,8 +770,23 @@ async fn recover_expired_leases(store: Store, config: &WorkerConfig, shutdown: C
             () = shutdown.cancelled() => return,
             _ = interval.tick() => {
                 for queue_name in &config.queues {
-                    if let Err(error) = store.recover_expired(queue_name, config.claim_batch_size.get()).await {
-                        warn!(%error, "could not recover expired task leases");
+                    let limit = config.recovery_batch_size.get();
+                    for batch in 0..16 {
+                        let result = tokio::select! {
+                            () = shutdown.cancelled() => return,
+                            result = store.recover_expired(queue_name, limit) => result,
+                        };
+                        match result {
+                            Ok(recovered) if recovered < u64::from(limit) => break,
+                            Ok(_) if batch == 15 => {
+                                warn!(%queue_name, "lease recovery drain reached its batch budget");
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                warn!(%error, %queue_name, "could not recover expired task leases");
+                                break;
+                            }
+                        }
                     }
                 }
             }
