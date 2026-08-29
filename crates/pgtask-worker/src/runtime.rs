@@ -401,7 +401,6 @@ impl Worker {
             self.config.queues[0].clone(),
             self.config.worker_heartbeat_interval,
             runtime_shutdown.clone(),
-            self.health.clone(),
         );
         let handlers = async {
             let result = self
@@ -1020,7 +1019,6 @@ async fn sample_queue_demand(
     queue_name: QueueName,
     sample_interval: Duration,
     shutdown: CancellationToken,
-    health: Health,
 ) {
     let mut interval = tokio::time::interval(sample_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1042,7 +1040,6 @@ async fn sample_queue_demand(
                         );
                     }
                     Err(error) => {
-                        health.set_database(false);
                         warn!(%error, "could not sample queue demand");
                     }
                 }

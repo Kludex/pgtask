@@ -39,6 +39,7 @@ RETURNS TABLE(
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, pgtask
+SET lock_timeout = '100ms'
 AS $$
 DECLARE
     sampled_at timestamptz;
@@ -118,12 +119,25 @@ BEGIN
     INTO routable_tasks, unroutable_tasks
     FROM demand;
 
-    UPDATE pgtask.queues
-    SET demand_sampled_at = statement_timestamp(),
-        demand_live_workers = live_workers,
-        demand_routable_tasks = routable_tasks,
-        demand_unroutable_tasks = unroutable_tasks
-    WHERE name = p_queue_name;
+    BEGIN
+        UPDATE pgtask.queues
+        SET demand_sampled_at = statement_timestamp(),
+            demand_live_workers = live_workers,
+            demand_routable_tasks = routable_tasks,
+            demand_unroutable_tasks = unroutable_tasks
+        WHERE name = p_queue_name;
+    EXCEPTION
+        WHEN lock_not_available THEN
+            SELECT
+                queues.demand_live_workers,
+                queues.demand_routable_tasks,
+                queues.demand_unroutable_tasks
+            INTO live_workers, routable_tasks, unroutable_tasks
+            FROM pgtask.queues
+            WHERE queues.name = p_queue_name;
+            RETURN NEXT;
+            RETURN;
+    END;
     sampled := true;
     RETURN NEXT;
 END;

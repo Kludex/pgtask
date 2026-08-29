@@ -39,6 +39,9 @@ start before the migration is applied. The Helm migration hook applies it before
 
 ## The ordinary upgrade
 
+Migration `0004` expands the database range from `1..=1` to `1..=2` without dropping protocol 1. Apply it before rolling
+protocol 2 workers. Old workers and producers remain compatible throughout the ordinary rolling upgrade.
+
 This release changes `pgtask.queue.ready.tasks` from the tasks supported by one process to the tasks supported by any
 live, non-draining worker on the queue. The queue-wide value is suitable for fleet autoscaling and remains aggregated by
 the maximum across worker instances. It must not drive separate Deployments with disjoint handlers on one shared queue,

@@ -81,6 +81,8 @@ SELECT minimum, maximum FROM pgtask.storage_protocol_range();
 ```
 
 Workers check before registering. Normal clients check at connection or first use.
+Workers and producers can deliberately declare different ranges. This release's workers require protocol 2 for demand
+sampling, while producers continue to support protocol 1 and 2.
 
 This turns rolling compatibility into an explicit database contract instead of an assumption about package versions. A
 worker built against a protocol the database does not speak refuses to start, with both ranges in the error, rather than
