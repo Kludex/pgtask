@@ -430,6 +430,7 @@ impl PythonWorker {
             }
             let mut config = WorkerConfig::with_queues(queues);
             config.concurrency = concurrency;
+            config.claim_batch_size = concurrency;
             config.lease_duration = lease_duration;
             config.poll_interval = poll_interval;
             config.health_address = health_address;
