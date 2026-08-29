@@ -131,7 +131,7 @@ async fn run_child(context: TaskContext) -> Result<Value, HandlerError> {
 
 A result timeout returns a checkpoint with `state` set to `timeout`. It cancels the unfinished child and its descendants. When a parent succeeds, fails, or is cancelled, PostgreSQL cancels every unfinished descendant. Retention deletes terminal leaves before their parents, so an active workflow never loses its ownership chain.
 
-For a client that is not inside a task handler, use `Store::task_result` for inspection or `Store::wait_for_task_result` for notification-driven waiting. The latter establishes `LISTEN pgtask_result` before checking task state, so completion cannot be lost between subscription and inspection.
+For a client that is not inside a task handler, use `Store::task_result` for inspection or `Store::wait_for_task_result` for notification-driven waiting. The latter listens to the task's deterministic `pgtask_result_*` shard before checking task state, so completion cannot be lost between subscription and inspection.
 
 ## Write replay-safe handlers
 
