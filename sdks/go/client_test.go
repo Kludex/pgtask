@@ -13,6 +13,7 @@ import (
 
 	"github.com/Kludex/pgtask/sdks/go"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
@@ -56,6 +57,73 @@ type errorRow struct{}
 
 func (errorRow) Scan(...any) error {
 	return errors.New("database unavailable")
+}
+
+type batchExecutor struct {
+	rows pgx.Rows
+	err  error
+}
+
+func (executor batchExecutor) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return executor.rows, executor.err
+}
+
+type batchRow struct {
+	index   int
+	taskID  string
+	created bool
+}
+
+type batchRows struct {
+	rows    []batchRow
+	index   int
+	scanErr error
+	err     error
+}
+
+func (rows *batchRows) Close() {}
+
+func (rows *batchRows) Err() error {
+	return rows.err
+}
+
+func (rows *batchRows) CommandTag() pgconn.CommandTag {
+	return pgconn.CommandTag{}
+}
+
+func (rows *batchRows) FieldDescriptions() []pgconn.FieldDescription {
+	return nil
+}
+
+func (rows *batchRows) Next() bool {
+	if rows.index == len(rows.rows) {
+		return false
+	}
+	rows.index++
+	return true
+}
+
+func (rows *batchRows) Scan(destinations ...any) error {
+	if rows.scanErr != nil {
+		return rows.scanErr
+	}
+	row := rows.rows[rows.index-1]
+	*destinations[0].(*int) = row.index
+	*destinations[1].(*string) = row.taskID
+	*destinations[2].(*bool) = row.created
+	return nil
+}
+
+func (rows *batchRows) Values() ([]any, error) {
+	return nil, nil
+}
+
+func (rows *batchRows) RawValues() [][]byte {
+	return nil
+}
+
+func (rows *batchRows) Conn() *pgx.Conn {
+	return nil
 }
 
 type protocolExecutor struct {
@@ -161,6 +229,31 @@ func TestTaskDefinitions(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected header encoding error")
 	}
+	invalidTime := time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC)
+	batchErrors := []struct {
+		name     string
+		executor pgtask.QueryExecutor
+		options  pgtask.EnqueueOptions
+	}{
+		{name: "encode", executor: batchExecutor{}, options: pgtask.EnqueueOptions{RunAt: &invalidTime}},
+		{name: "query", executor: batchExecutor{err: errors.New("database unavailable")}},
+		{name: "scan", executor: batchExecutor{rows: &batchRows{rows: []batchRow{{}}, scanErr: errors.New("bad row")}}},
+		{name: "order", executor: batchExecutor{rows: &batchRows{rows: []batchRow{{index: 1}}}}},
+		{name: "rows", executor: batchExecutor{rows: &batchRows{err: errors.New("connection lost")}}},
+		{name: "incomplete", executor: batchExecutor{rows: &batchRows{}}},
+	}
+	for _, test := range batchErrors {
+		t.Run("batch "+test.name, func(t *testing.T) {
+			_, err := definition.EnqueueManyOn(
+				context.Background(),
+				test.executor,
+				[]pgtask.EnqueueRequest[reportPayload]{{Options: test.options}},
+			)
+			if err == nil {
+				t.Fatal("expected batch enqueue error")
+			}
+		})
+	}
 }
 
 func TestStorageProtocolCompatibility(t *testing.T) {
@@ -233,6 +326,13 @@ func TestClient(t *testing.T) {
 	}
 	if len(batch) != 2 || batch[0].ID == batch[1].ID {
 		t.Fatalf("unexpected batch handles: %#v", batch)
+	}
+	if _, err := definition.EnqueueMany(
+		ctx,
+		client,
+		[]pgtask.EnqueueRequest[reportPayload]{{Options: pgtask.EnqueueOptions{MaxAttempts: -1}}},
+	); err == nil {
+		t.Fatal("expected batch validation error")
 	}
 	if pgtask.Task[reportResult](client, handle.ID).ID != handle.ID {
 		t.Fatal("task handle did not preserve the ID")
@@ -481,6 +581,9 @@ func TestClientErrors(t *testing.T) {
 	}
 	if _, err := definition.Enqueue(ctx, restrictedClient, reportPayload{}, pgtask.EnqueueOptions{}); err == nil {
 		t.Fatal("expected enqueue protocol error")
+	}
+	if _, err := definition.EnqueueMany(ctx, restrictedClient, nil); err == nil {
+		t.Fatal("expected batch enqueue protocol error")
 	}
 	if _, err := definition.Enqueue(ctx, client, reportPayload{}, pgtask.EnqueueOptions{}); err == nil {
 		t.Fatal("expected enqueue error")
