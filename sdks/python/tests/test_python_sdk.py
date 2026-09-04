@@ -496,7 +496,7 @@ async def test_python_handler_uses_durable_workflow_operations() -> None:
             step_calls += 1
             return payload["value"]
 
-        value = await task.step("read-value", checkpointed_value)
+        value = await task.step("toolset__<agent>.call_tool:tool 1/2 ✓", checkpointed_value)
         await task.sleep_for("brief-delay", 0.01)
         await task.sleep_until("absolute-delay", datetime.now(timezone.utc) + timedelta(milliseconds=10))
         waiting.set()
