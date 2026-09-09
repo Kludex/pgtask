@@ -58,7 +58,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: [17, 18]
+        postgres: [16, 17, 18]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -91,7 +91,7 @@ jobs:
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     services:
       postgres:
-        image: postgres:17
+        image: postgres:16
         env:
           POSTGRES_DB: pgtask
           POSTGRES_PASSWORD: pgtask
@@ -127,7 +127,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: [17, 18]
+        postgres: [16, 17, 18]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -172,7 +172,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: [17, 18]
+        postgres: [16, 17, 18]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -215,7 +215,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        image: postgres:16
         env:
           POSTGRES_DB: pgtask
           POSTGRES_PASSWORD: pgtask
