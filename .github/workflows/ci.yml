@@ -18,6 +18,7 @@ jobs:
           toolchain: 1.97.1
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/test-release-version.sh
       - run: ./scripts/check-release-version.sh
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
