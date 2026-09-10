@@ -22,40 +22,36 @@ fi
 [[ -n "$JAVA_BIN" ]] || { echo "no java found; set JAVA_BIN" >&2; exit 1; }
 [[ -f "$JAR" ]] || { echo "tla2tools.jar not found at $JAR" >&2; exit 1; }
 
-# spec : config : expected(pass|fail) : what it means
+# spec : config : expected violation (empty means no violation) : what it means
 CASES=(
-    "TaskLifecycle:TaskLifecycle:pass:lease fencing, retry budget and recovery are sound"
-    "TaskLifecycle:TaskLifecycleLarge:pass:the same at 3 tasks, safety only"
-    "WaitProtocol:SignalWait:pass:wait_for_signal is serialised against emit_signal"
-    "WaitProtocol:ResultWait:fail:the pre-fix result path, kept as the counterexample"
-    "WaitProtocol:ResultWaitRecheck:fail:re-reading the source after registering does not fix it"
-    "WaitProtocol:ResultWaitFixed:pass:the shipped result path, locking the child row"
+    "TaskLifecycle:TaskLifecycle::lease fencing, retry budget and recovery are sound"
+    "TaskLifecycle:TaskLifecycleLarge::the same at 3 tasks, safety only"
+    "WaitProtocol:SignalWait::wait_for_signal is serialised against emit_signal"
+    "WaitProtocol:ResultWait:NoLostWakeup:the pre-fix result path, kept as the counterexample"
+    "WaitProtocol:ResultWaitRecheck:NoLostWakeup:re-reading the source after registering does not fix it"
+    "WaitProtocol:ResultWaitFixed::the shipped result path, locking the child row"
 )
 
 failures=0
 
 for entry in "${CASES[@]}"; do
-    IFS=':' read -r spec config expected description <<<"$entry"
+    IFS=':' read -r spec config expected_violation description <<<"$entry"
     output="$(cd "$SPECS" && "$JAVA_BIN" -XX:+UseParallelGC -cp "$JAR" tlc2.TLC \
         -workers auto -config "$config.cfg" -deadlock "$spec.tla" 2>&1)"
+    states="$(grep -oE '[0-9.,]+ distinct states found' <<<"$output" | head -1)"
 
-    if grep -q "No error has been found" <<<"$output"; then
-        actual="pass"
-    elif grep -qE "Error: (Invariant|Temporal properties|Property)" <<<"$output"; then
-        actual="fail"
+    if [[ -z "$expected_violation" ]] && grep -q "No error has been found" <<<"$output"; then
+        echo "  ok       $config [pass as expected, $states] - $description"
+    elif [[ -n "$expected_violation" ]] \
+        && grep -Fqx "Error: Invariant $expected_violation is violated." <<<"$output"; then
+        echo "  ok       $config [$expected_violation failed as expected, $states] - $description"
+    elif grep -qE "^Error: (Invariant|Action property|Temporal properties|Property)" <<<"$output"; then
+        echo "  MISMATCH $config did not produce the expected result - $description"
+        grep -E "^Error:" <<<"$output" | head -3 | sed 's/^/           /'
+        failures=$((failures + 1))
     else
         echo "  ERROR    $config - TLC did not run cleanly"
         sed -n '1,15p' <<<"$output" | sed 's/^/           /'
-        failures=$((failures + 1))
-        continue
-    fi
-
-    states="$(grep -oE '[0-9,]+ distinct states found' <<<"$output" | head -1)"
-    if [[ "$actual" == "$expected" ]]; then
-        echo "  ok       $config [$actual as expected, $states] - $description"
-    else
-        echo "  MISMATCH $config expected $expected, got $actual - $description"
-        grep -E "^Error:" <<<"$output" | head -3 | sed 's/^/           /'
         failures=$((failures + 1))
     fi
 done

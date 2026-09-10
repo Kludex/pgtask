@@ -183,6 +183,12 @@ Safety ==
 (* Temporal                                                                 *)
 (***************************************************************************)
 
+\* Every task mutation must be performed by the handler that owns the full
+\* attempt and lease-token fence.
+FencedMutations ==
+    [][\A h \in inflight :
+        (Complete(h) \/ FailWithRetry(h) \/ FailTerminally(h)) => Owns(h)]_vars
+
 \* Terminal states are absorbing: nothing ever moves a finished task.
 TerminalIsStable ==
     [][\A t \in Tasks : state[t] \in Terminal => state'[t] = state[t]]_vars

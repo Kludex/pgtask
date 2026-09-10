@@ -4,6 +4,7 @@ TLA+ models of the parts of pgtask where an interleaving can lose work. Run
 them with:
 
 ```console
+./scripts/fetch-tla-tools.sh        # download the pinned TLC release
 ./scripts/check-tla.sh              # model-check every configuration
 ./scripts/verify-tla-coverage.sh    # prove the models are not vacuous
 ```
@@ -31,7 +32,7 @@ reason it finds anything.
 Models parking a task on a wait row against the transaction that is meant to
 wake it. One constant decides everything:
 
-`SourceLocked` — does the waiter hold a row lock that the waker's write
+`SourceLocked` - does the waiter hold a row lock that the waker's write
 conflicts with, for the whole span between its read and its commit?
 
 | Configuration | `SourceLocked` | Models | Result |
@@ -79,12 +80,12 @@ happen is two of them writing a result.
 expired keeps running and will try to write later. Without that, the fencing
 invariant would be checking nothing.
 
-Invariants: `AtMostOneFencedWriter`, `RunningIffLeased`, `TerminalUnleased`,
-`AttemptBounded`, `TokensUnique`. Temporal: `TerminalIsStable`,
-`AttemptMonotonic`, `EventuallyTerminal`.
+Safety checks: `AtMostOneFencedWriter`, `RunningIffLeased`, `TerminalUnleased`,
+`AttemptBounded`, `TokensUnique`, and `FencedMutations`. Temporal checks:
+`TerminalIsStable`, `AttemptMonotonic`, and `EventuallyTerminal`.
 
 `TaskLifecycle.cfg` checks safety and liveness at 2 tasks / 2 workers / 2
-attempts. `TaskLifecycleLarge.cfg` widens to 3 tasks but checks safety only —
+attempts. `TaskLifecycleLarge.cfg` widens to 3 tasks but checks safety only -
 liveness checking is what makes the state space explode.
 
 ## Vacuity
