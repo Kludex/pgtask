@@ -1,70 +1,87 @@
 //! Stateful model test for the claim/lease/retry/recovery kernel.
 //!
 //! A reference model tracks what each task's state, attempt count and lease
-//! ownership are supposed to be. A random schedule of operations is applied to
-//! both the model and a real PostgreSQL database, and after every single step
-//! the two are compared. Anything the model and the database disagree about is
-//! a bug in one of them.
+//! ownership are supposed to be. `proptest` generates sequences of operations,
+//! applies each to both the model and a real PostgreSQL database, and compares
+//! them after every step. Anything they disagree about is a bug in one of them.
 //!
-//! The schedule comes from a seeded PRNG, so a failure is reproducible: the
-//! panic message carries the exact command to replay it.
+//! The reason this is a `proptest` state machine rather than a plain seeded loop
+//! is shrinking. A failure in a forty-step schedule is nearly unreadable; given
+//! one, proptest replays shorter and simpler prefixes until it has the smallest
+//! sequence that still fails, which is usually two or three steps and tells you
+//! what broke on its own.
 //!
 //! Two things this is really looking for:
 //!
 //!   * fencing. Every claim mints a new attempt and lease token, and the
-//!     previous pair is kept around and periodically replayed. A stale write
-//!     must never be accepted.
+//!     previous pair is kept and periodically replayed. A stale write must never
+//!     be accepted.
 //!   * lease recovery. A running task whose lease expired must come back as
 //!     `pending` while it still has attempts, and `failed` once it does not,
 //!     without ever losing the task.
 //!
-//!     `PGTASK_MODEL_SEED=12345 cargo test -p pgtask-postgres --test model`
-//!     `PGTASK_MODEL_RUNS=200 cargo test -p pgtask-postgres --test model`
+//! Each case builds its own queue, so cases cannot see each other's rows. Give
+//! this its own database all the same: it drives far more load than the rest of
+//! the suite, and several existing tests assert on timeouts or notification
+//! shards, which start failing when this runs alongside them.
 //!
-//! Give this its own database. It drives far more load than the rest of the
-//! suite, and several existing tests assert on timeouts or on notification
-//! shards, which start failing when this runs against the same database at the
-//! same time.
+//!     `PGTASK_MODEL_CASES=64 cargo test -p pgtask-postgres --test model`
 
-use std::{collections::BTreeMap, fmt::Write as _, time::Duration};
+use std::{collections::HashMap, sync::OnceLock, time::Duration};
 
 use pgtask_core::{EnqueueRequest, HandlerVersion, LeaseToken, QueueName, TaskId, TaskName, TaskState, WorkerId};
 use pgtask_postgres::Store;
+use proptest::prelude::*;
+use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
 use serde_json::json;
+use tokio::runtime::Runtime;
 use uuid::Uuid;
 
 const MAX_ATTEMPTS: u16 = 3;
+/// Tasks a case may create. Small, so operations collide on the same rows.
+const MAX_TASKS: usize = 4;
 
-fn env_var<T: std::str::FromStr>(name: &str, fallback: T) -> T {
-    std::env::var(name)
+fn cases() -> u32 {
+    std::env::var("PGTASK_MODEL_CASES")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(fallback)
+        .unwrap_or(24)
 }
 
-/// xorshift64*: tiny, and the seed alone fixes the whole schedule.
-struct Rng(u64);
+/// One runtime and one migrated store for the whole file. Building either per
+/// case would dominate the run, and proptest replays cases many times while
+/// shrinking.
+fn store() -> Option<&'static (Runtime, Store)> {
+    static STORE: OnceLock<Option<(Runtime, Store)>> = OnceLock::new();
+    STORE
+        .get_or_init(|| {
+            let database_url = std::env::var("PGTASK_DATABASE_URL").ok()?;
+            let runtime = Runtime::new().ok()?;
+            let store = runtime.block_on(async {
+                let store = Store::connect(&database_url).await.ok()?;
+                store.migrate().await.ok()?;
+                Some(store)
+            })?;
+            Some((runtime, store))
+        })
+        .as_ref()
+}
 
-impl Rng {
-    fn new(seed: u64) -> Self {
-        Self(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed })
-    }
+/// Which lease to present: the live one, or one that has been superseded.
+#[derive(Clone, Copy, Debug)]
+enum Which {
+    Live,
+    Stale,
+}
 
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, bound: usize) -> usize {
-        if bound == 0 {
-            return 0;
-        }
-        usize::try_from(self.next_u64() % bound as u64).expect("a value below bound fits usize")
-    }
+#[derive(Clone, Debug)]
+enum Transition {
+    Enqueue,
+    Claim,
+    Complete { task: usize, which: Which },
+    Fail { task: usize, which: Which, retry: bool },
+    ExpireAndRecover { task: usize },
+    Cancel { task: usize },
 }
 
 /// What the model believes about one task.
@@ -72,10 +89,8 @@ impl Rng {
 struct ModelTask {
     state: TaskState,
     attempt: u16,
-    /// The lease the model believes is live, if the task is running.
-    live_lease: Option<(u16, LeaseToken)>,
-    /// A lease that has been superseded. Replaying it must always be rejected.
-    stale_lease: Option<(u16, LeaseToken)>,
+    /// Whether a superseded lease exists to replay.
+    has_stale: bool,
 }
 
 impl ModelTask {
@@ -84,95 +99,196 @@ impl ModelTask {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Op {
-    Enqueue,
-    Claim,
-    Complete { stale: bool },
-    FailWithRetry { stale: bool },
-    FailTerminally,
-    ExpireAndRecover,
-    Cancel,
+#[derive(Clone, Debug)]
+struct Model {
+    tasks: Vec<ModelTask>,
 }
 
-fn choose_op(rng: &mut Rng) -> Op {
-    match rng.below(100) {
-        0..=17 => Op::Enqueue,
-        18..=43 => Op::Claim,
-        44..=57 => Op::Complete { stale: false },
-        58..=64 => Op::Complete { stale: true },
-        65..=76 => Op::FailWithRetry { stale: false },
-        77..=81 => Op::FailWithRetry { stale: true },
-        82..=86 => Op::FailTerminally,
-        87..=96 => Op::ExpireAndRecover,
-        _ => Op::Cancel,
+impl Model {
+    fn indices_where(&self, predicate: impl Fn(&ModelTask) -> bool) -> Vec<usize> {
+        self.tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| predicate(task))
+            .map(|(index, _)| index)
+            .collect()
     }
 }
 
-struct World {
-    store: Store,
+struct ModelMachine;
+
+impl ReferenceStateMachine for ModelMachine {
+    type State = Model;
+    type Transition = Transition;
+
+    fn init_state() -> BoxedStrategy<Self::State> {
+        Just(Model { tasks: Vec::new() }).boxed()
+    }
+
+    fn transitions(state: &Self::State) -> BoxedStrategy<Self::Transition> {
+        let running = state.indices_where(|task| task.state == TaskState::Running);
+        let pending = state.indices_where(|task| task.state == TaskState::Pending);
+
+        let mut options: Vec<BoxedStrategy<Transition>> = Vec::new();
+        if state.tasks.len() < MAX_TASKS {
+            options.push(Just(Transition::Enqueue).boxed());
+        }
+        options.push(Just(Transition::Claim).boxed());
+        if !running.is_empty() {
+            let indices = running.clone();
+            options.push(
+                (proptest::sample::select(indices.clone()), any::<bool>())
+                    .prop_map(|(task, stale)| Transition::Complete {
+                        task,
+                        which: if stale { Which::Stale } else { Which::Live },
+                    })
+                    .boxed(),
+            );
+            options.push(
+                (proptest::sample::select(indices.clone()), any::<bool>(), any::<bool>())
+                    .prop_map(|(task, stale, retry)| Transition::Fail {
+                        task,
+                        which: if stale { Which::Stale } else { Which::Live },
+                        retry,
+                    })
+                    .boxed(),
+            );
+            options.push(
+                proptest::sample::select(indices)
+                    .prop_map(|task| Transition::ExpireAndRecover { task })
+                    .boxed(),
+            );
+        }
+        if !pending.is_empty() {
+            options.push(
+                proptest::sample::select(pending)
+                    .prop_map(|task| Transition::Cancel { task })
+                    .boxed(),
+            );
+        }
+        proptest::strategy::Union::new(options).boxed()
+    }
+
+    fn preconditions(state: &Self::State, transition: &Self::Transition) -> bool {
+        match transition {
+            Transition::Enqueue => state.tasks.len() < MAX_TASKS,
+            Transition::Claim => true,
+            Transition::Complete { task, which } | Transition::Fail { task, which, .. } => {
+                state.tasks.get(*task).is_some_and(|entry| {
+                    entry.state == TaskState::Running && (matches!(which, Which::Live) || entry.has_stale)
+                })
+            }
+            Transition::ExpireAndRecover { task } => state
+                .tasks
+                .get(*task)
+                .is_some_and(|entry| entry.state == TaskState::Running),
+            Transition::Cancel { task } => state
+                .tasks
+                .get(*task)
+                .is_some_and(|entry| entry.state == TaskState::Pending),
+        }
+    }
+
+    fn apply(mut state: Self::State, transition: &Self::Transition) -> Self::State {
+        match transition {
+            Transition::Enqueue => state.tasks.push(ModelTask {
+                state: TaskState::Pending,
+                attempt: 0,
+                has_stale: false,
+            }),
+            Transition::Claim => {
+                // The lowest-numbered claimable task, which the descending
+                // priorities assigned at enqueue make the database's choice too.
+                if let Some(index) = state.indices_where(ModelTask::claimable).first().copied() {
+                    let entry = &mut state.tasks[index];
+                    entry.state = TaskState::Running;
+                    entry.attempt += 1;
+                    entry.has_stale = true;
+                }
+            }
+            Transition::Complete { task, which } => {
+                if matches!(which, Which::Live) {
+                    state.tasks[*task].state = TaskState::Succeeded;
+                }
+            }
+            Transition::Fail { task, which, retry } => {
+                if matches!(which, Which::Live) {
+                    let entry = &mut state.tasks[*task];
+                    entry.state = if *retry && entry.attempt < MAX_ATTEMPTS {
+                        TaskState::Pending
+                    } else {
+                        TaskState::Failed
+                    };
+                }
+            }
+            Transition::ExpireAndRecover { task } => {
+                let entry = &mut state.tasks[*task];
+                entry.state = if entry.attempt < MAX_ATTEMPTS {
+                    TaskState::Pending
+                } else {
+                    TaskState::Failed
+                };
+            }
+            Transition::Cancel { task } => state.tasks[*task].state = TaskState::Cancelled,
+        }
+        state
+    }
+}
+
+/// The live system: a queue of its own, and the leases seen so far.
+struct Sut {
     queue: QueueName,
     task_name: TaskName,
     ids: Vec<TaskId>,
-    model: Vec<ModelTask>,
-    history: Vec<String>,
+    live: HashMap<usize, (u16, LeaseToken)>,
+    stale: HashMap<usize, (u16, LeaseToken)>,
 }
 
-impl World {
-    fn new(store: Store, seed: u64, run: usize) -> Self {
-        let suffix = Uuid::new_v4();
-        let queue = QueueName::new(format!("model-{suffix}")).unwrap();
-        let task_name = TaskName::new(format!("model-task-{suffix}")).unwrap();
-        Self {
-            store,
-            queue,
-            task_name,
-            ids: Vec::new(),
-            model: Vec::new(),
-            history: vec![format!("seed={seed} run={run}")],
+impl Sut {
+    fn lease(&self, task: usize, which: Which) -> Option<(u16, LeaseToken)> {
+        match which {
+            Which::Live => self.live.get(&task).copied(),
+            Which::Stale => self.stale.get(&task).copied(),
         }
     }
 
-    fn note(&mut self, line: String) {
-        self.history.push(line);
-    }
-
-    fn report(&self) -> String {
-        let mut out = String::new();
-        for line in &self.history {
-            let _ = writeln!(out, "  {line}");
+    /// The lease just used is now the superseded one, ready to be replayed.
+    fn supersede(&mut self, task: usize) {
+        if let Some(previous) = self.live.remove(&task) {
+            self.stale.insert(task, previous);
         }
-        out
     }
 
-    /// Indices of tasks the model says are in a given state.
-    fn indices_where(&self, predicate: impl Fn(&ModelTask) -> bool) -> Vec<usize> {
-        self.model
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| predicate(t))
-            .map(|(i, _)| i)
-            .collect()
-    }
-
-    async fn enqueue(&mut self) {
+    async fn enqueue(&mut self, store: &Store) {
         let mut request = EnqueueRequest::new(self.task_name.clone(), json!({}));
         request.queue_name = self.queue.clone();
         request.max_attempts = MAX_ATTEMPTS;
-        let id = self.store.enqueue(&request).await.unwrap().task_id;
-        self.ids.push(id);
-        self.model.push(ModelTask {
-            state: TaskState::Pending,
-            attempt: 0,
-            live_lease: None,
-            stale_lease: None,
-        });
-        self.note(format!("enqueue -> #{}", self.model.len() - 1));
+        // Descending priority by index, so `claim` -- which orders by priority
+        // first -- always takes the lowest-numbered claimable task. Without this
+        // the order depends on `run_at`, which both recovery and a retry reset,
+        // and the model cannot predict which task the database will pick.
+        request.priority = i16::try_from(MAX_TASKS - self.ids.len()).unwrap();
+        self.ids.push(store.enqueue(&request).await.unwrap().task_id);
     }
 
-    async fn claim(&mut self) {
-        let claimed = self
-            .store
+    async fn claim(&mut self, store: &Store) {
+        // The pre-state is read from the database rather than the model,
+        // because `reference` is the state AFTER the transition. It also makes
+        // this check independent of the model; whether the two agree is
+        // check_invariants' job.
+        let mut before = Vec::new();
+        for id in &self.ids {
+            let task = store.get_task(*id).await.unwrap().unwrap();
+            before.push((task.state, task.attempt));
+        }
+        let claimable: Vec<usize> = before
+            .iter()
+            .enumerate()
+            .filter(|(_, (state, attempt))| *state == TaskState::Pending && *attempt < MAX_ATTEMPTS)
+            .map(|(index, _)| index)
+            .collect();
+
+        let claimed = store
             .claim(
                 &self.queue,
                 WorkerId::new(),
@@ -182,292 +298,176 @@ impl World {
             )
             .await
             .unwrap();
-
-        let claimable = self.indices_where(ModelTask::claimable);
-        let Some(task) = claimed.first() else {
-            assert!(
+        match claimed.first() {
+            Some(task) => {
+                let index = self.ids.iter().position(|id| *id == task.id).expect("a known task");
+                assert!(
+                    claimable.contains(&index),
+                    "claim returned #{index}, which was {:?} at attempt {} beforehand",
+                    before[index].0,
+                    before[index].1
+                );
+                assert_eq!(
+                    task.attempt,
+                    before[index].1 + 1,
+                    "attempt drifted on claim for #{index}"
+                );
+                self.supersede(index);
+                self.live.insert(index, (task.attempt, task.lease_token.unwrap()));
+            }
+            None => assert!(
                 claimable.is_empty(),
-                "claim returned nothing while the model had {} claimable task(s)\n{}",
-                claimable.len(),
-                self.report()
-            );
-            self.note("claim -> nothing".to_owned());
-            return;
-        };
-
-        let index = self
-            .ids
-            .iter()
-            .position(|id| *id == task.id)
-            .expect("claimed an unknown task");
-        assert!(
-            claimable.contains(&index),
-            "claim returned #{index}, which the model says is {:?} at attempt {}\n{}",
-            self.model[index].state,
-            self.model[index].attempt,
-            self.report()
-        );
-
-        let model_attempt = {
-            let entry = &mut self.model[index];
-            entry.state = TaskState::Running;
-            entry.attempt += 1;
-            // The lease being replaced becomes the stale one to replay later.
-            entry.stale_lease = entry.live_lease.take().or(entry.stale_lease);
-            entry.live_lease = Some((task.attempt, task.lease_token.unwrap()));
-            entry.attempt
-        };
-        assert_eq!(
-            task.attempt,
-            model_attempt,
-            "attempt drifted on claim\n{}",
-            self.report()
-        );
-        self.note(format!("claim -> #{index} attempt={model_attempt}"));
-    }
-
-    /// Picks the lease to present: the live one, or a superseded one when
-    /// `stale` is set. Returns None when there is nothing suitable.
-    fn lease_for(&self, index: usize, stale: bool) -> Option<(u16, LeaseToken)> {
-        let entry = &self.model[index];
-        if stale { entry.stale_lease } else { entry.live_lease }
-    }
-
-    async fn complete(&mut self, rng: &mut Rng, stale: bool) {
-        let candidates = self.indices_where(|t| t.state == TaskState::Running);
-        if candidates.is_empty() {
-            return;
+                "claim returned nothing while {} task(s) were claimable",
+                claimable.len()
+            ),
         }
-        let index = candidates[rng.below(candidates.len())];
-        let Some((attempt, token)) = self.lease_for(index, stale) else {
+    }
+
+    async fn complete(&mut self, store: &Store, task: usize, which: Which) {
+        let Some((attempt, token)) = self.lease(task, which) else {
             return;
         };
-        let accepted = self
-            .store
-            .complete(self.ids[index], attempt, token, Some(&json!({"ok": true})))
+        let accepted = store
+            .complete(self.ids[task], attempt, token, Some(&json!({"ok": true})))
             .await
             .unwrap();
-
-        if stale {
-            assert!(
-                !accepted,
-                "a superseded lease completed #{index}: fencing failed\n{}",
-                self.report()
-            );
-            self.note(format!("complete #{index} STALE -> rejected"));
-        } else {
-            assert!(
-                accepted,
-                "the live lease could not complete #{index}\n{}",
-                self.report()
-            );
-            let entry = &mut self.model[index];
-            entry.state = TaskState::Succeeded;
-            entry.stale_lease = entry.live_lease.take();
-            self.note(format!("complete #{index} -> succeeded"));
+        match which {
+            Which::Live => {
+                assert!(accepted, "the live lease could not complete #{task}");
+                self.supersede(task);
+            }
+            Which::Stale => assert!(!accepted, "a superseded lease completed #{task}: fencing failed"),
         }
     }
 
-    async fn fail(&mut self, rng: &mut Rng, stale: bool, retry: bool) {
-        let candidates = self.indices_where(|t| t.state == TaskState::Running);
-        if candidates.is_empty() {
-            return;
-        }
-        let index = candidates[rng.below(candidates.len())];
-        let Some((attempt, token)) = self.lease_for(index, stale) else {
+    async fn fail(&mut self, store: &Store, task: usize, which: Which, retry: bool, attempt_now: u16) {
+        let Some((attempt, token)) = self.lease(task, which) else {
             return;
         };
-        let retry_after = retry.then(|| Duration::from_millis(0));
-        let outcome = self
-            .store
-            .fail(self.ids[index], attempt, token, &json!({"type": "model"}), retry_after)
+        let outcome = store
+            .fail(
+                self.ids[task],
+                attempt,
+                token,
+                &json!({"type": "model"}),
+                retry.then_some(Duration::ZERO),
+            )
             .await
             .unwrap();
-
-        if stale {
-            assert!(
-                outcome.is_none(),
-                "a superseded lease failed #{index}: fencing failed\n{}",
-                self.report()
-            );
-            self.note(format!("fail #{index} STALE -> rejected"));
-            return;
+        match which {
+            Which::Live => {
+                let expected = if retry && attempt_now < MAX_ATTEMPTS {
+                    TaskState::Pending
+                } else {
+                    TaskState::Failed
+                };
+                assert_eq!(
+                    outcome,
+                    Some(expected),
+                    "fail on #{task} at attempt {attempt_now}/{MAX_ATTEMPTS} returned the wrong state"
+                );
+                self.supersede(task);
+            }
+            Which::Stale => assert!(outcome.is_none(), "a superseded lease failed #{task}: fencing failed"),
         }
-
-        let attempt_before = self.model[index].attempt;
-        // fail_task retries only while attempts remain, otherwise it is terminal.
-        let expected = if retry && attempt_before < MAX_ATTEMPTS {
-            TaskState::Pending
-        } else {
-            TaskState::Failed
-        };
-        assert_eq!(
-            outcome,
-            Some(expected),
-            "fail #{index} at attempt {attempt_before}/{MAX_ATTEMPTS} returned the wrong state\n{}",
-            self.report()
-        );
-        let entry = &mut self.model[index];
-        entry.state = expected;
-        entry.stale_lease = entry.live_lease.take();
-        self.note(format!("fail #{index} retry={retry} -> {expected:?}"));
     }
 
-    /// Expires a lease outright and runs the recovery sweep, which is what
-    /// happens when a worker dies mid-handler.
-    async fn expire_and_recover(&mut self, rng: &mut Rng) {
-        let candidates = self.indices_where(|t| t.state == TaskState::Running);
-        if candidates.is_empty() {
-            return;
-        }
-        let index = candidates[rng.below(candidates.len())];
+    async fn expire_and_recover(&mut self, store: &Store, task: usize) {
         sqlx::query(
-            "UPDATE pgtask.tasks SET lease_expires_at = statement_timestamp() - interval '1 second'
+            "UPDATE pgtask.tasks
+             SET lease_expires_at = statement_timestamp() - interval '1 second'
              WHERE id = $1",
         )
-        .bind(self.ids[index].as_uuid())
-        .execute(self.store.pool())
+        .bind(self.ids[task].as_uuid())
+        .execute(store.pool())
         .await
         .unwrap();
-
-        let recovered = self.store.recover_expired(&self.queue, 100).await.unwrap();
-        assert!(
-            recovered >= 1,
-            "recovery skipped an expired lease on #{index}\n{}",
-            self.report()
-        );
-        // The task whose lease was expired must specifically have been reclaimed.
-        // Without this, the reconciliation loop below would silently skip it if
-        // recovery had left it running.
-        assert_ne!(
-            self.store.get_task(self.ids[index]).await.unwrap().unwrap().state,
-            TaskState::Running,
-            "recovery left #{index} running on an expired lease\n{}",
-            self.report()
-        );
-
-        // Recovery may sweep other tasks expired earlier in this run too, so
-        // reconcile every running task the model knows about.
-        for other in self.indices_where(|t| t.state == TaskState::Running) {
-            let actual = self.store.get_task(self.ids[other]).await.unwrap().unwrap();
-            if actual.state == TaskState::Running {
-                continue;
-            }
-            let attempt_before = self.model[other].attempt;
-            let expected = if attempt_before < MAX_ATTEMPTS {
-                TaskState::Pending
-            } else {
-                TaskState::Failed
-            };
-            assert_eq!(
-                actual.state,
-                expected,
-                "recovery put #{other} at attempt {attempt_before}/{MAX_ATTEMPTS} into the wrong state\n{}",
-                self.report()
-            );
-            let entry = &mut self.model[other];
-            entry.state = expected;
-            entry.stale_lease = entry.live_lease.take();
-        }
-        self.note(format!("expire+recover #{index} -> {:?}", self.model[index].state));
-    }
-
-    async fn cancel(&mut self, rng: &mut Rng) {
-        let candidates = self.indices_where(|t| t.state == TaskState::Pending);
-        if candidates.is_empty() {
-            return;
-        }
-        let index = candidates[rng.below(candidates.len())];
-        let cancelled = self.store.cancel(self.ids[index]).await.unwrap();
-        assert!(
-            cancelled,
-            "a pending task refused cancellation: #{index}\n{}",
-            self.report()
-        );
-        self.model[index].state = TaskState::Cancelled;
-        self.note(format!("cancel #{index}"));
-    }
-
-    /// The whole model against the whole database, after every step.
-    async fn check(&self) {
-        for (index, expected) in self.model.iter().enumerate() {
-            let actual = self.store.get_task(self.ids[index]).await.unwrap().unwrap();
-            assert_eq!(
-                actual.state,
-                expected.state,
-                "state diverged for #{index}\n{}",
-                self.report()
-            );
-            assert_eq!(
-                actual.attempt,
-                expected.attempt,
-                "attempt diverged for #{index}\n{}",
-                self.report()
-            );
-            assert!(
-                actual.attempt <= MAX_ATTEMPTS,
-                "#{index} ran {} times with a budget of {MAX_ATTEMPTS}\n{}",
-                actual.attempt,
-                self.report()
-            );
-            // The table's own CHECK says a running task always holds a lease.
-            assert_eq!(
-                actual.state == TaskState::Running,
-                actual.lease_token.is_some(),
-                "#{index} is {:?} but its lease is {:?}\n{}",
-                actual.state,
-                actual.lease_token,
-                self.report()
-            );
-        }
-    }
-
-    /// No task ever silently disappears, and terminal counts only grow.
-    fn census(&self) -> BTreeMap<String, usize> {
-        let mut counts = BTreeMap::new();
-        for task in &self.model {
-            *counts.entry(format!("{:?}", task.state)).or_insert(0) += 1;
-        }
-        counts
+        let recovered = store.recover_expired(&self.queue, 100).await.unwrap();
+        assert!(recovered >= 1, "recovery skipped the expired lease on #{task}");
+        self.supersede(task);
     }
 }
 
-#[tokio::test]
-async fn the_database_agrees_with_the_model() {
-    let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
-        return;
-    };
-    let store = Store::connect(&database_url).await.unwrap();
-    store.migrate().await.unwrap();
+struct ModelTest;
 
-    let seed: u64 = env_var("PGTASK_MODEL_SEED", 0x5EED_0000_0000_0001);
-    let runs: usize = env_var("PGTASK_MODEL_RUNS", 12);
-    let steps: usize = env_var("PGTASK_MODEL_STEPS", 40);
+impl StateMachineTest for ModelTest {
+    type SystemUnderTest = Sut;
+    type Reference = ModelMachine;
 
-    for run in 0..runs {
-        // Each run gets its own derived seed so a single run can be replayed.
-        let run_seed = seed.wrapping_add((run as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
-        let mut rng = Rng::new(run_seed);
-        let mut world = World::new(store.clone(), run_seed, run);
-
-        for _ in 0..steps {
-            match choose_op(&mut rng) {
-                Op::Enqueue => world.enqueue().await,
-                Op::Claim => world.claim().await,
-                Op::Complete { stale } => world.complete(&mut rng, stale).await,
-                Op::FailWithRetry { stale } => world.fail(&mut rng, stale, true).await,
-                Op::FailTerminally => world.fail(&mut rng, false, false).await,
-                Op::ExpireAndRecover => world.expire_and_recover(&mut rng).await,
-                Op::Cancel => world.cancel(&mut rng).await,
-            }
-            world.check().await;
+    fn init_test(_reference: &<Self::Reference as ReferenceStateMachine>::State) -> Self::SystemUnderTest {
+        let suffix = Uuid::new_v4();
+        Sut {
+            queue: QueueName::new(format!("model-{suffix}")).unwrap(),
+            task_name: TaskName::new(format!("model-task-{suffix}")).unwrap(),
+            ids: Vec::new(),
+            live: HashMap::new(),
+            stale: HashMap::new(),
         }
-
-        let census = world.census();
-        assert_eq!(
-            census.values().sum::<usize>(),
-            world.model.len(),
-            "a task went missing in run {run}; replay with PGTASK_MODEL_SEED={run_seed}"
-        );
     }
+
+    fn apply(
+        mut sut: Self::SystemUnderTest,
+        reference: &<Self::Reference as ReferenceStateMachine>::State,
+        transition: Transition,
+    ) -> Self::SystemUnderTest {
+        let Some((runtime, store)) = store() else { return sut };
+        runtime.block_on(async {
+            match transition {
+                Transition::Enqueue => sut.enqueue(store).await,
+                Transition::Claim => sut.claim(store).await,
+                Transition::Complete { task, which } => sut.complete(store, task, which).await,
+                Transition::Fail { task, which, retry } => {
+                    sut.fail(store, task, which, retry, reference.tasks[task].attempt).await;
+                }
+                Transition::ExpireAndRecover { task } => sut.expire_and_recover(store, task).await,
+                Transition::Cancel { task } => {
+                    assert!(
+                        store.cancel(sut.ids[task]).await.unwrap(),
+                        "a pending task refused cancellation: #{task}"
+                    );
+                }
+            }
+        });
+        sut
+    }
+
+    /// The whole model against the whole database, after every step.
+    fn check_invariants(sut: &Self::SystemUnderTest, reference: &<Self::Reference as ReferenceStateMachine>::State) {
+        let Some((runtime, store)) = store() else { return };
+
+        runtime.block_on(async {
+            for (index, expected) in reference.tasks.iter().enumerate() {
+                let Some(id) = sut.ids.get(index) else { continue };
+                let actual = store.get_task(*id).await.unwrap().unwrap();
+                assert_eq!(actual.state, expected.state, "state diverged for #{index}");
+                assert_eq!(actual.attempt, expected.attempt, "attempt diverged for #{index}");
+                assert!(
+                    actual.attempt <= MAX_ATTEMPTS,
+                    "#{index} ran {} times with a budget of {MAX_ATTEMPTS}",
+                    actual.attempt
+                );
+                // The table's own CHECK says a running task always holds a lease.
+                assert_eq!(
+                    actual.state == TaskState::Running,
+                    actual.lease_token.is_some(),
+                    "#{index} is {:?} but its lease is {:?}",
+                    actual.state,
+                    actual.lease_token
+                );
+            }
+        });
+    }
+}
+
+prop_state_machine! {
+    #![proptest_config(ProptestConfig {
+        cases: cases(),
+        // Each step is a database round trip, so an unbounded shrink search
+        // would take longer than the run that found the failure.
+        max_shrink_iters: 512,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn the_database_agrees_with_the_model(sequential 1..30 => ModelTest);
 }

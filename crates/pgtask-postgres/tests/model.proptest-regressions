@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e5fa830b7c6287b9bf0a9b6d21263bc368bc06b9108d683400b1495d613fcde1 # shrinks to (initial_state, transitions, seen_counter) = (Model { tasks: [] }, [Enqueue, Claim], None)
+cc 533a4ae9da0e668f5129976dc3d22fa4293914a5b4ff3ac3000cf3965cdf6dd6 # shrinks to (initial_state, transitions, seen_counter) = (Model { tasks: [] }, [Enqueue, Claim, Enqueue, ExpireAndRecover { task: 0 }, Claim], None)
+cc 10c8481d3c797a24590fd9f7fcf169b826f2509fdf3305ada1e5dfc752ac4666 # shrinks to (initial_state, transitions, seen_counter) = (Model { tasks: [] }, [Enqueue, Claim, Enqueue, Claim, Enqueue, Claim, ExpireAndRecover { task: 2 }, Claim, Complete { task: 2, which: Stale }], None)
