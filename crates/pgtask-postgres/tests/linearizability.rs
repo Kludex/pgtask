@@ -513,12 +513,17 @@ async fn the_lease_protocol_is_linearizable() {
     );
     println!("{indeterminate} call(s) cut off mid-flight");
 
-    // Take one write the database rejected and claim it succeeded. That flip is
-    // a stale lease being honoured, which is what fencing exists to prevent.
+    // Claim an attempt number the machine could never have produced.
+    //
+    // The obvious corruption -- flipping a rejected write to accepted -- is not
+    // reliable once faults are in play: with indeterminate operations the model
+    // branches, and a stale-looking write can genuinely be explained by one of
+    // those branches. A claim cannot. Claims are never cut off, and the model
+    // requires each one to raise the attempt by exactly one, so an attempt past
+    // the budget has no ordering under any branch.
     check_and_prove_teeth("lease", "lease", &operations, |operation| {
-        let op = operation["input"]["op"].as_str().unwrap_or_default();
-        if matches!(op, "complete" | "renew") && operation["output"]["ok"] == json!(false) {
-            operation["output"]["ok"] = json!(true);
+        if operation["input"]["op"] == json!("claim") {
+            operation["output"]["attempt"] = json!(MAX_ATTEMPTS + 7);
         }
     });
 }
