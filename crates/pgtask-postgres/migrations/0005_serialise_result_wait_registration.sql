@@ -1,27 +1,19 @@
--- Close the lost wake-up window in wait_for_result.
---
--- The waiter read the child's state without a lock, then registered the wait and
--- parked the parent. Under READ COMMITTED that wait row stays invisible until it
--- commits, and the waker -- complete_task on the CHILD -- takes no lock on the
--- parent row the waiter holds. So both could miss each other, leaving the parent
--- in `waiting` with its wake-up already spent and no sweep able to recover it.
---
--- Taking FOR NO KEY UPDATE on the child makes complete_task's UPDATE of that
--- child wait for the wait row to commit. An UPDATE that leaves key columns alone
--- acquires FOR NO KEY UPDATE, and that mode self-conflicts, so this is enough.
--- Lock order stays parent-then-child, matching cancel_owned_children, so it adds
--- no deadlock cycle.
---
--- This is what already protects wait_for_signal, though there only by accident:
--- emit_signal's insert into pgtask.signals needs a key-share lock on the task row
--- for its foreign key, and that conflicts with the waiter's FOR UPDATE.
+-- Serialize result registration with child completion and ancestor-first lease renewal.
 
-CREATE OR REPLACE FUNCTION pgtask.wait_for_result(p_task_id uuid, p_attempt integer, p_lease_token uuid, p_step_name text, p_occurrence integer, p_result_task_id uuid, p_timeout_milliseconds bigint)
- RETURNS TABLE(status text, checkpoint jsonb)
- LANGUAGE plpgsql
- SECURITY DEFINER
- SET search_path TO 'pg_catalog', 'pgtask'
-AS $function$
+CREATE OR REPLACE FUNCTION pgtask.wait_for_result(
+    p_task_id uuid,
+    p_attempt integer,
+    p_lease_token uuid,
+    p_step_name text,
+    p_occurrence integer,
+    p_result_task_id uuid,
+    p_timeout_milliseconds bigint
+)
+RETURNS TABLE(status text, checkpoint jsonb)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, pgtask
+AS $$
 DECLARE
     target_handler_version integer;
     result_state text;
@@ -119,4 +111,54 @@ BEGIN
     END IF;
     RETURN QUERY SELECT 'waiting'::text, NULL::jsonb;
 END;
-$function$
+$$;
+
+
+CREATE OR REPLACE FUNCTION pgtask.renew_leases(
+    p_task_ids uuid[],
+    p_attempts integer[],
+    p_lease_tokens uuid[],
+    p_lease_milliseconds bigint
+)
+RETURNS SETOF uuid
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, pgtask
+AS $$
+    WITH RECURSIVE requested AS MATERIALIZED (
+        SELECT *
+        FROM unnest(p_task_ids, p_attempts, p_lease_tokens) AS leases(task_id, attempt, lease_token)
+    ),
+    ancestry AS (
+        SELECT tasks.id, tasks.parent_task_id, 0 AS depth
+        FROM pgtask.tasks
+        WHERE tasks.id = ANY(p_task_ids)
+        UNION ALL
+        SELECT ancestry.id, parents.parent_task_id, ancestry.depth + 1
+        FROM ancestry
+        JOIN pgtask.tasks AS parents ON parents.id = ancestry.parent_task_id
+    ),
+    depths AS (
+        SELECT id, max(depth) AS depth
+        FROM ancestry
+        GROUP BY id
+    ),
+    locked AS MATERIALIZED (
+        SELECT tasks.id
+        FROM pgtask.tasks
+        JOIN depths ON depths.id = tasks.id
+        ORDER BY depths.depth, tasks.id
+        FOR NO KEY UPDATE OF tasks
+    )
+    UPDATE pgtask.tasks
+    SET lease_expires_at = statement_timestamp() + (p_lease_milliseconds * interval '1 millisecond'),
+        updated_at = statement_timestamp()
+    FROM requested
+    JOIN locked ON locked.id = requested.task_id
+    WHERE tasks.id = requested.task_id
+        AND tasks.state = 'running'
+        AND tasks.attempt = requested.attempt
+        AND tasks.lease_token = requested.lease_token
+        AND tasks.cancel_requested_at IS NULL
+    RETURNING tasks.id;
+$$;

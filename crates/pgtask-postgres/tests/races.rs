@@ -14,15 +14,12 @@ use pgtask_postgres::{ResultWait, ResultWaitRequest, SignalWait, SignalWaitReque
 use serde_json::json;
 use uuid::Uuid;
 
-/// Pairs raced by the two reproductions, which are `#[ignore]`d and so only run
-/// on request. A high count keeps the report precise.
 const PAIRS: usize = 400;
 /// Pairs raced by the signal test, which runs in CI on every change. Serialising
 /// is not probabilistic — a lock either conflicts or it does not — so this only
 /// has to be large enough to notice. For comparison, the unserialised path parks
 /// roughly nine in ten registrations.
 const SIGNAL_PAIRS: usize = 120;
-/// Pairs raced by the timeout test, which pays a sweep and a sleep per run.
 const TIMED_PAIRS: usize = 60;
 /// Pairs in flight at once. Each pair holds two pooled connections.
 const CONCURRENCY: usize = 12;
@@ -251,53 +248,26 @@ async fn a_timed_wait_never_reports_timeout_for_a_child_that_succeeded() {
     let pairs = build_pairs(&store, &queue, "race-timeout", TIMED_PAIRS).await;
     let timeout = Duration::from_millis(500);
 
-    let mut parked = Vec::new();
     for (index, pair) in pairs.iter().enumerate() {
         let outcome = race_result_wait(&store, pair, Some(timeout), jitter(index)).await;
-        if outcome == Some(ResultWait::Waiting)
-            && store.get_task(pair.parent.id).await.unwrap().unwrap().state == TaskState::Waiting
-        {
-            parked.push((pair.parent.id, pair.child.id));
-        }
-    }
-
-    if parked.is_empty() {
-        // Nothing lost its wake-up, so no parent can be misreported. Once the
-        // registration is serialised this is the only path and the property
-        // below holds vacuously; the test above is what proves the race is
-        // reachable at all.
-        return;
-    }
-
-    // Let the deadline pass, then run the sweep a worker runs on its wait loop.
-    tokio::time::sleep(timeout + Duration::from_millis(250)).await;
-    store.recover_result_wait_timeouts(1000).await.unwrap();
-
-    let mut misreported = Vec::new();
-    for (parent_id, child_id) in &parked {
-        assert_eq!(
-            store.get_task(*child_id).await.unwrap().unwrap().state,
-            TaskState::Succeeded,
-            "the child had already succeeded before the sweep ran"
-        );
+        let expected = json!({"state": "succeeded", "result": {"ok": true}, "error": null});
+        assert!(matches!(outcome, Some(ResultWait::Waiting | ResultWait::Ready(_))));
         let checkpoint = store
-            .get_checkpoint(*parent_id, HandlerVersion::default(), &wait_step(), 0)
+            .get_checkpoint(pair.parent.id, HandlerVersion::default(), &wait_step(), 0)
             .await
             .unwrap()
-            .expect("the sweep writes a checkpoint for the parent to replay");
-        if checkpoint.value.get("state").and_then(serde_json::Value::as_str) == Some("timeout") {
-            misreported.push((*parent_id, *child_id, checkpoint.value.clone()));
-        }
+            .expect("child completion must save the result before returning");
+        assert_eq!(checkpoint.value, expected);
+        let parent = store.get_task(pair.parent.id).await.unwrap().unwrap();
+        assert_eq!(
+            parent.state,
+            if outcome == Some(ResultWait::Waiting) {
+                TaskState::Pending
+            } else {
+                TaskState::Running
+            },
+        );
     }
-
-    assert!(
-        misreported.is_empty(),
-        "{}/{} parked parents were told their child timed out when it had already succeeded. \
-         The handler resumes on a false premise. First: {:?}",
-        misreported.len(),
-        parked.len(),
-        misreported.first()
-    );
 }
 
 /// The same race for signals. `wait_for_signal` reads `pgtask.signals` before
