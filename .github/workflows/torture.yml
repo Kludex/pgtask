@@ -1,16 +1,15 @@
 name: Torture test
 
 # Runs the verification stack much harder than PR-time CI does: higher
-# proptest / state-machine case counts, several independent legs (each on its
-# own fresh database, so a leg's leftover rows can never starve another --
-# see the `interval_schedule_reconciles_...` cross-test contamination this
-# was built to avoid), the linearizability checker with fault injection, the
-# TLA+ specs, and (weekly, or on request) the SQL mutation-testing sweep.
+# proptest / state-machine case counts, several independent legs each on
+# its own fresh database (a fresh service container isolates one leg's
+# run from another's, though not from the other test files it shares a
+# database with within the same leg -- see KNOWN_FLAKY_TESTS below), the
+# linearizability checker with fault injection, the TLA+ specs, and
+# (weekly, or on request) the SQL mutation-testing sweep.
 #
-# Lives on this fork only. It runs against `torture-testing`, an integration
-# branch that merges every open verification PR together so the nightly run
-# exercises all of them at once, not just whichever ships first. Nothing here
-# touches Kludex/pgtask.
+# `schedule:` only fires from the default branch, same as any other
+# workflow here.
 
 on:
   schedule:
