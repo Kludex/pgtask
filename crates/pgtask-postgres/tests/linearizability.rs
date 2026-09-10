@@ -634,6 +634,15 @@ async fn durable_steps_and_signals_are_linearizable() {
 
     let operations = recorder.take();
 
+    // Change one recorded value. A register whose value differs between two
+    // reports has no valid ordering, which is what makes a step's result
+    // changing between replays detectable.
+    check_and_prove_teeth("register", "register", &operations, |operation| {
+        if operation["output"]["value"].is_object() {
+            operation["output"]["value"] = json!({"client": 999, "round": 999});
+        }
+    });
+
     // A history where every register was written at most once would linearize
     // trivially, and would say nothing about first-write-wins. This is the
     // guard: at least one write has to have been handed back a value that was
@@ -654,15 +663,6 @@ async fn durable_steps_and_signals_are_linearizable() {
         seed()
     );
     println!("first-write-wins exercised by {displaced} displaced write(s)");
-
-    // Change one recorded value. A register whose value differs between two
-    // reports has no valid ordering, which is what makes a step's result
-    // changing between replays detectable.
-    check_and_prove_teeth("register", "register", &operations, |operation| {
-        if operation["output"]["value"].is_object() {
-            operation["output"]["value"] = json!({"client": 999, "round": 999});
-        }
-    });
 }
 
 // ---------------------------------------------------------- idempotency -----
@@ -752,6 +752,15 @@ async fn idempotent_enqueue_is_linearizable() {
 
     let operations = recorder.take();
 
+    // Claim a second creation for a key. Two callers both told they created the
+    // task means two tasks for one key, which is the duplicate the feature
+    // exists to prevent, and no ordering explains it.
+    check_and_prove_teeth("idempotency", "idempotency", &operations, |operation| {
+        if operation["output"]["created"] == json!(false) {
+            operation["output"]["created"] = json!(true);
+        }
+    });
+
     // A history where every key was enqueued once would linearize trivially and
     // say nothing. The guard: some caller has to have lost a race and been told
     // it did not create the task.
@@ -766,15 +775,6 @@ async fn idempotent_enqueue_is_linearizable() {
         seed()
     );
     println!("deduplication exercised by {losers} losing enqueue(s)");
-
-    // Claim a second creation for a key. Two callers both told they created the
-    // task means two tasks for one key, which is the duplicate the feature
-    // exists to prevent, and no ordering explains it.
-    check_and_prove_teeth("idempotency", "idempotency", &operations, |operation| {
-        if operation["output"]["created"] == json!(false) {
-            operation["output"]["created"] = json!(true);
-        }
-    });
 }
 
 // ------------------------------------------------------------- capacity -----
@@ -909,6 +909,14 @@ async fn queue_admission_is_linearizable() {
 
     let operations = recorder.take();
 
+    // Claim an admission that was refused actually succeeded: that is one more
+    // task outstanding than the limit allows, and no ordering explains it.
+    check_and_prove_teeth("capacity", "capacity", &operations, |operation| {
+        if operation["input"]["op"] == json!("enqueue") && operation["output"]["ok"] == json!(false) {
+            operation["output"]["ok"] = json!(true);
+        }
+    });
+
     // If the queue never filled, admission control was never asked a question.
     let rejected = operations
         .iter()
@@ -921,12 +929,4 @@ async fn queue_admission_is_linearizable() {
         seed()
     );
     println!("admission control exercised by {rejected} rejection(s)");
-
-    // Claim an admission that was refused actually succeeded: that is one more
-    // task outstanding than the limit allows, and no ordering explains it.
-    check_and_prove_teeth("capacity", "capacity", &operations, |operation| {
-        if operation["input"]["op"] == json!("enqueue") && operation["output"]["ok"] == json!(false) {
-            operation["output"]["ok"] = json!(true);
-        }
-    });
 }
