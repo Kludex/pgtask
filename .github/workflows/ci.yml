@@ -96,6 +96,10 @@ jobs:
         with:
           toolchain: 1.97.1
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: scripts/linearizability/go.mod
+          cache-dependency-path: scripts/linearizability/go.sum
       - run: cargo test --workspace --all-features
 
   python:
@@ -254,6 +258,10 @@ jobs:
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.14"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: scripts/linearizability/go.mod
+          cache-dependency-path: scripts/linearizability/go.sum
       - run: cargo install cargo-llvm-cov --version 0.8.6 --locked
       - run: uv sync --project sdks/python --group dev
       - run: ./scripts/coverage.sh
