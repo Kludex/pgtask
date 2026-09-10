@@ -1,6 +1,6 @@
 module github.com/Kludex/pgtask/sdks/go
 
-go 1.25.0
+go 1.25.13
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
@@ -17,6 +17,6 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/metric v1.45.0 // indirect
 	go.opentelemetry.io/otel/trace v1.45.0 // indirect
-	golang.org/x/sync v0.17.0 // indirect
-	golang.org/x/text v0.29.0 // indirect
+	golang.org/x/sync v0.21.0 // indirect
+	golang.org/x/text v0.39.0 // indirect
 )

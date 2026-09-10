@@ -179,6 +179,16 @@ async fn sql_surface_matches_the_recorded_contract() {
         .await
         .unwrap();
     let surface = record_surface(&store, &owner).await;
+    let server_version: i32 = sqlx::query_scalar("SELECT current_setting('server_version_num')::integer")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let surface = if server_version < 170_000 {
+        // Keep the owner's default grants in PostgreSQL 17 form, which includes MAINTAIN.
+        surface.replace("{owner}=arwdDxt/{owner}", "{owner}=arwdDxtm/{owner}")
+    } else {
+        surface
+    };
 
     drop(store);
     sqlx::query(sqlx::AssertSqlSafe(format!(

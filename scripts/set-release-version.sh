@@ -6,23 +6,20 @@
 set -eu
 
 version=${1:?usage: set-release-version.sh <version>}
-case $version in
-    [0-9]*.[0-9]*.[0-9]*) ;;
-    *)
-        printf 'version %s is not major.minor.patch\n' "$version" >&2
-        exit 1
-        ;;
-esac
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
+./scripts/validate-release-version.sh "$version" >/dev/null
 
 # Every crate inherits this, and maturin reads it for the wheel.
-perl -0pi -e 's/(\[workspace\.package\].*?\nversion = ")[^"]*(")/${1}'"$version"'${2}/s' Cargo.toml
+PGTASK_RELEASE_VERSION=$version perl -0pi -e \
+    's/(\[workspace\.package\].*?\nversion = ")[^"]*(")/$1$ENV{PGTASK_RELEASE_VERSION}$2/s' Cargo.toml
 
 # Path dependencies also carry a version, because crates.io resolves by version rather than by path.
 for manifest in crates/*/Cargo.toml sdks/python/Cargo.toml; do
-    perl -pi -e 's/^(pgtask[a-z-]* = \{ path = "[^"]*", version = ")[^"]*(")/${1}'"$version"'${2}/' "$manifest"
+    PGTASK_RELEASE_VERSION=$version perl -pi -e \
+        's/^(pgtask[a-z-]* = \{ path = "[^"]*", version = ")[^"]*(")/$1$ENV{PGTASK_RELEASE_VERSION}$2/' \
+        "$manifest"
 done
 
 for package in sdks/typescript/package.json sdks/typescript/package-lock.json; do
@@ -35,7 +32,8 @@ for package in sdks/typescript/package.json sdks/typescript/package-lock.json; d
 done
 
 # The chart version tracks the engine, and appVersion is the image tag the chart deploys.
-perl -pi -e 's/^version: .*/version: '"$version"'/; s/^appVersion: ".*"/appVersion: "'"$version"'"/' \
+PGTASK_RELEASE_VERSION=$version perl -pi -e \
+    's/^version: .*/version: $ENV{PGTASK_RELEASE_VERSION}/; s/^appVersion: ".*"/appVersion: "$ENV{PGTASK_RELEASE_VERSION}"/' \
     charts/pgtask/Chart.yaml
 
 # Workspace members appear in the lock file, so refresh it or a --locked build fails.

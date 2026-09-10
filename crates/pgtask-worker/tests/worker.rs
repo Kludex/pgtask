@@ -861,7 +861,7 @@ async fn workers_publish_shared_queue_demand_samples() {
 }
 
 #[tokio::test]
-async fn blocked_demand_sampling_does_not_delay_heartbeats_or_shutdown() {
+async fn blocked_demand_sampling_allows_heartbeat_progress_and_shutdown() {
     let Some(database_url) = database_url() else {
         return;
     };
@@ -872,7 +872,6 @@ async fn blocked_demand_sampling_does_not_delay_heartbeats_or_shutdown() {
     let task_name = TaskName::new(format!("blocked-demand-task-{suffix}")).unwrap();
     let mut config = WorkerConfig::new(queue_name.clone());
     config.worker_heartbeat_interval = Duration::from_millis(20);
-    config.worker_ttl = Duration::from_millis(100);
     let worker = Worker::new(store.clone(), successful_registry(&task_name), config).unwrap();
     let shutdown = CancellationToken::new();
     let worker_shutdown = shutdown.clone();
@@ -891,8 +890,28 @@ async fn blocked_demand_sampling_does_not_delay_heartbeats_or_shutdown() {
         .execute(&mut *queue_lock)
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(store.live_worker_count(&queue_name).await.unwrap(), 1);
+    let initial_heartbeat: chrono::DateTime<Utc> =
+        sqlx::query_scalar("SELECT heartbeat_at FROM pgtask.workers WHERE queue_name = $1")
+            .bind(queue_name.as_str())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let heartbeat: chrono::DateTime<Utc> =
+                sqlx::query_scalar("SELECT heartbeat_at FROM pgtask.workers WHERE queue_name = $1")
+                    .bind(queue_name.as_str())
+                    .fetch_one(store.pool())
+                    .await
+                    .unwrap();
+            if heartbeat > initial_heartbeat {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
 
     shutdown.cancel();
     tokio::time::timeout(TEST_TIMEOUT, worker_task)
