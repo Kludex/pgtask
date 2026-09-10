@@ -633,6 +633,73 @@ async fn resuming_on_the_final_attempt_grants_exactly_one_more_claim() {
     );
 }
 
+/// A durable sleep still spends an attempt.
+///
+/// This records what the fix deliberately does not change. `attempt` is
+/// incremented at claim time, and the headroom above is granted one claim at a
+/// time, so a task that sleeps repeatedly walks `attempt` up alongside
+/// `max_attempts` and reaches its sleeps with no failure budget left. It is
+/// claimable throughout -- which is what #28 was about -- but a handler that
+/// sleeps four times and then fails gets no retry, where the same handler
+/// failing four times in a row would have got four.
+///
+/// Whether a suspend/resume cycle ought to consume a retry at all is a separate
+/// question that #28 explicitly leaves open. This test exists so that whichever
+/// way it is answered, the answer is a deliberate one.
+#[tokio::test]
+async fn repeated_sleeps_still_spend_the_attempt_budget() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (queue, task_name) = names("sleep-budget");
+
+    store.enqueue(&request(&task_name, &queue, 5, 0)).await.unwrap();
+
+    // Sleep through the whole budget: five claims, five naps.
+    for nap in 0..5 {
+        let task = claim(&store, &queue, &task_name, 1)
+            .await
+            .pop()
+            .unwrap_or_else(|| panic!("nap {nap} must be claimable"));
+        assert_eq!(task.attempt, nap + 1, "each resume is a fresh attempt");
+        store
+            .sleep_for(
+                task.id,
+                task.attempt,
+                task.lease_token.unwrap(),
+                &StepName::new(format!("nap-{nap}")).unwrap(),
+                0,
+                Duration::ZERO,
+            )
+            .await
+            .unwrap()
+            .expect("the sleep is accepted");
+    }
+
+    // Still claimable -- the point of the fix.
+    let resumed = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
+    assert_eq!(resumed.attempt, 6);
+
+    // But out of budget: failing now is terminal, even though the handler has
+    // never actually failed before.
+    assert_eq!(
+        store
+            .fail(
+                resumed.id,
+                resumed.attempt,
+                resumed.lease_token.unwrap(),
+                &json!({"type": "boom"}),
+                Some(Duration::ZERO),
+            )
+            .await
+            .unwrap(),
+        Some(TaskState::Failed),
+        "sleeping still spends the budget, so the first real failure is the last"
+    );
+}
+
 async fn max_attempts_of(store: &Store, task_id: pgtask_core::TaskId) -> i32 {
     sqlx::query_scalar("SELECT max_attempts FROM pgtask.tasks WHERE id = $1")
         .bind(task_id.as_uuid())
