@@ -221,6 +221,11 @@ MUTANTS: list[Mutant] = [
         "WHERE handlers.task_name = tasks.task_name\n                    AND handlers.handler_version = tasks.handler_version",
         "WHERE handlers.task_name = tasks.task_name",
         "An unknown handler version waits instead of consuming an attempt.",
+        # Once in the starvation CTE and once in the priority CTE, same as
+        # attempts-claim-ignores-budget above. Left at the default of 1, this
+        # only defeats the starvation path, which nothing exercises, so every
+        # ordinary claim through the priority path stays correctly fenced and
+        # the mutant survives for the wrong reason.
         occurrences=2,
     ),
     # ---- lease recovery ----
