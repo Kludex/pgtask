@@ -18,6 +18,7 @@ jobs:
           toolchain: 1.97.1
           components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/test-release-version.sh
       - run: ./scripts/check-release-version.sh
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -53,12 +54,26 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: ./scripts/validate-chart.sh
 
+  tla:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: ./scripts/fetch-tla-tools.sh
+      - run: ./scripts/check-tla.sh
+      - run: ./scripts/verify-tla-coverage.sh
+
   postgres:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        postgres: [17, 18]
+        postgres: [16, 17, 18]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -91,7 +106,7 @@ jobs:
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     services:
       postgres:
-        image: postgres:17
+        image: postgres:16
         env:
           POSTGRES_DB: pgtask
           POSTGRES_PASSWORD: pgtask
@@ -127,7 +142,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: [17, 18]
+        postgres: [16, 17, 18]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -172,7 +187,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: [17, 18]
+        postgres: [16, 17, 18]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -215,7 +230,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        image: postgres:16
         env:
           POSTGRES_DB: pgtask
           POSTGRES_PASSWORD: pgtask

@@ -1,0 +1,4 @@
+# proptest writes failing seeds here. They are worth committing when they
+# still reproduce, but a seed recorded under a generator that has since changed
+# replays as a different value and only misleads.
+*.proptest-regressions
