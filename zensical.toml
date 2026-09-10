@@ -20,6 +20,7 @@ nav = [
     "architecture/index.md",
     "architecture/task-lifecycle.md",
     "architecture/durability.md",
+    "architecture/shared-durable-execution.md",
     "failure-model.md",
   ] },
   { "Concepts" = [
