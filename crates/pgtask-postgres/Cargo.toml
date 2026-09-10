@@ -18,5 +18,9 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+proptest-state-machine.workspace = true
+
 [lints]
 workspace = true
