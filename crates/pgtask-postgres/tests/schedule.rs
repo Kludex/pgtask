@@ -7,7 +7,7 @@ use std::{
 use chrono::{DateTime, TimeDelta, Utc};
 use pgtask_core::{
     EnqueueRequest, HandlerVersion, MisfirePolicy, QueueConfig, QueueName, ScheduleConfig, ScheduleDefinition,
-    ScheduleId, ScheduleName, TaskName, WorkerId,
+    ScheduleId, ScheduleName, Task, TaskName, WorkerId,
 };
 use pgtask_postgres::Store;
 use serde_json::json;
@@ -20,6 +20,41 @@ fn database_url() -> Option<String> {
 async fn schedule_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
     static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
     GUARD.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+}
+
+/// Drains the schedule sweep until this schedule's own task is claimable,
+/// instead of assuming a fixed number of calls is enough.
+///
+/// `pgtask.claim_due_schedules` (which backs `materialize_due_schedules`) has
+/// no `queue_name` filter: it orders every due schedule in the database and
+/// takes the first `p_limit`. In a suite where several files share one
+/// database, enough of *their* due schedules can starve this one's out of
+/// every fixed-size batch, which is exactly what made this test flake -- see
+/// #39. A large batch and a bounded retry loop drain whatever backlog exists
+/// rather than gambling that two calls of ten were always going to be enough.
+async fn claim_after_materializing(
+    store: &Store,
+    queue_name: &QueueName,
+    task_name: &TaskName,
+    limit: u16,
+) -> Vec<Task> {
+    for _ in 0..20 {
+        store.materialize_due_schedules(1_000).await.unwrap();
+        let claimed = store
+            .claim(
+                queue_name,
+                WorkerId::new(),
+                &[(task_name.clone(), HandlerVersion::default())],
+                limit,
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        if !claimed.is_empty() {
+            return claimed;
+        }
+    }
+    Vec::new()
 }
 
 async fn materialize_two_intervals(store: &Store, schedule_id: ScheduleId, expected: DateTime<Utc>) -> i64 {
@@ -86,18 +121,7 @@ async fn interval_schedule_reconciles_materializes_and_supports_dynamic_crud() {
         .unwrap();
     assert!(resumed.paused_at.is_none());
 
-    store.materialize_due_schedules(10).await.unwrap();
-    store.materialize_due_schedules(10).await.unwrap();
-    let claimed = store
-        .claim(
-            &config.task.queue_name,
-            WorkerId::new(),
-            &[(task_name, HandlerVersion::default())],
-            10,
-            Duration::from_secs(30),
-        )
-        .await
-        .unwrap();
+    let claimed = claim_after_materializing(&store, &config.task.queue_name, &task_name, 10).await;
     assert_eq!(claimed.len(), 1);
     assert!(claimed.iter().all(|task| task.priority == 7));
     assert!(store.get_schedule(created.config.id).await.unwrap().is_some());
@@ -237,16 +261,7 @@ async fn concurrent_schedulers_materialize_one_cron_occurrence() {
     let (left, right) = tokio::join!(store.materialize_due_schedules(10), store.materialize_due_schedules(10));
     left.unwrap();
     right.unwrap();
-    let claimed = store
-        .claim(
-            &config.task.queue_name,
-            WorkerId::new(),
-            &[(task_name, HandlerVersion::default())],
-            10,
-            Duration::from_secs(30),
-        )
-        .await
-        .unwrap();
+    let claimed = claim_after_materializing(&store, &config.task.queue_name, &task_name, 10).await;
     assert_eq!(claimed.len(), 1);
     assert!(store.delete_schedule(schedule.config.id).await.unwrap());
 }
@@ -276,17 +291,7 @@ async fn missed_occurrence_materialization_is_idempotent_across_restarts() {
     store.materialize_due_schedules(10).await.unwrap();
     drop(store);
     let store = Store::connect(&database_url).await.unwrap();
-    store.materialize_due_schedules(10).await.unwrap();
-    let claimed = store
-        .claim(
-            &config.task.queue_name,
-            WorkerId::new(),
-            &[(task_name, HandlerVersion::default())],
-            10,
-            Duration::from_secs(30),
-        )
-        .await
-        .unwrap();
+    let claimed = claim_after_materializing(&store, &config.task.queue_name, &task_name, 10).await;
     assert_eq!(claimed.len(), 1);
     assert!(store.delete_schedule(schedule.config.id).await.unwrap());
 }
