@@ -302,13 +302,16 @@ def apply_mutant(mutant: Mutant) -> None:
 # Tests whose timing budget is too tight to survive a loaded machine. Running
 # 23 suites back to back is exactly that, and a flaky failure would be scored
 # as a kill for a mutation it never actually detected.
+# Skipping a test that does not really flake understates coverage, because a
+# mutant it would have caught is scored as a survivor instead. So this list is
+# only for tests measured as flaky on the platform the sweep runs on, and the
+# retry below handles everything else.
+#
+# Measured over ten runs of the unmutated suite on Linux: this one failed twice,
+# nothing else failed at all. On macOS with Docker Desktop several more fail,
+# but that is the host, not the suite. See #25.
 FLAKY_TESTS = [
-    # All three fail intermittently on an unmutated tree against a fresh
-    # database, so leaving them in would score a flake as a kill for a mutation
-    # nothing actually detected. See #25.
-    "blocked_demand_sampling_does_not_delay_heartbeats_or_shutdown",
     "task_transitions_only_notify_their_deterministic_shards",
-    "concurrent_workers_elect_one_queue_demand_sampler_per_interval",
 ]
 
 
@@ -378,6 +381,7 @@ def main() -> int:
 
     killed: list[Mutant] = []
     survived: list[Mutant] = []
+    inconclusive: list[Mutant] = []
     inapplicable: list[tuple[Mutant, str]] = []
 
     try:
@@ -406,6 +410,17 @@ def main() -> int:
                 continue
             try:
                 passed, tail = run_suite(url, only_target=args.only_test)
+                if not passed:
+                    # A real kill is deterministic: the mutated rule is broken on
+                    # every run. A flake is not. Confirming before scoring costs
+                    # one extra suite per kill and stops a bad run inventing a
+                    # coverage gap that is not there.
+                    confirmed, confirm_tail = run_suite(url, only_target=args.only_test)
+                    if confirmed:
+                        print(f"    FLAKY - failed once, passed on retry; not scored", flush=True)
+                        inconclusive.append(mutant)
+                        continue
+                    tail = confirm_tail
             except BuildFailure as error:
                 print(f"    ABORTING - the tree stopped building mid-run:\n{error}")
                 return 1
@@ -425,6 +440,13 @@ def main() -> int:
     total = len(killed) + len(survived)
     print("\n" + "=" * 72)
     print(f"Mutation score: {len(killed)}/{total} killed")
+    if inconclusive:
+        print(
+            f"{len(inconclusive)} mutant(s) were inconclusive: the suite failed once and "
+            "passed on retry, so they are scored neither way."
+        )
+        for mutant in inconclusive:
+            print(f"  {mutant.name}")
     if survived:
         print(f"\n{len(survived)} SURVIVING mutants - each is an untested rule:\n")
         for mutant in survived:
