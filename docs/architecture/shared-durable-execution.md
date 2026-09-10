@@ -2,6 +2,17 @@
 
 Status: proposed. This document plans implementation. The cloud APIs shown below do not exist yet.
 
+## TL;DR
+
+Extract the durable execution kernel from the PostgreSQL worker without changing existing APIs or guarantees. Keep
+PostgreSQL as the default backend, then add an optional GCP runner that uses Firestore as the source of truth, Cloud Tasks
+for delivery, and Cloud Run for control and execution services.
+
+Implement this in gated stages. First capture current behavior and extract the kernel using PostgreSQL. Then prove
+Firestore fencing, transactions, recovery, and workflow atomicity before exposing cloud APIs. Release only after a pilot
+meets explicit correctness, latency, and cost targets. Existing workflows stay on their original backend, and unsupported
+cloud features fail explicitly rather than receiving weaker approximations.
+
 ## Recommendation
 
 Extract an execution library from the existing worker, retain PostgreSQL as the default backend, and add a GCP backend
