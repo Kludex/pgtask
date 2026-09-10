@@ -1,0 +1,177 @@
+name: Torture test
+
+# Runs the verification stack much harder than PR-time CI does: higher
+# proptest / state-machine case counts, several independent legs (each on its
+# own fresh database, so a leg's leftover rows can never starve another --
+# see the `interval_schedule_reconciles_...` cross-test contamination this
+# was built to avoid), the linearizability checker with fault injection, the
+# TLA+ specs, and (weekly, or on request) the SQL mutation-testing sweep.
+#
+# Lives on this fork only. It runs against `torture-testing`, an integration
+# branch that merges every open verification PR together so the nightly run
+# exercises all of them at once, not just whichever ships first. Nothing here
+# touches Kludex/pgtask.
+
+on:
+  schedule:
+    # Nightly stress run.
+    - cron: "17 3 * * *"
+    # Weekly: the same, plus the SQL mutation-testing sweep (expensive enough
+    # that it does not belong in every nightly run).
+    - cron: "37 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      proptest_cases:
+        description: proptest cases per property test (each of 6 legs)
+        type: string
+        default: "20000"
+      model_cases:
+        description: proptest-state-machine cases per leg
+        type: string
+        default: "400"
+      run_mutation:
+        description: also run the SQL mutation-testing sweep
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: "1.97.1"
+  # Measured host jitter, not a correctness bug -- see #25 and
+  # scripts/sql-mutation-test.py's own FLAKY_TESTS list, which this mirrors.
+  KNOWN_FLAKY_TEST: task_transitions_only_notify_their_deterministic_shards
+
+jobs:
+  rust-stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        leg: [1, 2, 3, 4, 5, 6]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: pgtask
+          POSTGRES_PASSWORD: pgtask
+          POSTGRES_USER: pgtask
+        options: >-
+          --health-cmd "pg_isready -U pgtask -d pgtask"
+          --health-interval 1s
+          --health-timeout 3s
+          --health-retries 30
+        ports:
+          - 5432:5432
+    env:
+      PGTASK_DATABASE_URL: postgresql://pgtask:pgtask@localhost:5432/pgtask
+      PROPTEST_CASES: ${{ inputs.proptest_cases || '20000' }}
+      PGTASK_MODEL_CASES: ${{ inputs.model_cases || '400' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: leg-${{ matrix.leg }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          cache-dependency-path: scripts/linearizability/go.sum
+      # Each leg gets its own service container (a fresh runner VM), so this
+      # is a distinct random seed and a guaranteed-empty database per leg --
+      # not six chances for the same flake to reproduce.
+      - run: cargo run -p pgtask-cli --bin pgtask -- --database-url "$PGTASK_DATABASE_URL" migrate
+      - run: |
+          cargo test --workspace --all-features -- --skip "$KNOWN_FLAKY_TEST"
+      - name: Save proptest regressions on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: proptest-regressions-leg-${{ matrix.leg }}
+          path: |
+            **/*.proptest-regressions
+          if-no-files-found: ignore
+          retention-days: 30
+
+  tla:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: ./scripts/fetch-tla-tools.sh
+      - run: ./scripts/check-tla.sh
+      - run: ./scripts/verify-tla-coverage.sh
+
+  mutation:
+    if: >-
+      github.event.schedule == '37 4 * * 0' ||
+      (github.event_name == 'workflow_dispatch' && inputs.run_mutation == true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      # sql-mutation-test.py drives Postgres via `docker exec pgtask-verify`
+      # and hardcodes port 54329, so it needs a container by that name on
+      # that port rather than the usual `services:` sidecar.
+      - name: Start pgtask-verify
+        run: |
+          docker run -d --name pgtask-verify \
+            -e POSTGRES_USER=pgtask -e POSTGRES_PASSWORD=pgtask -e POSTGRES_DB=postgres \
+            -p 54329:5432 postgres:17
+          for _ in $(seq 1 30); do
+            docker exec pgtask-verify pg_isready -U pgtask -q && exit 0
+            sleep 1
+          done
+          echo "postgres never became ready" >&2
+          exit 1
+      - name: Run the mutation sweep
+        run: |
+          set -o pipefail
+          ./scripts/sql-mutation-test.py | tee mutation-output.log
+      - name: Fail on any surviving mutant
+        if: always()
+        run: |
+          # The script itself always exits 0 once the baseline is green --
+          # a surviving mutant is a coverage gap, not a script bug, and it
+          # prints a report rather than failing. Gate the job on that report
+          # instead of the script's exit code.
+          if [ -f mutation-output.log ] && grep -q "SURVIVING mutants" mutation-output.log; then
+            echo "::error::one or more mutants survived -- see the log above"
+            exit 1
+          fi
+      - name: Save mutation output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-output
+          path: mutation-output.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # A single required-looking job so the Actions tab shows one clear
+  # pass/fail for the whole night rather than six matrix legs plus two more.
+  torture:
+    needs: [rust-stress, tla, mutation]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "rust-stress: ${{ needs.rust-stress.result }}"
+          echo "tla:         ${{ needs.tla.result }}"
+          echo "mutation:    ${{ needs.mutation.result }}"
+          case "${{ needs.rust-stress.result }}/${{ needs.tla.result }}/${{ needs.mutation.result }}" in
+            *failure*|*cancelled*) exit 1 ;;
+            *) exit 0 ;;
+          esac
