@@ -46,6 +46,7 @@ type Output struct {
 	// Unknown marks a call that was cut off before the client learned its
 	// outcome. The write may or may not have landed.
 	Unknown bool `json:"unknown"`
+	Parked  bool `json:"parked"`
 }
 
 type Operation struct {
@@ -107,18 +108,20 @@ func buildModel(name string, history History) (porcupine.Model, error) {
 		return buildRegisterModel(), nil
 	case "idempotency":
 		return buildIdempotencyModel(), nil
+	case "wait":
+		return buildWaitModel(), nil
 	case "capacity":
 		if history.Capacity <= 0 {
 			return porcupine.Model{}, fmt.Errorf("the capacity model needs a positive capacity")
 		}
 		return buildCapacityModel(history.Capacity), nil
 	}
-	return porcupine.Model{}, fmt.Errorf("unknown model %q (want lease, register, idempotency or capacity)", name)
+	return porcupine.Model{}, fmt.Errorf("unknown model %q (want lease, register, idempotency, wait or capacity)", name)
 }
 
 func main() {
 	historyPath := flag.String("history", "", "path to the JSON history")
-	modelName := flag.String("model", "", "reference model: lease, register, idempotency or capacity (default: the history's own)")
+	modelName := flag.String("model", "", "reference model: lease, register, idempotency, wait or capacity (default: the history's own)")
 	timeout := flag.Duration("timeout", 60*time.Second, "checking timeout")
 	expectFail := flag.Bool("expect-fail", false, "exit 0 only if the history is NOT linearizable")
 	flag.Parse()

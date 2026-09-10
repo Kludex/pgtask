@@ -37,9 +37,9 @@ use std::{
 
 use pgtask_core::{
     EnqueueRequest, HandlerVersion, LeaseToken, QueueConfig, QueueName, SignalName, StepName, TaskId, TaskName,
-    WorkerId,
+    TaskState, WorkerId,
 };
-use pgtask_postgres::Store;
+use pgtask_postgres::{ResultWait, ResultWaitRequest, SignalWait, SignalWaitRequest, SpawnRequest, Store};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -452,6 +452,26 @@ async fn expire(store: &Store, task: TaskId) {
     .execute(store.pool())
     .await
     .unwrap();
+}
+
+async fn claim_one(store: &Store, queue: &QueueName, name: &TaskName) -> pgtask_core::Task {
+    store
+        .claim(
+            queue,
+            WorkerId::new(),
+            &[(name.clone(), HandlerVersion::default())],
+            1,
+            Duration::from_mins(10),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .expect("a task to claim")
+}
+
+/// Spreads the waker across the window the waiter's transaction occupies.
+fn jitter(index: usize) -> Duration {
+    Duration::from_micros((index as u64 * 17) % 1200)
 }
 
 async fn seed_tasks(store: &Store, queue: &QueueName, task_name: &TaskName, count: usize) -> Vec<TaskId> {
@@ -1011,4 +1031,259 @@ async fn queue_admission_is_linearizable() {
         seed()
     );
     println!("admission control exercised by {rejected} rejection(s)");
+}
+
+// ----------------------------------------------------------------- wait -----
+
+/// Parent/child pairs raced per wait test.
+const WAIT_PAIRS: usize = 40;
+
+/// Registers a wait and wakes it concurrently, then looks at the task.
+///
+/// Both wait paths read whatever is being waited for, and if it is not there
+/// yet, register a wait row and park the task. Something else is then expected
+/// to notice that registration and wake it.
+///
+/// Recording those three steps -- wait, wake, observe -- as one history is what
+/// turns a lost wake-up into a linearizability violation rather than a hang. A
+/// wait that returned `waiting` must have been ordered before the wake, so the
+/// wake must have unparked it; observing the task still parked afterwards has
+/// no consistent ordering. Ordered the other way, the wait would have had to
+/// return `ready`.
+struct WaitRound {
+    partition: String,
+    parent: pgtask_core::Task,
+    step: StepName,
+    delay: Duration,
+    /// Exactly one of these decides which wait path is under test.
+    result_task: Option<TaskId>,
+    signal: Option<SignalName>,
+}
+
+async fn record_wait_round(
+    store: &Arc<Store>,
+    recorder: &Arc<Recorder>,
+    round: WaitRound,
+    waker: impl Future<Output = ()> + Send + 'static,
+) {
+    let WaitRound {
+        partition,
+        parent,
+        step: wait_step,
+        delay,
+        result_task,
+        signal,
+    } = round;
+    let waiter = {
+        let store = Arc::clone(store);
+        let recorder = Arc::clone(recorder);
+        let partition = partition.clone();
+        tokio::spawn(async move {
+            let call = recorder.now();
+            let status = match (result_task, signal) {
+                (Some(child), _) => match store
+                    .wait_for_result(ResultWaitRequest {
+                        task_id: parent.id,
+                        attempt: parent.attempt,
+                        lease_token: parent.lease_token.unwrap(),
+                        step_name: &wait_step,
+                        occurrence: 0,
+                        result_task_id: child,
+                        timeout: None,
+                    })
+                    .await
+                    .unwrap()
+                {
+                    Some(ResultWait::Ready(_)) => "ready",
+                    Some(ResultWait::Waiting) => "waiting",
+                    None => "lost",
+                },
+                (None, Some(name)) => match store
+                    .wait_for_signal(SignalWaitRequest {
+                        task_id: parent.id,
+                        attempt: parent.attempt,
+                        lease_token: parent.lease_token.unwrap(),
+                        step_name: &wait_step,
+                        occurrence: 0,
+                        signal_name: &name,
+                        signal_occurrence: 0,
+                        timeout: None,
+                    })
+                    .await
+                    .unwrap()
+                {
+                    Some(SignalWait::Ready(_)) => "ready",
+                    Some(SignalWait::Waiting) => "waiting",
+                    None => "lost",
+                },
+                _ => unreachable!("a wait is either for a result or for a signal"),
+            };
+            let ret = recorder.now();
+            recorder.record(
+                0,
+                &partition,
+                call,
+                ret,
+                &json!({"op": "wait"}),
+                &json!({"state": status}),
+            );
+        })
+    };
+
+    let waking = {
+        let recorder = Arc::clone(recorder);
+        let partition = partition.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let call = recorder.now();
+            waker.await;
+            let ret = recorder.now();
+            recorder.record(1, &partition, call, ret, &json!({"op": "wake"}), &json!({"ok": true}));
+        })
+    };
+
+    waiter.await.unwrap();
+    waking.await.unwrap();
+
+    // Both sides have committed and the wake-up is synchronous, so the task's
+    // fate is already decided.
+    let call = recorder.now();
+    let parked = store.get_task(parent.id).await.unwrap().unwrap().state == TaskState::Waiting;
+    let ret = recorder.now();
+    recorder.record(
+        2,
+        &partition,
+        call,
+        ret,
+        &json!({"op": "observe"}),
+        &json!({"parked": parked}),
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn signal_waits_are_linearizable() {
+    let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
+        return;
+    };
+    let store = Arc::new(Store::connect(&database_url).await.unwrap());
+    store.migrate().await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let queue = QueueName::new(format!("wsig-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("wsig-task-{suffix}")).unwrap();
+    let wait_step = StepName::new("await-go").unwrap();
+    let signal = SignalName::new("go").unwrap();
+    seed_tasks(&store, &queue, &task_name, WAIT_PAIRS).await;
+
+    let recorder = Arc::new(Recorder::new());
+    for index in 0..WAIT_PAIRS {
+        let parent = claim_one(&store, &queue, &task_name).await;
+        let partition = format!("sig:{}", parent.id);
+        let waker = {
+            let store = Arc::clone(&store);
+            let signal = signal.clone();
+            let task = parent.id;
+            async move {
+                store.emit_signal(task, &signal, 0, &json!({"v": 1})).await.unwrap();
+            }
+        };
+        record_wait_round(
+            &store,
+            &recorder,
+            WaitRound {
+                partition,
+                parent,
+                step: wait_step.clone(),
+                delay: jitter(index),
+                result_task: None,
+                signal: Some(signal.clone()),
+            },
+            waker,
+        )
+        .await;
+    }
+
+    check_and_prove_teeth("wait-signal", "wait", &recorder.take(), |operation| {
+        // Claim the task was released when it was not. A wake that leaves a
+        // waiter parked has no ordering that explains it.
+        if operation["input"]["op"] == json!("observe") && operation["output"]["parked"] == json!(false) {
+            operation["output"]["parked"] = json!(true);
+        }
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "reproduces #23: wait_for_result loses wake-ups. Un-ignore with the fix in #29."]
+async fn result_waits_are_linearizable() {
+    let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
+        return;
+    };
+    let store = Arc::new(Store::connect(&database_url).await.unwrap());
+    store.migrate().await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let queue = QueueName::new(format!("wres-{suffix}")).unwrap();
+    let parent_name = TaskName::new(format!("wres-parent-{suffix}")).unwrap();
+    let child_name = TaskName::new(format!("wres-child-{suffix}")).unwrap();
+    let spawn_step = StepName::new("spawn-child").unwrap();
+    let wait_step = StepName::new("await-child").unwrap();
+    seed_tasks(&store, &queue, &parent_name, WAIT_PAIRS).await;
+
+    let recorder = Arc::new(Recorder::new());
+    for index in 0..WAIT_PAIRS {
+        let parent = claim_one(&store, &queue, &parent_name).await;
+        let mut request = EnqueueRequest::new(child_name.clone(), json!({}));
+        request.queue_name = queue.clone();
+        request.max_attempts = MAX_ATTEMPTS;
+        let child_id = store
+            .spawn_task(SpawnRequest {
+                parent_task_id: parent.id,
+                parent_attempt: parent.attempt,
+                parent_lease_token: parent.lease_token.unwrap(),
+                step_name: &spawn_step,
+                occurrence: 0,
+                task: &request,
+            })
+            .await
+            .unwrap()
+            .unwrap()
+            .task_id;
+        let child = claim_one(&store, &queue, &child_name).await;
+
+        let partition = format!("res:{}", parent.id);
+        let waker = {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .complete(
+                        child.id,
+                        child.attempt,
+                        child.lease_token.unwrap(),
+                        Some(&json!({"ok": true})),
+                    )
+                    .await
+                    .unwrap();
+            }
+        };
+        record_wait_round(
+            &store,
+            &recorder,
+            WaitRound {
+                partition,
+                parent,
+                step: wait_step.clone(),
+                delay: jitter(index),
+                result_task: Some(child_id),
+                signal: None,
+            },
+            waker,
+        )
+        .await;
+    }
+
+    check_and_prove_teeth("wait-result", "wait", &recorder.take(), |operation| {
+        if operation["input"]["op"] == json!("observe") && operation["output"]["parked"] == json!(false) {
+            operation["output"]["parked"] = json!(true);
+        }
+    });
 }
