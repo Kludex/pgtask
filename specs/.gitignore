@@ -1,0 +1,5 @@
+# Fetched on demand by scripts/check-tla.sh; not source.
+tla2tools.jar
+.coverage-*.cfg
+states/
+*.old

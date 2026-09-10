@@ -54,6 +54,20 @@ jobs:
       - uses: astral-sh/setup-uv@v7
       - run: ./scripts/validate-chart.sh
 
+  tla:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - run: ./scripts/fetch-tla-tools.sh
+      - run: ./scripts/check-tla.sh
+      - run: ./scripts/verify-tla-coverage.sh
+
   postgres:
     runs-on: ubuntu-latest
     strategy:
