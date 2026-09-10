@@ -32,12 +32,12 @@ type CapacityState struct {
 //	enqueue()  -> {ok}   ok=false means PT001
 //	complete() -> {ok}   frees a slot
 func buildCapacityModel(capacity int) porcupine.Model {
-	return porcupine.Model{
-		Partition: partitionByKey,
-		Init: func() any {
-			return CapacityState{}
+	model := porcupine.NondeterministicModel{
+		PartitionEvent: partitionEventByKey,
+		Init: func() []any {
+			return []any{CapacityState{}}
 		},
-		Step: func(stateAny, inputAny, outputAny any) (bool, any) {
+		Step: func(stateAny, inputAny, outputAny any) []any {
 			state := stateAny.(CapacityState)
 			in := inputAny.(Keyed).Input
 			out := outputAny.(Output)
@@ -47,29 +47,29 @@ func buildCapacityModel(capacity int) porcupine.Model {
 				if out.OK {
 					// Admitted, so there had to be room.
 					if state.Outstanding >= capacity {
-						return false, state
+						return none()
 					}
-					return true, CapacityState{Outstanding: state.Outstanding + 1}
+					return only(CapacityState{Outstanding: state.Outstanding + 1})
 				}
 				// Rejected, so the queue had to be full. Rejecting while there
 				// is room is backpressure applied to work that should have been
 				// accepted, and is just as wrong as admitting past the limit.
 				if state.Outstanding < capacity {
-					return false, state
+					return none()
 				}
-				return true, state
+				return only(state)
 
 			case "complete":
 				if !out.OK {
-					return true, state
+					return only(state)
 				}
 				// Something outstanding must have finished for this to succeed.
 				if state.Outstanding == 0 {
-					return false, state
+					return none()
 				}
-				return true, CapacityState{Outstanding: state.Outstanding - 1}
+				return only(CapacityState{Outstanding: state.Outstanding - 1})
 			}
-			return false, state
+			return none()
 		},
 		DescribeOperation: func(inputAny, outputAny any) string {
 			in := inputAny.(Keyed).Input
@@ -81,4 +81,5 @@ func buildCapacityModel(capacity int) porcupine.Model {
 			return fmt.Sprintf("outstanding=%d/%d", state.Outstanding, capacity)
 		},
 	}
+	return model.ToModel()
 }

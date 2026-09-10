@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/anishathalye/porcupine"
@@ -42,6 +43,9 @@ type Output struct {
 	Value   json.RawMessage `json:"value"`
 	TaskID  string          `json:"task_id"`
 	Created bool            `json:"created"`
+	// Unknown marks a call that was cut off before the client learned its
+	// outcome. The write may or may not have landed.
+	Unknown bool `json:"unknown"`
 }
 
 type Operation struct {
@@ -67,21 +71,28 @@ type Keyed struct {
 	Input     Input
 }
 
-// partitionByKey splits a history into one independent sub-history per key.
-// pgtask makes no cross-key ordering promise -- `claim` uses SKIP LOCKED
+// partitionEventByKey splits a history into one independent sub-history per
+// key. pgtask makes no cross-key ordering promise -- `claim` uses SKIP LOCKED
 // precisely so two workers get different tasks -- so what must hold is the
 // sequence of operations on each key on its own.
-func partitionByKey(history []porcupine.Operation) [][]porcupine.Operation {
-	byKey := make(map[string][]porcupine.Operation)
+func partitionEventByKey(history []porcupine.Event) [][]porcupine.Event {
+	byKey := make(map[string][]porcupine.Event)
 	var order []string
-	for _, op := range history {
-		key := op.Input.(Keyed).Partition
+	// A return event carries no input, so calls are indexed by id first.
+	keyOf := make(map[int]string)
+	for _, event := range history {
+		if event.Kind == porcupine.CallEvent {
+			keyOf[event.Id] = event.Value.(Keyed).Partition
+		}
+	}
+	for _, event := range history {
+		key := keyOf[event.Id]
 		if _, seen := byKey[key]; !seen {
 			order = append(order, key)
 		}
-		byKey[key] = append(byKey[key], op)
+		byKey[key] = append(byKey[key], event)
 	}
-	partitions := make([][]porcupine.Operation, 0, len(order))
+	partitions := make([][]porcupine.Event, 0, len(order))
 	for _, key := range order {
 		partitions = append(partitions, byKey[key])
 	}
@@ -142,29 +153,19 @@ func main() {
 		os.Exit(2)
 	}
 
-	operations := make([]porcupine.Operation, 0, len(history.Operations))
-	for _, op := range history.Operations {
-		operations = append(operations, porcupine.Operation{
-			ClientId: op.ClientID,
-			Input:    Keyed{Partition: op.Partition, Input: op.Input},
-			Call:     op.Call,
-			Output:   op.Output,
-			Return:   op.Return,
-		})
-	}
-
-	result, info := porcupine.CheckOperationsVerbose(model, operations, *timeout)
+	events := buildEvents(history.Operations)
+	result, info := porcupine.CheckEventsVerbose(model, events, *timeout)
 
 	switch result {
 	case porcupine.Ok:
-		fmt.Printf("linearizable: %d %s operations across %d partitions\n",
-			len(operations), name, countPartitions(history.Operations))
+		fmt.Printf("linearizable: %d %s operations across %d partitions (%d indeterminate)\n",
+			len(history.Operations), name, countPartitions(history.Operations), countUnknown(history.Operations))
 		if *expectFail {
 			fmt.Fprintln(os.Stderr, "expected this history to be rejected, but it linearized")
 			os.Exit(1)
 		}
 	case porcupine.Illegal:
-		fmt.Printf("NOT linearizable: %d %s operations\n", len(operations), name)
+		fmt.Printf("NOT linearizable: %d %s operations\n", len(history.Operations), name)
 		if path, err := writeVisualization(model, info); err == nil {
 			fmt.Printf("visualization: %s\n", path)
 		}
@@ -175,6 +176,66 @@ func main() {
 		fmt.Fprintf(os.Stderr, "checker timed out after %s; history may be too large\n", *timeout)
 		os.Exit(2)
 	}
+}
+
+
+// buildEvents turns operations into the call/return event pairs the checker
+// wants, ordered by time.
+//
+// An operation whose outcome the client never learned gets its return floated
+// to the very end of the history. A write that was cut off mid-flight can still
+// land after the client gave up, so constraining it to have taken effect before
+// the client stopped waiting would let the checker reject a correct system.
+// Floating the return makes it concurrent with everything that follows, which
+// is what "may have taken effect at any later point" means.
+func buildEvents(operations []Operation) []porcupine.Event {
+	type stamped struct {
+		at    int64
+		event porcupine.Event
+	}
+	var latest int64
+	for _, op := range operations {
+		if op.Return > latest {
+			latest = op.Return
+		}
+	}
+
+	stamps := make([]stamped, 0, len(operations)*2)
+	for id, op := range operations {
+		stamps = append(stamps, stamped{op.Call, porcupine.Event{
+			ClientId: op.ClientID,
+			Kind:     porcupine.CallEvent,
+			Value:    Keyed{Partition: op.Partition, Input: op.Input},
+			Id:       id,
+		}})
+		returnAt := op.Return
+		if op.Output.Unknown {
+			returnAt = latest + 1
+		}
+		stamps = append(stamps, stamped{returnAt, porcupine.Event{
+			ClientId: op.ClientID,
+			Kind:     porcupine.ReturnEvent,
+			Value:    op.Output,
+			Id:       id,
+		}})
+	}
+	sort.SliceStable(stamps, func(i, j int) bool { return stamps[i].at < stamps[j].at })
+
+	events := make([]porcupine.Event, 0, len(stamps))
+	for _, stamp := range stamps {
+		events = append(events, stamp.event)
+	}
+	return events
+}
+
+func countUnknown(operations []Operation) int {
+	count := 0
+	for _, op := range operations {
+		if op.Output.Unknown {
+			count++
+		}
+	}
+	return count
 }
 
 func countPartitions(operations []Operation) int {

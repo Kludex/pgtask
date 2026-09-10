@@ -28,6 +28,7 @@
 //! skipped. Replay a run with `PGTASK_LINEARIZABILITY_SEED`.
 
 use std::{
+    future::Future,
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
@@ -50,6 +51,34 @@ const CHECKER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/linear
 /// Outstanding-task limit for the capacity test. Small, so the queue is
 /// genuinely full for much of the run.
 const CAPACITY: u64 = 3;
+
+/// How often a call is cut off mid-flight, as a percentage.
+const FAULT_PERCENT: usize = 45;
+
+/// How long a doomed call is allowed to run before the client abandons it.
+///
+/// The window straddles a round trip on purpose. Too short and every cut lands
+/// before the statement reaches the server, which is an uninteresting fault;
+/// too long and nothing is ever cut at all. Spreading it means some writes
+/// commit and are never acknowledged, which is the case worth testing.
+fn cut_after(rng: &mut Rng) -> Duration {
+    Duration::from_micros(50 + (rng.below(900) as u64))
+}
+
+/// Runs a call, abandoning it after `cut` if one is given.
+///
+/// Dropping the future cancels the query from the client's side, but says
+/// nothing about the server: the statement may already have committed, may
+/// commit moments later, or may never land at all. That is the situation
+/// `docs/failure-model.md` describes as "the client treats the transaction
+/// outcome as unknown", and it is the one worth testing, because a client that
+/// guesses wrong here corrupts state rather than merely stalling.
+async fn maybe_cut<T>(work: impl Future<Output = T>, cut: Option<Duration>) -> Option<T> {
+    match cut {
+        Some(deadline) => tokio::time::timeout(deadline, work).await.ok(),
+        None => Some(work.await),
+    }
+}
 
 /// xorshift64*, so a failing run replays from its seed.
 struct Rng(u64);
@@ -291,13 +320,14 @@ impl LeaseClient {
         self.recorder.remember(lease);
     }
 
-    async fn complete(&self, lease: Lease) {
+    async fn complete(&self, lease: Lease, cut: Option<Duration>) {
         let call = self.recorder.now();
-        let ok = self
-            .store
-            .complete(lease.task, lease.attempt, lease.token, Some(&json!({"ok": true})))
-            .await
-            .unwrap();
+        let outcome = maybe_cut(
+            self.store
+                .complete(lease.task, lease.attempt, lease.token, Some(&json!({"ok": true}))),
+            cut,
+        )
+        .await;
         let ret = self.recorder.now();
         self.recorder.record(
             self.id,
@@ -305,23 +335,26 @@ impl LeaseClient {
             call,
             ret,
             &json!({"op": "complete", "attempt": lease.attempt, "token": lease.token.to_string()}),
-            &json!({"ok": ok}),
+            &match outcome {
+                Some(result) => json!({"ok": result.unwrap()}),
+                None => json!({"unknown": true}),
+            },
         );
     }
 
-    async fn fail(&self, lease: Lease) {
+    async fn fail(&self, lease: Lease, cut: Option<Duration>) {
         let call = self.recorder.now();
-        let outcome = self
-            .store
-            .fail(
+        let outcome = maybe_cut(
+            self.store.fail(
                 lease.task,
                 lease.attempt,
                 lease.token,
                 &json!({"type": "linearizability"}),
                 Some(Duration::ZERO),
-            )
-            .await
-            .unwrap();
+            ),
+            cut,
+        )
+        .await;
         let ret = self.recorder.now();
         self.recorder.record(
             self.id,
@@ -329,20 +362,27 @@ impl LeaseClient {
             call,
             ret,
             &json!({"op": "fail", "attempt": lease.attempt, "token": lease.token.to_string()}),
-            &json!({
-                "ok": outcome.is_some(),
-                "state": outcome.map(|state| format!("{state:?}").to_lowercase()),
-            }),
+            &match outcome {
+                Some(result) => {
+                    let state = result.unwrap();
+                    json!({
+                        "ok": state.is_some(),
+                        "state": state.map(|state| format!("{state:?}").to_lowercase()),
+                    })
+                }
+                None => json!({"unknown": true}),
+            },
         );
     }
 
-    async fn renew(&self, lease: Lease) {
+    async fn renew(&self, lease: Lease, cut: Option<Duration>) {
         let call = self.recorder.now();
-        let renewed = self
-            .store
-            .renew_lease(lease.task, lease.attempt, lease.token, Duration::from_mins(10))
-            .await
-            .unwrap();
+        let renewed = maybe_cut(
+            self.store
+                .renew_lease(lease.task, lease.attempt, lease.token, Duration::from_mins(10)),
+            cut,
+        )
+        .await;
         let ret = self.recorder.now();
         self.recorder.record(
             self.id,
@@ -350,7 +390,10 @@ impl LeaseClient {
             call,
             ret,
             &json!({"op": "renew", "attempt": lease.attempt, "token": lease.token.to_string()}),
-            &json!({"ok": renewed}),
+            &match renewed {
+                Some(result) => json!({"ok": result.unwrap()}),
+                None => json!({"unknown": true}),
+            },
         );
     }
 
@@ -379,16 +422,20 @@ impl LeaseClient {
         for _ in 0..STEPS_PER_CLIENT {
             let choice = rng.below(100);
             if choice < 35 {
+                // Never cut a claim off: a claim whose result was lost minted a
+                // lease token the client never saw, and no model can say what
+                // state that left behind.
                 self.claim().await;
                 continue;
             }
             let Some(lease) = self.recorder.sample(&mut rng) else {
                 continue;
             };
+            let cut = (rng.below(100) < FAULT_PERCENT).then(|| cut_after(&mut rng));
             match choice {
-                35..=57 => self.complete(lease).await,
-                58..=76 => self.fail(lease).await,
-                77..=89 => self.renew(lease).await,
+                35..=57 => self.complete(lease, cut).await,
+                58..=76 => self.fail(lease, cut).await,
+                77..=89 => self.renew(lease, cut).await,
                 _ => self.expire_and_recover(lease).await,
             }
         }
@@ -452,9 +499,23 @@ async fn the_lease_protocol_is_linearizable() {
         client.await.unwrap();
     }
 
+    let operations = recorder.take();
+    let indeterminate = operations
+        .iter()
+        .filter(|operation| operation["output"]["unknown"] == json!(true))
+        .count();
+    assert!(
+        indeterminate > 0,
+        "no call was cut off mid-flight, so the crash case was never reached and this run \
+         says nothing about indeterminate writes. Replay with \
+         PGTASK_LINEARIZABILITY_SEED={}",
+        seed()
+    );
+    println!("{indeterminate} call(s) cut off mid-flight");
+
     // Take one write the database rejected and claim it succeeded. That flip is
     // a stale lease being honoured, which is what fencing exists to prevent.
-    check_and_prove_teeth("lease", "lease", &recorder.take(), |operation| {
+    check_and_prove_teeth("lease", "lease", &operations, |operation| {
         let op = operation["input"]["op"].as_str().unwrap_or_default();
         if matches!(op, "complete" | "renew") && operation["output"]["ok"] == json!(false) {
             operation["output"]["ok"] = json!(true);
@@ -503,14 +564,15 @@ impl RegisterClient {
 
     /// A durable step. The value is unique per write, so first-write-wins is
     /// observable: a second writer handed its own value back would be a bug.
-    async fn write_checkpoint(&self, lease: Lease, round: usize) {
+    async fn write_checkpoint(&self, lease: Lease, round: usize, cut: Option<Duration>) {
         let value = json!({"client": self.id, "round": round});
         let call = self.recorder.now();
-        let committed = self
-            .store
-            .commit_checkpoint(lease.task, lease.attempt, lease.token, &self.step, 0, &value)
-            .await
-            .unwrap();
+        let committed = maybe_cut(
+            self.store
+                .commit_checkpoint(lease.task, lease.attempt, lease.token, &self.step, 0, &value),
+            cut,
+        )
+        .await;
         let ret = self.recorder.now();
         self.recorder.record(
             self.id,
@@ -519,8 +581,11 @@ impl RegisterClient {
             ret,
             &json!({"op": "write", "value": value}),
             &match committed {
-                Some(checkpoint) => json!({"ok": true, "value": checkpoint.value}),
-                None => json!({"ok": false}),
+                Some(result) => match result.unwrap() {
+                    Some(checkpoint) => json!({"ok": true, "value": checkpoint.value}),
+                    None => json!({"ok": false}),
+                },
+                None => json!({"unknown": true}),
             },
         );
     }
@@ -584,8 +649,9 @@ impl RegisterClient {
             let Some(lease) = self.recorder.sample(&mut rng) else {
                 continue;
             };
+            let cut = (rng.below(100) < FAULT_PERCENT).then(|| cut_after(&mut rng));
             match choice {
-                25..=54 => self.write_checkpoint(lease, round).await,
+                25..=54 => self.write_checkpoint(lease, round, cut).await,
                 55..=74 => self.read_checkpoint(lease).await,
                 75..=89 => self.emit(lease, round).await,
                 // Cycling the lease is what puts two different attempts on the
@@ -633,6 +699,17 @@ async fn durable_steps_and_signals_are_linearizable() {
     }
 
     let operations = recorder.take();
+    let indeterminate = operations
+        .iter()
+        .filter(|operation| operation["output"]["unknown"] == json!(true))
+        .count();
+    assert!(
+        indeterminate > 0,
+        "no durable write was cut off mid-flight, so the crash case was never reached. \
+         Replay with PGTASK_LINEARIZABILITY_SEED={}",
+        seed()
+    );
+    println!("{indeterminate} durable write(s) cut off mid-flight");
 
     // Change one recorded value. A register whose value differs between two
     // reports has no valid ordering, which is what makes a step's result

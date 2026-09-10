@@ -30,37 +30,37 @@ type IdempotencyState struct {
 // Two callers both told created=true would mean two tasks for one key -- the
 // duplicate the feature exists to prevent -- and neither ordering explains it.
 func buildIdempotencyModel() porcupine.Model {
-	return porcupine.Model{
-		Partition: partitionByKey,
-		Init: func() any {
-			return IdempotencyState{}
+	model := porcupine.NondeterministicModel{
+		PartitionEvent: partitionEventByKey,
+		Init: func() []any {
+			return []any{IdempotencyState{}}
 		},
-		Step: func(stateAny, inputAny, outputAny any) (bool, any) {
+		Step: func(stateAny, inputAny, outputAny any) []any {
 			state := stateAny.(IdempotencyState)
 			in := inputAny.(Keyed).Input
 			out := outputAny.(Output)
 
 			if in.Op != "enqueue" {
-				return false, state
+				return none()
 			}
 			// An enqueue that failed (capacity, validation) leaves no trace.
 			if !out.OK {
-				return true, state
+				return only(state)
 			}
 			if !state.Reserved {
 				// Nobody had this key, so this caller must be the one told it
 				// created the task.
 				if !out.Created {
-					return false, state
+					return none()
 				}
-				return true, IdempotencyState{Reserved: true, TaskID: out.TaskID}
+				return only(IdempotencyState{Reserved: true, TaskID: out.TaskID})
 			}
 			// The key was already reserved, so this caller must be told it did
 			// not create anything, and must be handed the original id.
 			if out.Created || out.TaskID != state.TaskID {
-				return false, state
+				return none()
 			}
-			return true, state
+			return only(state)
 		},
 		DescribeOperation: func(inputAny, outputAny any) string {
 			out := outputAny.(Output)
@@ -74,4 +74,5 @@ func buildIdempotencyModel() porcupine.Model {
 			return fmt.Sprintf("reserved by %.8s", state.TaskID)
 		},
 	}
+	return model.ToModel()
 }
