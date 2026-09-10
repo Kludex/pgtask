@@ -230,6 +230,59 @@ async fn observer_pages_cover_queues_tasks_schedules_workers_and_not_found() {
     }
 }
 
+/// `/schedules` and `/workers` used to render every row that had ever
+/// existed, no `LIMIT`, no pagination -- on a deployment with a few thousand
+/// schedules or worker registrations, an unbounded response that eventually
+/// stops rendering at all. This creates enough rows to cross a cap and
+/// confirms one is actually enforced, rather than trusting the query text.
+#[tokio::test]
+async fn schedule_and_worker_lists_are_capped() {
+    let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("cap-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("cap-task-{suffix}")).unwrap();
+
+    for index in 0..105 {
+        let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
+        request.queue_name = queue_name.clone();
+        let schedule = ScheduleConfig::new(
+            ScheduleName::new(format!("cap-{suffix}-{index:03}")).unwrap(),
+            ScheduleDefinition::interval(Duration::from_mins(1)).unwrap(),
+            request,
+        );
+        store.put_schedule(&schedule).await.unwrap();
+
+        store
+            .register_worker(
+                WorkerId::new(),
+                &queue_name,
+                "cap-test",
+                &[(task_name.clone(), HandlerVersion::default(), RetryPolicy::Never)],
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+    }
+
+    let app = application(store.pool().clone());
+    let (_, schedules) = response(&app, "/schedules").await;
+    let (_, workers) = response(&app, "/workers").await;
+    assert_eq!(
+        schedules.matches("<td class=\"state\">").count(),
+        100,
+        "/schedules rendered every one of at least 105 rows instead of capping at 100"
+    );
+    assert_eq!(
+        workers.matches("<td class=\"state\">").count(),
+        100,
+        "/workers rendered every one of at least 105 rows instead of capping at 100"
+    );
+}
+
 #[tokio::test]
 async fn application_runs_with_a_role_that_can_only_read_observer_views() {
     let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {

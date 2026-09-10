@@ -176,10 +176,13 @@ pub struct ScheduleSummary {
 }
 
 impl ScheduleSummary {
+    /// Capped like `TaskSummary::search`: schedules are long-lived and there
+    /// is no bound on how many a deployment accumulates, so an unbounded
+    /// `SELECT *` here renders every one of them into a single HTML response.
     pub async fn all(pool: &PgPool) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, name, kind, queue_name, task_name, next_run_at, paused_at \
-             FROM pgtask.schedule_view ORDER BY name",
+             FROM pgtask.schedule_view ORDER BY name LIMIT 100",
         )
         .fetch_all(pool)
         .await
@@ -247,10 +250,15 @@ pub struct WorkerSummary {
 }
 
 impl WorkerSummary {
+    /// Capped like `TaskSummary::search`: every worker that has ever
+    /// registered stays in `pgtask.workers`, live or long expired, so an
+    /// unbounded `SELECT *` here renders all of them into a single HTML
+    /// response. Ordering by `heartbeat_at DESC` first means the cap drops
+    /// the oldest, least relevant rows rather than an arbitrary 100.
     pub async fn all(pool: &PgPool) -> Result<Vec<Self>, sqlx::Error> {
         sqlx::query_as(
             "SELECT id, queue_name, version, draining, live, heartbeat_at, expires_at \
-             FROM pgtask.worker_view ORDER BY heartbeat_at DESC",
+             FROM pgtask.worker_view ORDER BY heartbeat_at DESC LIMIT 100",
         )
         .fetch_all(pool)
         .await
