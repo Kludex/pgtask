@@ -38,6 +38,25 @@ async fn claim(store: &Store, queue: &QueueName, name: &TaskName, limit: u16) ->
         .unwrap()
 }
 
+async fn reclaim(store: &Store, prefix: &str) -> (Task, Task) {
+    let (queue, task_name) = names(prefix);
+    store.enqueue(&request(&task_name, &queue, 2, 0)).await.unwrap();
+    let stale = claim(store, &queue, &task_name, 1).await.pop().unwrap();
+
+    sqlx::query("UPDATE pgtask.tasks SET lease_expires_at = statement_timestamp() - interval '1 second' WHERE id = $1")
+        .bind(stale.id.as_uuid())
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(store.recover_expired(&queue, 1).await.unwrap(), 1);
+
+    let live = claim(store, &queue, &task_name, 1).await.pop().unwrap();
+    assert_eq!(live.id, stale.id);
+    assert_ne!(live.attempt, stale.attempt);
+    assert_ne!(live.lease_token, stale.lease_token);
+    (stale, live)
+}
+
 /// A fresh queue and task name, so tests never see each other's rows.
 fn names(prefix: &str) -> (QueueName, TaskName) {
     let suffix = Uuid::new_v4();
@@ -101,6 +120,97 @@ async fn recovery_fails_a_task_with_no_attempts_left() {
         recovered.state,
         TaskState::Failed,
         "a task out of attempts must be retired, not left pending where no worker can take it"
+    );
+}
+
+#[tokio::test]
+async fn failure_does_not_retry_after_the_last_attempt() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (queue, task_name) = names("final-failure");
+
+    store.enqueue(&request(&task_name, &queue, 1, 0)).await.unwrap();
+    let task = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
+    assert_eq!(task.attempt, 1);
+
+    assert_eq!(
+        store
+            .fail(
+                task.id,
+                task.attempt,
+                task.lease_token.unwrap(),
+                &json!({"type": "test"}),
+                Some(Duration::ZERO),
+            )
+            .await
+            .unwrap(),
+        Some(TaskState::Failed),
+        "a task must not retry after using its last attempt"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_lease_cannot_complete_a_reclaimed_task() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (stale, live) = reclaim(&store, "stale-complete").await;
+
+    assert!(
+        !store
+            .complete(
+                stale.id,
+                stale.attempt,
+                stale.lease_token.unwrap(),
+                Some(&json!({"stale": true}))
+            )
+            .await
+            .unwrap(),
+        "a superseded lease completed a task claimed by another worker"
+    );
+    assert!(
+        store
+            .complete(live.id, live.attempt, live.lease_token.unwrap(), Some(&json!({})))
+            .await
+            .unwrap(),
+        "the live lease could not complete the reclaimed task"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_lease_cannot_fail_a_reclaimed_task() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (stale, live) = reclaim(&store, "stale-fail").await;
+
+    assert_eq!(
+        store
+            .fail(
+                stale.id,
+                stale.attempt,
+                stale.lease_token.unwrap(),
+                &json!({"stale": true}),
+                None,
+            )
+            .await
+            .unwrap(),
+        None,
+        "a superseded lease failed a task claimed by another worker"
+    );
+    assert!(
+        store
+            .complete(live.id, live.attempt, live.lease_token.unwrap(), Some(&json!({})))
+            .await
+            .unwrap(),
+        "the live lease could not complete the reclaimed task"
     );
 }
 

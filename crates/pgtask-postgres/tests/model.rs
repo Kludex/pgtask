@@ -55,13 +55,16 @@ fn store() -> Option<&'static (Runtime, Store)> {
     static STORE: OnceLock<Option<(Runtime, Store)>> = OnceLock::new();
     STORE
         .get_or_init(|| {
-            let database_url = std::env::var("PGTASK_DATABASE_URL").ok()?;
-            let runtime = Runtime::new().ok()?;
-            let store = runtime.block_on(async {
-                let store = Store::connect(&database_url).await.ok()?;
-                store.migrate().await.ok()?;
-                Some(store)
-            })?;
+            let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
+                return None;
+            };
+            let runtime = Runtime::new().expect("failed to create the Tokio runtime");
+            let store = runtime
+                .block_on(Store::connect(&database_url))
+                .expect("failed to connect to PGTASK_DATABASE_URL");
+            runtime
+                .block_on(store.migrate())
+                .expect("failed to migrate the database");
             Some((runtime, store))
         })
         .as_ref()

@@ -183,6 +183,7 @@ MUTANTS: list[Mutant] = [
         "attempt < max_attempts",
         "attempt <= max_attempts",
         "A task retries only while attempts remain.",
+        occurrences=2,
     ),
     Mutant(
         "attempts-recover-off-by-one",
@@ -190,6 +191,7 @@ MUTANTS: list[Mutant] = [
         "tasks.attempt < tasks.max_attempts",
         "tasks.attempt <= tasks.max_attempts",
         "Recovery fails a task when no attempts remain.",
+        occurrences=3,
     ),
     # ---- scheduling ----
     Mutant(
@@ -219,6 +221,7 @@ MUTANTS: list[Mutant] = [
         "WHERE handlers.task_name = tasks.task_name\n                    AND handlers.handler_version = tasks.handler_version",
         "WHERE handlers.task_name = tasks.task_name",
         "An unknown handler version waits instead of consuming an attempt.",
+        occurrences=2,
     ),
     # ---- lease recovery ----
     Mutant(
@@ -290,7 +293,7 @@ def apply_mutant(mutant: Mutant) -> None:
             f"Pattern: {mutant.old!r}"
         )
     found = definition.count(mutant.old)
-    if found < mutant.occurrences:
+    if found != mutant.occurrences:
         raise RuntimeError(
             f"mutant {mutant.name!r} expects {mutant.occurrences} occurrence(s) of its "
             f"pattern in {mutant.signature}, found {found}"
