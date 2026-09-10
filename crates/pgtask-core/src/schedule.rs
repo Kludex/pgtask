@@ -72,6 +72,12 @@ impl ScheduleDefinition {
             Self::Interval { every } => {
                 let every_milliseconds =
                     i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)?;
+                // An interval under a millisecond truncates to zero here, and
+                // `materialize` reaches this before it reaches `due_count`,
+                // which is where the same guard already lives.
+                if every_milliseconds == 0 {
+                    return Err(ScheduleError::ZeroInterval);
+                }
                 let elapsed_milliseconds = (now - first_due).num_milliseconds();
                 let intervals = elapsed_milliseconds / every_milliseconds;
                 first_due

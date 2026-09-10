@@ -132,14 +132,19 @@ proptest! {
         );
     }
 
-    /// A sub-millisecond interval is constructible but truncates to zero on the
-    /// way to a database that only stores whole milliseconds.
+    /// A sub-millisecond interval is constructible but not storable.
+    ///
+    /// This documents a wart rather than a guarantee: `ScheduleDefinition`
+    /// accepts it, `put_schedule` truncates it to zero milliseconds, and the
+    /// caller gets a raw `CHECK` violation instead of a typed error. Refusing
+    /// it at construction would be nicer, but it would change a contract the
+    /// crate already tests, so it is left for the maintainers to decide (#30).
     #[test]
     fn a_sub_millisecond_interval_is_not_storable(every_micros in 1_u64..1_000) {
         let Some((runtime, store)) = store() else { return Ok(()); };
 
         let every = Duration::from_micros(every_micros);
-        let definition = ScheduleDefinition::interval(every).expect("non-zero interval");
+        let definition = ScheduleDefinition::interval(every).expect("constructible today");
 
         let queue = QueueName::new(format!("prop-subms-{}", Uuid::new_v4())).unwrap();
         let mut task = EnqueueRequest::new(TaskName::new("prop.scheduled").unwrap(), json!({}));
@@ -147,10 +152,9 @@ proptest! {
         let name = ScheduleName::new(format!("prop-{}", Uuid::new_v4())).unwrap();
         let config = ScheduleConfig::new(name, definition, task);
 
-        let result = runtime.block_on(store.put_schedule(&config));
         prop_assert!(
-            result.is_err(),
-            "the database stored a sub-millisecond interval as if it were {every:?}"
+            runtime.block_on(store.put_schedule(&config)).is_err(),
+            "an interval of {every:?} truncates to zero milliseconds, which the schema rejects"
         );
     }
 
