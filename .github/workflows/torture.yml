@@ -39,9 +39,22 @@ permissions:
 
 env:
   RUST_TOOLCHAIN: "1.97.1"
-  # Measured host jitter, not a correctness bug -- see #25 and
-  # scripts/sql-mutation-test.py's own FLAKY_TESTS list, which this mirrors.
-  KNOWN_FLAKY_TEST: task_transitions_only_notify_their_deterministic_shards
+  # Known, already-triaged flakes -- not what this workflow exists to catch.
+  #   task_transitions_only_notify_their_deterministic_shards: measured host
+  #     jitter, not a correctness bug. See #25 and
+  #     scripts/sql-mutation-test.py's own FLAKY_TESTS list, which this
+  #     mirrors.
+  #   interval_schedule_reconciles_materializes_and_supports_dynamic_crud:
+  #     shares a database with every other file `cargo test --workspace`
+  #     runs, and `claim_due_schedules` has no per-queue limit -- enough
+  #     schedules from other files (there are more of them at the
+  #     PROPTEST_CASES this workflow uses) starve this test's own schedule
+  #     out of the sweep. See #39. A fresh database per leg does not help:
+  #     the contamination is between test *files* sharing one leg's
+  #     database, not between separate runs.
+  KNOWN_FLAKY_TESTS: >-
+    task_transitions_only_notify_their_deterministic_shards
+    interval_schedule_reconciles_materializes_and_supports_dynamic_crud
 
 jobs:
   rust-stress:
@@ -82,18 +95,30 @@ jobs:
           go-version: stable
           cache-dependency-path: scripts/linearizability/go.sum
       # Each leg gets its own service container (a fresh runner VM), so this
-      # is a distinct random seed and a guaranteed-empty database per leg --
-      # not six chances for the same flake to reproduce.
+      # is a distinct random seed and a guaranteed-empty database per leg.
+      # That only isolates *across* legs, not within one: every test binary
+      # in this one `cargo test --workspace` still shares this leg's single
+      # database, which is exactly the contamination behind #39.
       - run: cargo run -p pgtask-cli --bin pgtask -- --database-url "$PGTASK_DATABASE_URL" migrate
-      - run: |
-          cargo test --workspace --all-features -- --skip "$KNOWN_FLAKY_TEST"
-      - name: Save proptest regressions on failure
+      - name: cargo test --workspace
+        run: |
+          skip_args=()
+          for name in $KNOWN_FLAKY_TESTS; do
+            skip_args+=(--skip "$name")
+          done
+          # --no-fail-fast: a torture run exists to surface everything wrong
+          # tonight, not to stop at the first test binary that fails and hide
+          # whatever the next one would have found.
+          cargo test --workspace --all-features --no-fail-fast -- "${skip_args[@]}"
+      - name: Save failure evidence
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: proptest-regressions-leg-${{ matrix.leg }}
+          name: torture-evidence-leg-${{ matrix.leg }}
           path: |
             **/*.proptest-regressions
+            /tmp/pgtask-*.json
+            /tmp/pgtask-*.html
           if-no-files-found: ignore
           retention-days: 30
 
