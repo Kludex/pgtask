@@ -1,6 +1,6 @@
 # Install
 
-You need PostgreSQL 17 or newer and a way to run a worker process.
+You need PostgreSQL 16 or newer and a way to run a worker process.
 
 ## Install the package
 
