@@ -11,21 +11,21 @@
 //! impossible: a stale write that is accepted, a live write that is rejected, or
 //! a durable step whose recorded value changes between replays.
 //!
-//! Two protocols are covered, each with its own reference model in
-//! `scripts/linearizability`:
+//! Five protocols are covered by reference models in `scripts/linearizability`:
 //!
 //!   * `lease` -- claim, renew, complete, fail, recover
 //!   * `register` -- `commit_checkpoint` and `emit_signal`, which both promise
 //!     first-write-wins
 //!   * `idempotency` -- `enqueue` deduplicating on a key
 //!   * `capacity` -- admission against `max_outstanding_tasks`
+//!   * `wait` -- signal and result wait registration against their wakers
 //!
 //! Histories are partitioned per key, because pgtask makes no cross-key ordering
 //! promise -- `claim` uses `SKIP LOCKED` precisely so two workers get different
 //! tasks. What must hold is the sequence of operations on each key on its own.
 //!
-//! Without a Go toolchain the histories are still generated and the check is
-//! skipped. Replay a run with `PGTASK_LINEARIZABILITY_SEED`.
+//! The checker requires Go 1.24 or newer. Replay a run with
+//! `PGTASK_LINEARIZABILITY_SEED`.
 
 use std::{
     future::Future,
@@ -108,11 +108,12 @@ impl Rng {
 
 /// A lease some client once held. Kept after it is superseded, because
 /// replaying a dead lease is the point.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Lease {
     task: TaskId,
     attempt: u16,
     token: LeaseToken,
+    queue: QueueName,
 }
 
 struct Recorder {
@@ -155,19 +156,12 @@ impl Recorder {
         if leases.is_empty() {
             return None;
         }
-        Some(leases[rng.below(leases.len())])
+        Some(leases[rng.below(leases.len())].clone())
     }
 
     fn take(&self) -> Vec<Value> {
         self.operations.lock().unwrap().clone()
     }
-}
-
-fn go_available() -> bool {
-    Command::new("go")
-        .arg("version")
-        .output()
-        .is_ok_and(|output| output.status.success())
 }
 
 /// Runs the Go checker. `expect_fail` inverts the verdict, for the corruption
@@ -183,7 +177,7 @@ fn check(path: &Path, expect_fail: bool) -> (bool, String) {
         .arg(path)
         .current_dir(CHECKER)
         .output()
-        .expect("the checker runs");
+        .expect("Go 1.24 or newer is required to run the linearizability checker");
     let combined = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -225,15 +219,6 @@ fn check_and_prove_teeth(name: &str, model: &str, operations: &[Value], corrupt:
     let suffix = Uuid::new_v4();
     let path = history_path(name, suffix);
     write_history(&path, model, operations);
-
-    if !go_available() {
-        eprintln!(
-            "go not found; wrote {} {model} operations to {} but skipped the check",
-            operations.len(),
-            path.display()
-        );
-        return;
-    }
 
     let (ok, report) = check(&path, false);
     assert!(
@@ -281,19 +266,19 @@ struct LeaseClient {
     store: Arc<Store>,
     recorder: Arc<Recorder>,
     recovery: Arc<tokio::sync::Mutex<()>>,
-    queue: QueueName,
+    queues: Arc<Vec<QueueName>>,
     task_name: TaskName,
 }
 
 impl LeaseClient {
     /// Claim is queue-wide, so it is recorded only when this client came away
     /// with a task; a claim that returned nothing belongs to no task's history.
-    async fn claim(&self) {
+    async fn claim(&self, queue: &QueueName) {
         let call = self.recorder.now();
         let claimed = self
             .store
             .claim(
-                &self.queue,
+                queue,
                 WorkerId::new(),
                 &[(self.task_name.clone(), HandlerVersion::default())],
                 1,
@@ -308,6 +293,7 @@ impl LeaseClient {
             task: task.id,
             attempt: task.attempt,
             token: task.lease_token.unwrap(),
+            queue: queue.clone(),
         };
         self.recorder.record(
             self.id,
@@ -404,7 +390,7 @@ impl LeaseClient {
         let guard = self.recovery.lock().await;
         expire(&self.store, lease.task).await;
         let call = self.recorder.now();
-        let recovered = self.store.recover_expired(&self.queue, 100).await.unwrap();
+        let recovered = self.store.recover_expired(&lease.queue, 1).await.unwrap();
         let ret = self.recorder.now();
         drop(guard);
 
@@ -425,7 +411,8 @@ impl LeaseClient {
                 // Never cut a claim off: a claim whose result was lost minted a
                 // lease token the client never saw, and no model can say what
                 // state that left behind.
-                self.claim().await;
+                let queue = self.queues[rng.below(self.queues.len())].clone();
+                self.claim(&queue).await;
                 continue;
             }
             let Some(lease) = self.recorder.sample(&mut rng) else {
@@ -494,9 +481,14 @@ async fn the_lease_protocol_is_linearizable() {
     store.migrate().await.unwrap();
 
     let suffix = Uuid::new_v4();
-    let queue = QueueName::new(format!("lin-{suffix}")).unwrap();
     let task_name = TaskName::new(format!("lin-task-{suffix}")).unwrap();
-    seed_tasks(&store, &queue, &task_name, TASKS).await;
+    let mut queues = Vec::new();
+    for index in 0..TASKS {
+        let queue = QueueName::new(format!("lin-{suffix}-{index}")).unwrap();
+        seed_tasks(&store, &queue, &task_name, 1).await;
+        queues.push(queue);
+    }
+    let queues = Arc::new(queues);
 
     let recorder = Arc::new(Recorder::new());
     let recovery = Arc::new(tokio::sync::Mutex::new(()));
@@ -508,7 +500,7 @@ async fn the_lease_protocol_is_linearizable() {
             store: Arc::clone(&store),
             recorder: Arc::clone(&recorder),
             recovery: Arc::clone(&recovery),
-            queue: queue.clone(),
+            queues: Arc::clone(&queues),
             task_name: task_name.clone(),
         };
         clients.push(tokio::spawn(
@@ -583,6 +575,7 @@ impl RegisterClient {
                 task: task.id,
                 attempt: task.attempt,
                 token: task.lease_token.unwrap(),
+                queue: self.queue.clone(),
             });
         }
     }
@@ -736,35 +729,38 @@ async fn durable_steps_and_signals_are_linearizable() {
     );
     println!("{indeterminate} durable write(s) cut off mid-flight");
 
-    // Change one recorded value. A register whose value differs between two
-    // reports has no valid ordering, which is what makes a step's result
-    // changing between replays detectable.
-    check_and_prove_teeth("register", "register", &operations, |operation| {
-        if operation["output"]["value"].is_object() {
-            operation["output"]["value"] = json!({"client": 999, "round": 999});
-        }
-    });
+    // Corrupt each register independently. A failure in one implementation
+    // must not be hidden by successful operations against the other.
+    for (name, prefix) in [("checkpoint", "ckpt:"), ("signal", "sig:")] {
+        check_and_prove_teeth(name, "register", &operations, |operation| {
+            if operation["partition"]
+                .as_str()
+                .is_some_and(|partition| partition.starts_with(prefix))
+                && operation["output"]["value"].is_object()
+            {
+                operation["output"]["value"] = json!({"client": 999, "round": 999});
+            }
+        });
 
-    // A history where every register was written at most once would linearize
-    // trivially, and would say nothing about first-write-wins. This is the
-    // guard: at least one write has to have been handed back a value that was
-    // not its own, which only happens when a second writer lost the race.
-    let displaced = operations
-        .iter()
-        .filter(|operation| {
-            operation["input"]["op"] == json!("write")
-                && operation["output"]["ok"] == json!(true)
-                && operation["output"]["value"] != operation["input"]["value"]
-        })
-        .count();
-    assert!(
-        displaced > 0,
-        "no write was ever displaced by an earlier one, so first-write-wins was never \
-         exercised and this history proves nothing. Replay with \
-         PGTASK_LINEARIZABILITY_SEED={}",
-        seed()
-    );
-    println!("first-write-wins exercised by {displaced} displaced write(s)");
+        let displaced = operations
+            .iter()
+            .filter(|operation| {
+                operation["partition"]
+                    .as_str()
+                    .is_some_and(|partition| partition.starts_with(prefix))
+                    && operation["input"]["op"] == json!("write")
+                    && operation["output"]["ok"] == json!(true)
+                    && operation["output"]["value"] != operation["input"]["value"]
+            })
+            .count();
+        assert!(
+            displaced > 0,
+            "no {name} write was displaced by an earlier one, so its first-write-wins \
+             behavior was never exercised. Replay with PGTASK_LINEARIZABILITY_SEED={}",
+            seed()
+        );
+        println!("{name} first-write-wins exercised by {displaced} displaced write(s)");
+    }
 }
 
 // ---------------------------------------------------------- idempotency -----
@@ -1050,14 +1046,80 @@ const WAIT_PAIRS: usize = 40;
 /// wake must have unparked it; observing the task still parked afterwards has
 /// no consistent ordering. Ordered the other way, the wait would have had to
 /// return `ready`.
+#[derive(Clone, Copy)]
+enum WaitOrder {
+    WaitFirst,
+    WakeFirst,
+    Concurrent(Duration),
+}
+
 struct WaitRound {
     partition: String,
     parent: pgtask_core::Task,
     step: StepName,
-    delay: Duration,
+    order: WaitOrder,
     /// Exactly one of these decides which wait path is under test.
     result_task: Option<TaskId>,
     signal: Option<SignalName>,
+}
+
+async fn record_wait(
+    store: Arc<Store>,
+    recorder: Arc<Recorder>,
+    partition: String,
+    parent: pgtask_core::Task,
+    wait_step: StepName,
+    result_task: Option<TaskId>,
+    signal: Option<SignalName>,
+) {
+    let call = recorder.now();
+    let status = match (result_task, signal) {
+        (Some(child), _) => match store
+            .wait_for_result(ResultWaitRequest {
+                task_id: parent.id,
+                attempt: parent.attempt,
+                lease_token: parent.lease_token.unwrap(),
+                step_name: &wait_step,
+                occurrence: 0,
+                result_task_id: child,
+                timeout: None,
+            })
+            .await
+            .unwrap()
+        {
+            Some(ResultWait::Ready(_)) => "ready",
+            Some(ResultWait::Waiting) => "waiting",
+            None => "lost",
+        },
+        (None, Some(name)) => match store
+            .wait_for_signal(SignalWaitRequest {
+                task_id: parent.id,
+                attempt: parent.attempt,
+                lease_token: parent.lease_token.unwrap(),
+                step_name: &wait_step,
+                occurrence: 0,
+                signal_name: &name,
+                signal_occurrence: 0,
+                timeout: None,
+            })
+            .await
+            .unwrap()
+        {
+            Some(SignalWait::Ready(_)) => "ready",
+            Some(SignalWait::Waiting) => "waiting",
+            None => "lost",
+        },
+        _ => unreachable!("a wait is either for a result or for a signal"),
+    };
+    let ret = recorder.now();
+    recorder.record(
+        0,
+        &partition,
+        call,
+        ret,
+        &json!({"op": "wait"}),
+        &json!({"state": status}),
+    );
 }
 
 async fn record_wait_round(
@@ -1070,85 +1132,54 @@ async fn record_wait_round(
         partition,
         parent,
         step: wait_step,
-        delay,
+        order,
         result_task,
         signal,
     } = round;
-    let waiter = {
-        let store = Arc::clone(store);
-        let recorder = Arc::clone(recorder);
-        let partition = partition.clone();
-        tokio::spawn(async move {
-            let call = recorder.now();
-            let status = match (result_task, signal) {
-                (Some(child), _) => match store
-                    .wait_for_result(ResultWaitRequest {
-                        task_id: parent.id,
-                        attempt: parent.attempt,
-                        lease_token: parent.lease_token.unwrap(),
-                        step_name: &wait_step,
-                        occurrence: 0,
-                        result_task_id: child,
-                        timeout: None,
-                    })
-                    .await
-                    .unwrap()
-                {
-                    Some(ResultWait::Ready(_)) => "ready",
-                    Some(ResultWait::Waiting) => "waiting",
-                    None => "lost",
-                },
-                (None, Some(name)) => match store
-                    .wait_for_signal(SignalWaitRequest {
-                        task_id: parent.id,
-                        attempt: parent.attempt,
-                        lease_token: parent.lease_token.unwrap(),
-                        step_name: &wait_step,
-                        occurrence: 0,
-                        signal_name: &name,
-                        signal_occurrence: 0,
-                        timeout: None,
-                    })
-                    .await
-                    .unwrap()
-                {
-                    Some(SignalWait::Ready(_)) => "ready",
-                    Some(SignalWait::Waiting) => "waiting",
-                    None => "lost",
-                },
-                _ => unreachable!("a wait is either for a result or for a signal"),
-            };
-            let ret = recorder.now();
-            recorder.record(
-                0,
-                &partition,
-                call,
-                ret,
-                &json!({"op": "wait"}),
-                &json!({"state": status}),
-            );
-        })
-    };
+    let parent_id = parent.id;
+    let waiter = record_wait(
+        Arc::clone(store),
+        Arc::clone(recorder),
+        partition.clone(),
+        parent,
+        wait_step,
+        result_task,
+        signal,
+    );
 
     let waking = {
         let recorder = Arc::clone(recorder);
         let partition = partition.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
+        async move {
             let call = recorder.now();
             waker.await;
             let ret = recorder.now();
             recorder.record(1, &partition, call, ret, &json!({"op": "wake"}), &json!({"ok": true}));
-        })
+        }
     };
 
-    waiter.await.unwrap();
-    waking.await.unwrap();
+    match order {
+        WaitOrder::WaitFirst => {
+            waiter.await;
+            waking.await;
+        }
+        WaitOrder::WakeFirst => {
+            waking.await;
+            waiter.await;
+        }
+        WaitOrder::Concurrent(delay) => {
+            let waking = async {
+                tokio::time::sleep(delay).await;
+                waking.await;
+            };
+            tokio::join!(waiter, waking);
+        }
+    }
 
     // Both sides have committed and the wake-up is synchronous, so the task's
     // fate is already decided.
     let call = recorder.now();
-    let parked = store.get_task(parent.id).await.unwrap().unwrap().state == TaskState::Waiting;
+    let parked = store.get_task(parent_id).await.unwrap().unwrap().state == TaskState::Waiting;
     let ret = recorder.now();
     recorder.record(
         2,
@@ -1194,7 +1225,11 @@ async fn signal_waits_are_linearizable() {
                 partition,
                 parent,
                 step: wait_step.clone(),
-                delay: jitter(index),
+                order: match index {
+                    0 => WaitOrder::WaitFirst,
+                    1 => WaitOrder::WakeFirst,
+                    _ => WaitOrder::Concurrent(jitter(index)),
+                },
                 result_task: None,
                 signal: Some(signal.clone()),
             },
@@ -1203,17 +1238,10 @@ async fn signal_waits_are_linearizable() {
         .await;
     }
 
-    check_and_prove_teeth("wait-signal", "wait", &recorder.take(), |operation| {
-        // Claim the task was released when it was not. A wake that leaves a
-        // waiter parked has no ordering that explains it.
-        if operation["input"]["op"] == json!("observe") && operation["output"]["parked"] == json!(false) {
-            operation["output"]["parked"] = json!(true);
-        }
-    });
+    check_wait_history("wait-signal", &recorder.take());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "reproduces #23: wait_for_result loses wake-ups. Un-ignore with the fix in #29."]
 async fn result_waits_are_linearizable() {
     let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
         return;
@@ -1272,7 +1300,11 @@ async fn result_waits_are_linearizable() {
                 partition,
                 parent,
                 step: wait_step.clone(),
-                delay: jitter(index),
+                order: match index {
+                    0 => WaitOrder::WaitFirst,
+                    1 => WaitOrder::WakeFirst,
+                    _ => WaitOrder::Concurrent(jitter(index)),
+                },
                 result_task: Some(child_id),
                 signal: None,
             },
@@ -1281,9 +1313,28 @@ async fn result_waits_are_linearizable() {
         .await;
     }
 
-    check_and_prove_teeth("wait-result", "wait", &recorder.take(), |operation| {
+    check_wait_history("wait-result", &recorder.take());
+}
+
+fn check_wait_history(name: &str, operations: &[Value]) {
+    check_and_prove_teeth(name, "wait", operations, |operation| {
         if operation["input"]["op"] == json!("observe") && operation["output"]["parked"] == json!(false) {
             operation["output"]["parked"] = json!(true);
         }
     });
+
+    for state in ["waiting", "ready"] {
+        assert!(
+            operations.iter().any(|operation| {
+                operation["input"]["op"] == json!("wait") && operation["output"]["state"] == json!(state)
+            }),
+            "no wait returned {state}, so that ordering was never exercised"
+        );
+    }
+    assert!(
+        operations.iter().all(|operation| {
+            operation["input"]["op"] != json!("wait") || operation["output"]["state"] != json!("lost")
+        }),
+        "a wait with a fresh lease was fenced out"
+    );
 }

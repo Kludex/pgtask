@@ -181,7 +181,6 @@ func main() {
 	}
 }
 
-
 // buildEvents turns operations into the call/return event pairs the checker
 // wants, ordered by time.
 //
