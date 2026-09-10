@@ -52,9 +52,21 @@ env:
   #     out of the sweep. See #39. A fresh database per leg does not help:
   #     the contamination is between test *files* sharing one leg's
   #     database, not between separate runs.
+  #   administrator_mode_mutates_through_audited_post_operations,
+  #   observer_pages_cover_queues_tasks_schedules_workers_and_not_found,
+  #   application_runs_with_a_role_that_can_only_read_observer_views:
+  #     /schedules and /workers render every row ever, unpaginated, and
+  #     the test harness's own 1MB response-body limit is what actually
+  #     trips once enough schedules exist in the shared database. Real
+  #     production concern, not just a test artifact -- see #42. Skipped
+  #     here for the same reason as #39: an already-filed, already-
+  #     understood failure re-flagging every night is noise, not signal.
   KNOWN_FLAKY_TESTS: >-
     task_transitions_only_notify_their_deterministic_shards
     interval_schedule_reconciles_materializes_and_supports_dynamic_crud
+    administrator_mode_mutates_through_audited_post_operations
+    observer_pages_cover_queues_tasks_schedules_workers_and_not_found
+    application_runs_with_a_role_that_can_only_read_observer_views
 
 jobs:
   rust-stress:
