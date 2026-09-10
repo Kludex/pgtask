@@ -256,7 +256,7 @@ connection satisfies `BatchTransactionConnection`.
 `Client.connect()` checks the storage protocol before returning. `enqueue_on` is the low-level transaction escape hatch.
 Use it only after the application has established a compatible normal client during startup.
 
-## Migrate from ARQ
+## Translate an ARQ enqueue
 
 The shape stays familiar, with types and a transactional enqueue added:
 
@@ -287,4 +287,6 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Translate ARQ calls at the application boundary. Use payload objects, normal keyword arguments, and absolute `run_at` times. pgtask deliberately has no ARQ-shaped client, magic `_defer_by` options, positional payload encoding, or Redis compatibility layer.
+Translate ARQ calls at the application boundary. Use payload objects, normal keyword arguments, and absolute `run_at`
+times. `pgtask` deliberately has no ARQ-shaped client, magic `_defer_by` options, positional payload encoding, or Redis
+compatibility layer. See [`pgtask` vs ARQ](../compare/arq.md) before you plan a cutover.
