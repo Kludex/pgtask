@@ -39,13 +39,16 @@ fn store() -> Option<&'static (Runtime, Store)> {
     static STORE: OnceLock<Option<(Runtime, Store)>> = OnceLock::new();
     STORE
         .get_or_init(|| {
-            let database_url = std::env::var("PGTASK_DATABASE_URL").ok()?;
-            let runtime = Runtime::new().ok()?;
-            let store = runtime.block_on(async {
-                let store = Store::connect(&database_url).await.ok()?;
-                store.migrate().await.ok()?;
-                Some(store)
-            })?;
+            let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
+                return None;
+            };
+            let runtime = Runtime::new().expect("failed to create the Tokio runtime");
+            let store = runtime
+                .block_on(Store::connect(&database_url))
+                .expect("failed to connect to PGTASK_DATABASE_URL");
+            runtime
+                .block_on(store.migrate())
+                .expect("failed to migrate the database");
             Some((runtime, store))
         })
         .as_ref()
@@ -129,16 +132,10 @@ proptest! {
         );
     }
 
-    /// A sub-millisecond interval is accepted by `ScheduleDefinition::interval`
-    /// but truncates to `0` on the way to the database, where
-    /// `CHECK (interval_milliseconds > 0)` rejects it. The caller sees a raw
-    /// constraint violation rather than a validation error.
+    /// A sub-millisecond interval is constructible but truncates to zero on the
+    /// way to a database that only stores whole milliseconds.
     #[test]
-    #[ignore = "reproduces #30: sub-millisecond intervals are constructible but not storable. \
-                Un-ignore with the fix."]
-    fn a_sub_millisecond_interval_is_rejected_before_it_reaches_the_database(
-        every_micros in 1_u64..1_000,
-    ) {
+    fn a_sub_millisecond_interval_is_not_storable(every_micros in 1_u64..1_000) {
         let Some((runtime, store)) = store() else { return Ok(()); };
 
         let every = Duration::from_micros(every_micros);
@@ -152,9 +149,8 @@ proptest! {
 
         let result = runtime.block_on(store.put_schedule(&config));
         prop_assert!(
-            result.is_ok(),
-            "Rust accepted an interval of {every:?} that the database will not store: {:?}",
-            result.err()
+            result.is_err(),
+            "the database stored a sub-millisecond interval as if it were {every:?}"
         );
     }
 

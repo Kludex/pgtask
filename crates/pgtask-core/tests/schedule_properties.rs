@@ -37,6 +37,12 @@ fn epoch() -> DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap()
 }
 
+fn first_due(definition: &ScheduleDefinition) -> DateTime<Utc> {
+    definition
+        .next_after(epoch())
+        .expect("generated schedule has a future occurrence")
+}
+
 /// Intervals that survive a round trip through the database, which stores
 /// whole milliseconds. Sub-millisecond intervals are covered separately by
 /// `a_sub_millisecond_interval_does_not_panic`, since they currently crash and
@@ -95,7 +101,7 @@ proptest! {
         policy in any_policy(),
         lateness in any_lateness(),
     ) {
-        let next_run_at = epoch();
+        let next_run_at = first_due(&definition);
         let now = next_run_at + TimeDelta::seconds(lateness);
         let _ = definition.materialize(next_run_at, now, policy);
     }
@@ -108,15 +114,16 @@ proptest! {
         policy in any_policy(),
         lateness in any_lateness(),
     ) {
-        let next_run_at = epoch();
+        let next_run_at = first_due(&definition);
         let now = next_run_at + TimeDelta::seconds(lateness);
-        if let Ok(materialization) = definition.materialize(next_run_at, now, policy) {
-            prop_assert!(
-                materialization.next_run_at > now,
-                "cursor landed at {} which is not after {now}",
-                materialization.next_run_at
-            );
-        }
+        let result = definition.materialize(next_run_at, now, policy);
+        prop_assert!(result.is_ok(), "generated schedule did not materialize: {result:?}");
+        let materialization = result.unwrap();
+        prop_assert!(
+            materialization.next_run_at > now,
+            "cursor landed at {} which is not after {now}",
+            materialization.next_run_at
+        );
     }
 
     /// Occurrences are due times: never before the cursor, never in the future,
@@ -128,16 +135,17 @@ proptest! {
         policy in any_policy(),
         lateness in any_lateness(),
     ) {
-        let next_run_at = epoch();
+        let next_run_at = first_due(&definition);
         let now = next_run_at + TimeDelta::seconds(lateness);
-        if let Ok(materialization) = definition.materialize(next_run_at, now, policy) {
-            for occurrence in &materialization.occurrences {
-                prop_assert!(*occurrence >= next_run_at, "{occurrence} is before the cursor");
-                prop_assert!(*occurrence <= now, "{occurrence} is in the future");
-            }
-            for pair in materialization.occurrences.windows(2) {
-                prop_assert!(pair[0] < pair[1], "occurrences {:?} are not increasing", pair);
-            }
+        let result = definition.materialize(next_run_at, now, policy);
+        prop_assert!(result.is_ok(), "generated schedule did not materialize: {result:?}");
+        let materialization = result.unwrap();
+        for occurrence in &materialization.occurrences {
+            prop_assert!(*occurrence >= next_run_at, "{occurrence} is before the cursor");
+            prop_assert!(*occurrence <= now, "{occurrence} is in the future");
+        }
+        for pair in materialization.occurrences.windows(2) {
+            prop_assert!(pair[0] < pair[1], "occurrences {:?} are not increasing", pair);
         }
     }
 
@@ -150,15 +158,16 @@ proptest! {
         lateness in any_lateness(),
     ) {
         let policy = MisfirePolicy::CatchUp { limit: NonZeroU16::new(limit).unwrap() };
-        let next_run_at = epoch();
+        let next_run_at = first_due(&definition);
         let now = next_run_at + TimeDelta::seconds(lateness);
-        if let Ok(materialization) = definition.materialize(next_run_at, now, policy) {
-            prop_assert!(
-                materialization.occurrences.len() <= usize::from(limit),
-                "{} occurrences for a limit of {limit}",
-                materialization.occurrences.len()
-            );
-        }
+        let result = definition.materialize(next_run_at, now, policy);
+        prop_assert!(result.is_ok(), "generated schedule did not materialize: {result:?}");
+        let materialization = result.unwrap();
+        prop_assert!(
+            materialization.occurrences.len() <= usize::from(limit),
+            "{} occurrences for a limit of {limit}",
+            materialization.occurrences.len()
+        );
     }
 
     /// `skipped` is what operators read to notice a silent gap, so everything
@@ -215,8 +224,8 @@ proptest! {
         policy in any_policy(),
         ahead in 1_i64..86_400,
     ) {
-        let now = epoch();
-        let next_run_at = now + TimeDelta::seconds(ahead);
+        let next_run_at = first_due(&definition);
+        let now = next_run_at - TimeDelta::seconds(ahead);
         let materialization = definition.materialize(next_run_at, now, policy).unwrap();
         prop_assert!(materialization.occurrences.is_empty());
         prop_assert_eq!(materialization.next_run_at, next_run_at);
