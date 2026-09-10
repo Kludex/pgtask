@@ -45,6 +45,13 @@ if not os.environ.get("PGTASK_MUTANTS_KEEP_MODEL"):
     EXCLUDED_TESTS.append("crates/pgtask-postgres/tests/model.rs")
 
 
+def parked_tests(only_target: str | None) -> list[str]:
+    """Parking the target under --only-test would leave nothing to run."""
+    if only_target is None:
+        return EXCLUDED_TESTS
+    return [path for path in EXCLUDED_TESTS if not path.endswith(f"/{only_target}.rs")]
+
+
 @dataclasses.dataclass(frozen=True)
 class Mutant:
     name: str
@@ -53,6 +60,10 @@ class Mutant:
     new: str
     rule: str
     """The guarantee this mutant breaks, in the words of the docs."""
+    occurrences: int = 1
+    """How many copies of `old` to replace. A predicate repeated across CTEs has
+    to be removed from all of them, or the untouched copy still enforces the
+    rule and the mutant survives for the wrong reason."""
 
 
 MUTANTS: list[Mutant] = [
@@ -163,6 +174,8 @@ MUTANTS: list[Mutant] = [
         "AND tasks.attempt < tasks.max_attempts",
         "",
         "claim filters out tasks that have exhausted their attempts.",
+        # Once in the starvation CTE and once in the priority CTE.
+        occurrences=2,
     ),
     Mutant(
         "attempts-fail-off-by-one",
@@ -276,7 +289,13 @@ def apply_mutant(mutant: Mutant) -> None:
             f"mutant {mutant.name!r} does not apply: pattern not found in {mutant.signature}.\n"
             f"Pattern: {mutant.old!r}"
         )
-    mutated = definition.replace(mutant.old, mutant.new, 1)
+    found = definition.count(mutant.old)
+    if found < mutant.occurrences:
+        raise RuntimeError(
+            f"mutant {mutant.name!r} expects {mutant.occurrences} occurrence(s) of its "
+            f"pattern in {mutant.signature}, found {found}"
+        )
+    mutated = definition.replace(mutant.old, mutant.new, mutant.occurrences)
     psql(mutated, MUTANT_DB)
 
 
@@ -297,7 +316,7 @@ class BuildFailure(RuntimeError):
     """The tree does not compile, so no mutant can be scored."""
 
 
-def run_suite(url: str, timeout: int = 900) -> tuple[bool, str]:
+def run_suite(url: str, timeout: int = 900, only_target: str | None = None) -> tuple[bool, str]:
     """Return (suite_passed, tail_of_output).
 
     A mutation is only "killed" when a test asserted something. A tree that
@@ -306,9 +325,13 @@ def run_suite(url: str, timeout: int = 900) -> tuple[bool, str]:
     than counted.
     """
     env = {**os.environ, "PGTASK_DATABASE_URL": url}
-    command = ["cargo", "test", "--workspace", "--all-features", "--"]
-    for test in FLAKY_TESTS:
-        command += ["--skip", test]
+    if only_target:
+        # Answers "does this one test catch it?" rather than "does the suite?".
+        command = ["cargo", "test", "-p", "pgtask-postgres", "--test", only_target, "--"]
+    else:
+        command = ["cargo", "test", "--workspace", "--all-features", "--"]
+        for test in FLAKY_TESTS:
+            command += ["--skip", test]
     result = subprocess.run(
         command, cwd=REPO, env=env, capture_output=True, text=True, timeout=timeout,
     )
@@ -328,6 +351,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--list", action="store_true", help="list mutants and exit")
     parser.add_argument("-k", dest="filter", default="", help="only mutants whose name contains this")
+    parser.add_argument(
+        "--only-test",
+        default=None,
+        metavar="TARGET",
+        help="run just this pgtask-postgres test target instead of the whole suite, "
+        "to ask which mutants that one test catches",
+    )
     args = parser.parse_args()
 
     selected = [m for m in MUTANTS if args.filter in m.name]
@@ -339,7 +369,7 @@ def main() -> int:
     # Park regression tests that are red on an unmutated tree; they would kill
     # every mutant regardless of the mutation.
     parked: list[tuple[pathlib.Path, pathlib.Path]] = []
-    for relative in EXCLUDED_TESTS:
+    for relative in parked_tests(args.only_test):
         source = REPO / relative
         if source.exists():
             destination = source.with_suffix(".rs.parked")
@@ -354,7 +384,7 @@ def main() -> int:
         print("Establishing the baseline (unmutated).")
         url = reset_database()
         try:
-            baseline_passed, tail = run_suite(url)
+            baseline_passed, tail = run_suite(url, only_target=args.only_test)
         except BuildFailure as error:
             print(f"Baseline does not build:\n{error}")
             return 1
@@ -375,7 +405,7 @@ def main() -> int:
                 inapplicable.append((mutant, str(error)))
                 continue
             try:
-                passed, tail = run_suite(url)
+                passed, tail = run_suite(url, only_target=args.only_test)
             except BuildFailure as error:
                 print(f"    ABORTING - the tree stopped building mid-run:\n{error}")
                 return 1
