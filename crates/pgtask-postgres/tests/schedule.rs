@@ -39,7 +39,6 @@ async fn claim_after_materializing(
     limit: u16,
 ) -> Vec<Task> {
     for _ in 0..20 {
-        store.materialize_due_schedules(1_000).await.unwrap();
         let claimed = store
             .claim(
                 queue_name,
@@ -53,6 +52,7 @@ async fn claim_after_materializing(
         if !claimed.is_empty() {
             return claimed;
         }
+        store.materialize_due_schedules(1_000).await.unwrap();
     }
     Vec::new()
 }
@@ -261,7 +261,16 @@ async fn concurrent_schedulers_materialize_one_cron_occurrence() {
     let (left, right) = tokio::join!(store.materialize_due_schedules(10), store.materialize_due_schedules(10));
     left.unwrap();
     right.unwrap();
-    let claimed = claim_after_materializing(&store, &config.task.queue_name, &task_name, 10).await;
+    let claimed = store
+        .claim(
+            &config.task.queue_name,
+            WorkerId::new(),
+            &[(task_name, HandlerVersion::default())],
+            10,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
     assert_eq!(claimed.len(), 1);
     assert!(store.delete_schedule(schedule.config.id).await.unwrap());
 }
@@ -291,7 +300,17 @@ async fn missed_occurrence_materialization_is_idempotent_across_restarts() {
     store.materialize_due_schedules(10).await.unwrap();
     drop(store);
     let store = Store::connect(&database_url).await.unwrap();
-    let claimed = claim_after_materializing(&store, &config.task.queue_name, &task_name, 10).await;
+    store.materialize_due_schedules(10).await.unwrap();
+    let claimed = store
+        .claim(
+            &config.task.queue_name,
+            WorkerId::new(),
+            &[(task_name, HandlerVersion::default())],
+            10,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
     assert_eq!(claimed.len(), 1);
     assert!(store.delete_schedule(schedule.config.id).await.unwrap());
 }
