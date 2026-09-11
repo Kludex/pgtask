@@ -423,7 +423,9 @@ def main() -> int:
                     # every run. A flake is not. Confirming before scoring costs
                     # one extra suite per kill and stops a bad run inventing a
                     # coverage gap that is not there.
-                    confirmed, confirm_tail = run_suite(url, only_target=args.only_test)
+                    confirmation_url = reset_database()
+                    apply_mutant(mutant)
+                    confirmed, confirm_tail = run_suite(confirmation_url, only_target=args.only_test)
                     if confirmed:
                         print(f"    FLAKY - failed once, passed on retry; not scored", flush=True)
                         inconclusive.append(mutant)
@@ -465,7 +467,7 @@ def main() -> int:
         print(f"{len(inapplicable)} mutants could not be applied (pattern drift):")
         for mutant, _ in inapplicable:
             print(f"  {mutant.name}")
-    return 0
+    return 1 if survived or inconclusive or inapplicable else 0
 
 
 if __name__ == "__main__":
