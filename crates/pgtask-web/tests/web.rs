@@ -231,6 +231,100 @@ async fn observer_pages_cover_queues_tasks_schedules_workers_and_not_found() {
 }
 
 #[tokio::test]
+async fn schedule_and_worker_lists_are_paginated() {
+    let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("cap-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("cap-task-{suffix}")).unwrap();
+
+    for index in 0..105 {
+        let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
+        request.queue_name = queue_name.clone();
+        let schedule = ScheduleConfig::new(
+            ScheduleName::new(format!("cap-{suffix}-{index:03}")).unwrap(),
+            ScheduleDefinition::interval(Duration::from_mins(1)).unwrap(),
+            request,
+        );
+        store.put_schedule(&schedule).await.unwrap();
+
+        store
+            .register_worker(
+                WorkerId::new(),
+                &queue_name,
+                "cap-test",
+                &[(task_name.clone(), HandlerVersion::default(), RetryPolicy::Never)],
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+    }
+
+    let app = application(store.pool().clone());
+    let (_, schedules) = response(&app, "/schedules").await;
+    let (_, workers) = response(&app, "/workers").await;
+    assert_eq!(schedules.matches("<td class=\"state\">").count(), 100);
+    assert_eq!(workers.matches("<td class=\"state\">").count(), 100);
+    assert!(schedules.contains("Next page"));
+    assert!(workers.contains("Next page"));
+
+    let schedule_cursor = format!("cap-{suffix}-099");
+    let (_, next_schedules) = response(&app, &format!("/schedules?after={schedule_cursor}")).await;
+    let first_schedule = format!("cap-{suffix}-100");
+    let last_schedule = format!("cap-{suffix}-104");
+    assert!(next_schedules.find(&first_schedule).unwrap() < next_schedules.find(&last_schedule).unwrap());
+
+    let (started_at, worker_id): (chrono::DateTime<Utc>, Uuid) = sqlx::query_as(
+        "SELECT started_at, id FROM pgtask.worker_view WHERE queue_name = $1 \
+         ORDER BY started_at DESC, id DESC OFFSET 99 LIMIT 1",
+    )
+    .bind(queue_name.as_str())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    let expected_worker_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM pgtask.worker_view WHERE queue_name = $1 \
+         AND (started_at, id) < ($2, $3) ORDER BY started_at DESC, id DESC",
+    )
+    .bind(queue_name.as_str())
+    .bind(started_at)
+    .bind(worker_id)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(expected_worker_ids.len(), 5);
+    assert!(
+        store
+            .heartbeat_worker(
+                WorkerId::from_uuid(expected_worker_ids[0]),
+                Duration::from_secs(30),
+                false,
+            )
+            .await
+            .unwrap()
+    );
+
+    let path = format!(
+        "/workers?after_started={}&after_id={worker_id}",
+        started_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+    );
+    let (_, next_workers) = response(&app, &path).await;
+    for worker_id in expected_worker_ids {
+        assert!(next_workers.contains(&worker_id.to_string()));
+    }
+
+    assert_eq!(
+        response(&app, "/workers?after_id=00000000-0000-0000-0000-000000000000",)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn application_runs_with_a_role_that_can_only_read_observer_views() {
     let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
         return;

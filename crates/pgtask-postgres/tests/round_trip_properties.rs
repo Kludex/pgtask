@@ -11,9 +11,9 @@
 use std::{sync::OnceLock, time::Duration};
 
 use pgtask_core::{
-    EnqueueRequest, MisfirePolicy, QueueName, ScheduleConfig, ScheduleDefinition, ScheduleName, TaskName,
+    EnqueueRequest, MisfirePolicy, QueueName, ScheduleConfig, ScheduleDefinition, ScheduleError, ScheduleName, TaskName,
 };
-use pgtask_postgres::Store;
+use pgtask_postgres::{PostgresError, Store};
 use proptest::prelude::*;
 use serde_json::json;
 use tokio::runtime::Runtime;
@@ -132,26 +132,26 @@ proptest! {
         );
     }
 
-    /// A sub-millisecond interval is constructible but truncates to zero on the
-    /// way to a database that only stores whole milliseconds.
+    /// The storage boundary also validates manually constructed enum variants.
     #[test]
-    fn a_sub_millisecond_interval_is_not_storable(every_micros in 1_u64..1_000) {
+    fn a_fractional_millisecond_interval_is_rejected_before_storage(
+        milliseconds in 0_u64..86_400_000,
+        extra_nanos in 1_u32..1_000_000,
+    ) {
         let Some((runtime, store)) = store() else { return Ok(()); };
 
-        let every = Duration::from_micros(every_micros);
-        let definition = ScheduleDefinition::interval(every).expect("non-zero interval");
-
+        let every = Duration::from_millis(milliseconds) + Duration::from_nanos(u64::from(extra_nanos));
+        let definition = ScheduleDefinition::Interval { every };
         let queue = QueueName::new(format!("prop-subms-{}", Uuid::new_v4())).unwrap();
         let mut task = EnqueueRequest::new(TaskName::new("prop.scheduled").unwrap(), json!({}));
         task.queue_name = queue;
         let name = ScheduleName::new(format!("prop-{}", Uuid::new_v4())).unwrap();
         let config = ScheduleConfig::new(name, definition, task);
 
-        let result = runtime.block_on(store.put_schedule(&config));
-        prop_assert!(
-            result.is_err(),
-            "the database stored a sub-millisecond interval as if it were {every:?}"
-        );
+        prop_assert!(matches!(
+            runtime.block_on(store.put_schedule(&config)),
+            Err(PostgresError::Schedule(ScheduleError::UnsupportedIntervalPrecision))
+        ));
     }
 
     /// The misfire policy is an enum on both sides; every variant must survive.

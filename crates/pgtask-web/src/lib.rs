@@ -10,6 +10,7 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sqlx::PgPool;
 use thiserror::Error;
@@ -42,6 +43,8 @@ enum WebError {
     Database(#[from] sqlx::Error),
     #[error("resource not found")]
     NotFound,
+    #[error("invalid pagination cursor")]
+    InvalidCursor,
     #[error("administrator identity is required")]
     Unauthorized,
 }
@@ -51,6 +54,7 @@ impl IntoResponse for WebError {
         let status = match self {
             Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::NotFound => StatusCode::NOT_FOUND,
+            Self::InvalidCursor => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
         };
         (status, Html(pages::error(status.as_u16(), &self.to_string()))).into_response()
@@ -60,6 +64,17 @@ impl IntoResponse for WebError {
 #[derive(Deserialize)]
 struct TaskSearch {
     query: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SchedulePagination {
+    after: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WorkerPagination {
+    after_started: Option<DateTime<Utc>>,
+    after_id: Option<Uuid>,
 }
 
 pub fn application(pool: PgPool) -> Router {
@@ -113,8 +128,12 @@ async fn task(State(state): State<AppState>, Path(task_id): Path<Uuid>) -> Resul
     Ok(Html(pages::task(&detail, state.administrator.is_some())))
 }
 
-async fn schedules(State(state): State<AppState>) -> Result<Html<String>, WebError> {
-    Ok(Html(pages::schedules(&model::ScheduleSummary::all(&state.pool).await?)))
+async fn schedules(
+    State(state): State<AppState>,
+    Query(pagination): Query<SchedulePagination>,
+) -> Result<Html<String>, WebError> {
+    let page = model::ScheduleSummary::page(&state.pool, pagination.after.as_deref()).await?;
+    Ok(Html(pages::schedules(&page.items, page.next.as_deref())))
 }
 
 async fn schedule(State(state): State<AppState>, Path(schedule_id): Path<Uuid>) -> Result<Html<String>, WebError> {
@@ -124,8 +143,17 @@ async fn schedule(State(state): State<AppState>, Path(schedule_id): Path<Uuid>) 
     Ok(Html(pages::schedule(&detail, state.administrator.is_some())))
 }
 
-async fn workers(State(state): State<AppState>) -> Result<Html<String>, WebError> {
-    Ok(Html(pages::workers(&model::WorkerSummary::all(&state.pool).await?)))
+async fn workers(
+    State(state): State<AppState>,
+    Query(pagination): Query<WorkerPagination>,
+) -> Result<Html<String>, WebError> {
+    let after = match (pagination.after_started, pagination.after_id) {
+        (Some(heartbeat), Some(id)) => Some((heartbeat, id)),
+        (None, None) => None,
+        _ => return Err(WebError::InvalidCursor),
+    };
+    let page = model::WorkerSummary::page(&state.pool, after).await?;
+    Ok(Html(pages::workers(&page.items, page.next)))
 }
 
 async fn worker(State(state): State<AppState>, Path(worker_id): Path<Uuid>) -> Result<Html<String>, WebError> {

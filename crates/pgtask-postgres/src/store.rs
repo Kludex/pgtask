@@ -716,11 +716,14 @@ impl Store {
             .await?;
         let next_run_at = config.start_at.unwrap_or(config.definition.next_after(now)?);
         let (kind, interval_milliseconds, cron_expression) = match &config.definition {
-            ScheduleDefinition::Interval { every } => (
-                "interval",
-                Some(i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)?),
-                None,
-            ),
+            ScheduleDefinition::Interval { every } => {
+                ScheduleDefinition::interval(*every)?;
+                (
+                    "interval",
+                    Some(i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)?),
+                    None,
+                )
+            }
             ScheduleDefinition::Cron { expression } => ("cron", None, Some(expression.as_str())),
         };
         let (misfire_policy, catch_up_limit) = match config.misfire_policy {
@@ -1181,8 +1184,7 @@ impl Store {
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
                 run_at, attempt,
-                (SELECT count(*)::integer FROM pgtask.attempts AS history
-                    WHERE history.task_id = claimed.id AND history.state IN ('failed', 'lost')) AS failed_attempts,
+                COALESCE((to_jsonb(claimed)->>'failed_attempts')::integer, attempt) AS failed_attempts,
                 max_attempts, lease_token, lease_owner, lease_expires_at, created_at, updated_at,
                 completed_at, result, error, parent_task_id, retry_kind, retry_base_delay_milliseconds,
                 retry_factor, retry_max_delay_milliseconds
@@ -1213,8 +1215,7 @@ impl Store {
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
                 run_at, attempt,
-                (SELECT count(*)::integer FROM pgtask.attempts AS history
-                    WHERE history.task_id = task.id AND history.state IN ('failed', 'lost')) AS failed_attempts,
+                COALESCE((to_jsonb(task)->>'failed_attempts')::integer, attempt) AS failed_attempts,
                 max_attempts, lease_token, lease_owner, lease_expires_at, created_at, updated_at,
                 completed_at, result, error, parent_task_id, retry_kind, retry_base_delay_milliseconds,
                 retry_factor, retry_max_delay_milliseconds
