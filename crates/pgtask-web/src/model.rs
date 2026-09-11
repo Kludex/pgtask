@@ -261,6 +261,7 @@ pub struct WorkerSummary {
     pub version: String,
     pub draining: bool,
     pub live: bool,
+    pub started_at: DateTime<Utc>,
     pub heartbeat_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
@@ -270,14 +271,14 @@ impl WorkerSummary {
         pool: &PgPool,
         after: Option<(DateTime<Utc>, Uuid)>,
     ) -> Result<Page<Self, (DateTime<Utc>, Uuid)>, sqlx::Error> {
-        let (after_heartbeat, after_id) = after.unzip();
+        let (after_started, after_id) = after.unzip();
         let mut items: Vec<Self> = sqlx::query_as(
-            "SELECT id, queue_name, version, draining, live, heartbeat_at, expires_at \
+            "SELECT id, queue_name, version, draining, live, started_at, heartbeat_at, expires_at \
              FROM pgtask.worker_view \
-             WHERE $1::timestamptz IS NULL OR (heartbeat_at, id) < ($1, $2) \
-             ORDER BY heartbeat_at DESC, id DESC LIMIT 101",
+             WHERE $1::timestamptz IS NULL OR (started_at, id) < ($1, $2) \
+             ORDER BY started_at DESC, id DESC LIMIT 101",
         )
-        .bind(after_heartbeat)
+        .bind(after_started)
         .bind(after_id)
         .fetch_all(pool)
         .await?;
@@ -285,7 +286,7 @@ impl WorkerSummary {
         items.truncate(PAGE_SIZE);
         let next = has_more.then(|| {
             let worker = items.last().unwrap();
-            (worker.heartbeat_at, worker.id)
+            (worker.started_at, worker.id)
         });
         Ok(Page { items, next })
     }
@@ -311,7 +312,7 @@ pub struct WorkerDetail {
 impl WorkerDetail {
     pub async fn load(pool: &PgPool, worker_id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         let worker = sqlx::query_as(
-            "SELECT id, queue_name, version, draining, live, heartbeat_at, expires_at \
+            "SELECT id, queue_name, version, draining, live, started_at, heartbeat_at, expires_at \
              FROM pgtask.worker_view WHERE id = $1",
         )
         .bind(worker_id)

@@ -277,30 +277,41 @@ async fn schedule_and_worker_lists_are_paginated() {
     let last_schedule = format!("cap-{suffix}-104");
     assert!(next_schedules.find(&first_schedule).unwrap() < next_schedules.find(&last_schedule).unwrap());
 
-    let (heartbeat, worker_id): (chrono::DateTime<Utc>, Uuid) = sqlx::query_as(
-        "SELECT heartbeat_at, id FROM pgtask.worker_view WHERE queue_name = $1 \
-         ORDER BY heartbeat_at DESC, id DESC OFFSET 99 LIMIT 1",
+    let (started_at, worker_id): (chrono::DateTime<Utc>, Uuid) = sqlx::query_as(
+        "SELECT started_at, id FROM pgtask.worker_view WHERE queue_name = $1 \
+         ORDER BY started_at DESC, id DESC OFFSET 99 LIMIT 1",
     )
     .bind(queue_name.as_str())
     .fetch_one(store.pool())
     .await
     .unwrap();
-    let path = format!(
-        "/workers?after_heartbeat={}&after_id={worker_id}",
-        heartbeat.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
-    );
-    let (_, next_workers) = response(&app, &path).await;
     let expected_worker_ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM pgtask.worker_view WHERE queue_name = $1 \
-         AND (heartbeat_at, id) < ($2, $3) ORDER BY heartbeat_at DESC, id DESC",
+         AND (started_at, id) < ($2, $3) ORDER BY started_at DESC, id DESC",
     )
     .bind(queue_name.as_str())
-    .bind(heartbeat)
+    .bind(started_at)
     .bind(worker_id)
     .fetch_all(store.pool())
     .await
     .unwrap();
     assert_eq!(expected_worker_ids.len(), 5);
+    assert!(
+        store
+            .heartbeat_worker(
+                WorkerId::from_uuid(expected_worker_ids[0]),
+                Duration::from_secs(30),
+                false,
+            )
+            .await
+            .unwrap()
+    );
+
+    let path = format!(
+        "/workers?after_started={}&after_id={worker_id}",
+        started_at.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+    );
+    let (_, next_workers) = response(&app, &path).await;
     for worker_id in expected_worker_ids {
         assert!(next_workers.contains(&worker_id.to_string()));
     }

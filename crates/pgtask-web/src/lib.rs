@@ -73,7 +73,7 @@ struct SchedulePagination {
 
 #[derive(Deserialize)]
 struct WorkerPagination {
-    after_heartbeat: Option<DateTime<Utc>>,
+    after_started: Option<DateTime<Utc>>,
     after_id: Option<Uuid>,
 }
 
@@ -147,7 +147,7 @@ async fn workers(
     State(state): State<AppState>,
     Query(pagination): Query<WorkerPagination>,
 ) -> Result<Html<String>, WebError> {
-    let after = match (pagination.after_heartbeat, pagination.after_id) {
+    let after = match (pagination.after_started, pagination.after_id) {
         (Some(heartbeat), Some(id)) => Some((heartbeat, id)),
         (None, None) => None,
         _ => return Err(WebError::InvalidCursor),

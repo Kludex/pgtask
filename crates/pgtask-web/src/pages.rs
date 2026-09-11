@@ -310,10 +310,10 @@ pub fn schedule(detail: &ScheduleDetail, administrator: bool) -> String {
 }
 
 pub fn workers(workers: &[WorkerSummary], next: Option<(DateTime<Utc>, uuid::Uuid)>) -> String {
-    let pagination = next.map_or_else(String::new, |(heartbeat, id)| {
+    let pagination = next.map_or_else(String::new, |(started, id)| {
         format!(
-            "<div class=\"pagination\"><a href=\"/workers?after_heartbeat={}&amp;after_id={id}\">Next page</a></div>",
-            heartbeat.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+            "<div class=\"pagination\"><a href=\"/workers?after_started={}&amp;after_id={id}\">Next page</a></div>",
+            started.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
         )
     });
     let body = format!(
