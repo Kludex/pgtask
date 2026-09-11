@@ -1180,10 +1180,13 @@ impl Store {
         let rows: Vec<TaskRow> = sqlx::query_as(
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
-                run_at, attempt, failed_attempts, max_attempts, lease_token, lease_owner, lease_expires_at,
-                created_at, updated_at, completed_at, result, error, parent_task_id,
-                retry_kind, retry_base_delay_milliseconds, retry_factor, retry_max_delay_milliseconds
-            FROM pgtask.claim($1, $2, $3, $4, $5, $6)
+                run_at, attempt,
+                (SELECT count(*)::integer FROM pgtask.attempts AS history
+                    WHERE history.task_id = claimed.id AND history.state IN ('failed', 'lost')) AS failed_attempts,
+                max_attempts, lease_token, lease_owner, lease_expires_at, created_at, updated_at,
+                completed_at, result, error, parent_task_id, retry_kind, retry_base_delay_milliseconds,
+                retry_factor, retry_max_delay_milliseconds
+            FROM pgtask.claim($1, $2, $3, $4, $5, $6) AS claimed
             ",
         )
         .bind(queue_name.as_str())
@@ -1209,10 +1212,13 @@ impl Store {
         let row: Option<TaskRow> = sqlx::query_as(
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
-                run_at, attempt, failed_attempts, max_attempts, lease_token, lease_owner, lease_expires_at,
-                created_at, updated_at, completed_at, result, error, parent_task_id,
-                retry_kind, retry_base_delay_milliseconds, retry_factor, retry_max_delay_milliseconds
-            FROM pgtask.get_task($1)
+                run_at, attempt,
+                (SELECT count(*)::integer FROM pgtask.attempts AS history
+                    WHERE history.task_id = task.id AND history.state IN ('failed', 'lost')) AS failed_attempts,
+                max_attempts, lease_token, lease_owner, lease_expires_at, created_at, updated_at,
+                completed_at, result, error, parent_task_id, retry_kind, retry_base_delay_milliseconds,
+                retry_factor, retry_max_delay_milliseconds
+            FROM pgtask.get_task($1) AS task
             ",
         )
         .bind(task_id.as_uuid())
