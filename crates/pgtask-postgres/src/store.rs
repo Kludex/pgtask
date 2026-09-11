@@ -716,11 +716,14 @@ impl Store {
             .await?;
         let next_run_at = config.start_at.unwrap_or(config.definition.next_after(now)?);
         let (kind, interval_milliseconds, cron_expression) = match &config.definition {
-            ScheduleDefinition::Interval { every } => (
-                "interval",
-                Some(i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)?),
-                None,
-            ),
+            ScheduleDefinition::Interval { every } => {
+                ScheduleDefinition::interval(*every)?;
+                (
+                    "interval",
+                    Some(i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)?),
+                    None,
+                )
+            }
             ScheduleDefinition::Cron { expression } => ("cron", None, Some(expression.as_str())),
         };
         let (misfire_policy, catch_up_limit) = match config.misfire_policy {

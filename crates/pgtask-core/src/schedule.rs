@@ -17,6 +17,9 @@ impl ScheduleDefinition {
         if every.is_zero() {
             return Err(ScheduleError::ZeroInterval);
         }
+        if !every.as_nanos().is_multiple_of(1_000_000) {
+            return Err(ScheduleError::UnsupportedIntervalPrecision);
+        }
         TimeDelta::from_std(every).map_err(|_| ScheduleError::IntervalOutOfRange)?;
         Ok(Self::Interval { every })
     }
@@ -72,9 +75,6 @@ impl ScheduleDefinition {
             Self::Interval { every } => {
                 let every_milliseconds =
                     i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)?;
-                // An interval under a millisecond truncates to zero here, and
-                // `materialize` reaches this before it reaches `due_count`,
-                // which is where the same guard already lives.
                 if every_milliseconds == 0 {
                     return Err(ScheduleError::ZeroInterval);
                 }
@@ -204,6 +204,8 @@ pub struct Materialization {
 pub enum ScheduleError {
     #[error("interval must be greater than zero")]
     ZeroInterval,
+    #[error("interval must use whole-millisecond precision")]
+    UnsupportedIntervalPrecision,
     #[error("interval exceeds the supported date range")]
     IntervalOutOfRange,
     #[error("cron expression must contain exactly six fields: second minute hour day-of-month month day-of-week")]

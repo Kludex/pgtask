@@ -115,13 +115,9 @@ fn a_cron_schedule_reports_discarded_occurrences() {
 }
 
 #[test]
-fn a_sub_millisecond_interval_is_rejected_rather_than_dividing_by_zero() {
-    // `interval` only rejects a zero duration, so an interval below a millisecond reaches
-    // materialization and truncates to zero milliseconds.
-    let schedule = ScheduleDefinition::interval(Duration::from_micros(500)).unwrap();
-    let first_due = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
-    let now = first_due + chrono::TimeDelta::seconds(1);
-
-    let error = schedule.materialize(first_due, now, MisfirePolicy::Skip).unwrap_err();
-    assert!(matches!(error, ScheduleError::ZeroInterval));
+fn a_fractional_millisecond_interval_is_rejected() {
+    for interval in [Duration::from_micros(500), Duration::from_micros(1_500)] {
+        let error = ScheduleDefinition::interval(interval).unwrap_err();
+        assert!(matches!(error, ScheduleError::UnsupportedIntervalPrecision));
+    }
 }

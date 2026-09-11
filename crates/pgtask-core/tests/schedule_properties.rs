@@ -200,31 +200,18 @@ proptest! {
         );
     }
 
-    /// A sub-millisecond interval is an error from every misfire policy, not a
-    /// panic from some of them.
-    ///
-    /// `ScheduleDefinition::interval` accepts anything non-zero, and both
-    /// `due_count` and `latest_due` divide by the interval in whole
-    /// milliseconds. `due_count` guarded the zero; `latest_due` did not, and
-    /// `materialize` reaches it first under `Latest` and `Skip` alike, so which
-    /// policy you chose decided whether you got an error or a crash.
+    /// Intervals use the same whole-millisecond precision in memory and in
+    /// PostgreSQL, so accepted values round-trip without truncation.
     #[test]
-    fn a_sub_millisecond_interval_errors_under_every_policy(
-        every_micros in 1_u64..1_000,
-        policy in any_policy(),
-        lateness in 0_i64..60,
+    fn a_fractional_millisecond_interval_is_rejected(
+        milliseconds in 0_u64..86_400_000,
+        extra_nanos in 1_u32..1_000_000,
     ) {
-        let definition = ScheduleDefinition::interval(Duration::from_micros(every_micros)).unwrap();
-        let next_run_at = epoch();
-        let now = next_run_at + TimeDelta::seconds(lateness);
-        // `materialize` only returns early when the cursor is still in the
-        // future, and `lateness` starts at zero, so every case here reaches the
-        // arithmetic.
-        let result = definition.materialize(next_run_at, now, policy);
-        prop_assert!(
-            matches!(result, Err(ScheduleError::ZeroInterval)),
-            "{policy:?} on a {every_micros}us interval gave {result:?}"
-        );
+        let interval = Duration::from_millis(milliseconds) + Duration::from_nanos(u64::from(extra_nanos));
+        prop_assert!(matches!(
+            ScheduleDefinition::interval(interval),
+            Err(ScheduleError::UnsupportedIntervalPrecision)
+        ));
     }
 
     /// Nothing is due yet, so nothing is created and the cursor stays put.
