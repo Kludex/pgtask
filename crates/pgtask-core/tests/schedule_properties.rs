@@ -16,7 +16,7 @@
 use std::{num::NonZeroU16, time::Duration};
 
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
-use pgtask_core::{MisfirePolicy, ScheduleDefinition};
+use pgtask_core::{MisfirePolicy, ScheduleDefinition, ScheduleError};
 use proptest::prelude::*;
 
 fn cases() -> u32 {
@@ -43,10 +43,8 @@ fn first_due(definition: &ScheduleDefinition) -> DateTime<Utc> {
         .expect("generated schedule has a future occurrence")
 }
 
-/// Intervals that survive a round trip through the database, which stores
-/// whole milliseconds. Sub-millisecond intervals are covered separately by
-/// `a_sub_millisecond_interval_does_not_panic`, since they currently crash and
-/// would mask every other property here.
+/// Intervals the constructor accepts: whole milliseconds, which is also what
+/// the database stores.
 fn any_interval() -> impl Strategy<Value = Duration> {
     prop_oneof![
         (1_u64..86_400_000).prop_map(Duration::from_millis),
@@ -202,19 +200,18 @@ proptest! {
         );
     }
 
-    /// A sub-millisecond interval is accepted by the constructor but crashes
-    /// materialisation, because `latest_due` divides by the interval in whole
-    /// milliseconds without the zero check `due_count` has.
+    /// Intervals use the same whole-millisecond precision in memory and in
+    /// PostgreSQL, so accepted values round-trip without truncation.
     #[test]
-    #[ignore = "reproduces the divide-by-zero in latest_due. Un-ignore with the fix."]
-    fn a_sub_millisecond_interval_does_not_panic(
-        every_micros in 1_u64..1_000,
-        lateness in 0_i64..60,
+    fn a_fractional_millisecond_interval_is_rejected(
+        milliseconds in 0_u64..86_400_000,
+        extra_nanos in 1_u32..1_000_000,
     ) {
-        let definition = ScheduleDefinition::interval(Duration::from_micros(every_micros)).unwrap();
-        let next_run_at = epoch();
-        let now = next_run_at + TimeDelta::seconds(lateness);
-        let _ = definition.materialize(next_run_at, now, MisfirePolicy::Latest);
+        let interval = Duration::from_millis(milliseconds) + Duration::from_nanos(u64::from(extra_nanos));
+        prop_assert!(matches!(
+            ScheduleDefinition::interval(interval),
+            Err(ScheduleError::UnsupportedIntervalPrecision)
+        ));
     }
 
     /// Nothing is due yet, so nothing is created and the cursor stays put.
