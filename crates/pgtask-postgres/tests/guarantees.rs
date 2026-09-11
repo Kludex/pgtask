@@ -6,6 +6,7 @@
 
 use std::{num::NonZeroU32, time::Duration};
 
+use chrono::{TimeDelta, Utc};
 use pgtask_core::{
     EnqueueRequest, HandlerVersion, QueueName, SignalName, StepName, Task, TaskName, TaskState, WorkerId,
 };
@@ -406,6 +407,8 @@ async fn claim_ignores_a_task_whose_handler_version_it_does_not_declare() {
     let mut enqueued = request(&task_name, &queue, 5, 0);
     enqueued.handler_version = v1;
     let task_id = store.enqueue(&enqueued).await.unwrap().task_id;
+    enqueued.run_at = Some(Utc::now() - TimeDelta::minutes(10));
+    let starved_task_id = store.enqueue(&enqueued).await.unwrap().task_id;
 
     let mismatched = store
         .claim(
@@ -423,11 +426,13 @@ async fn claim_ignores_a_task_whose_handler_version_it_does_not_declare() {
         v2.get(),
         v1.get()
     );
-    assert_eq!(
-        store.get_task(task_id).await.unwrap().unwrap().attempt,
-        0,
-        "a capability mismatch must not consume an attempt"
-    );
+    for task_id in [task_id, starved_task_id] {
+        assert_eq!(
+            store.get_task(task_id).await.unwrap().unwrap().attempt,
+            0,
+            "a capability mismatch must not consume an attempt"
+        );
+    }
 
     let matched = store
         .claim(&queue, WorkerId::new(), &[(task_name, v1)], 10, Duration::from_mins(10))
@@ -435,7 +440,7 @@ async fn claim_ignores_a_task_whose_handler_version_it_does_not_declare() {
         .unwrap();
     assert_eq!(
         matched.into_iter().map(|task| task.id).collect::<Vec<_>>(),
-        vec![task_id],
-        "a worker declaring the task's own handler_version must still claim it"
+        vec![starved_task_id, task_id],
+        "a worker declaring the task's own handler_version must claim both paths"
     );
 }
