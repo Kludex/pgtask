@@ -230,13 +230,8 @@ async fn observer_pages_cover_queues_tasks_schedules_workers_and_not_found() {
     }
 }
 
-/// `/schedules` and `/workers` used to render every row that had ever
-/// existed, no `LIMIT`, no pagination -- on a deployment with a few thousand
-/// schedules or worker registrations, an unbounded response that eventually
-/// stops rendering at all. This creates enough rows to cross a cap and
-/// confirms one is actually enforced, rather than trusting the query text.
 #[tokio::test]
-async fn schedule_and_worker_lists_are_capped() {
+async fn schedule_and_worker_lists_are_paginated() {
     let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
         return;
     };
@@ -271,15 +266,50 @@ async fn schedule_and_worker_lists_are_capped() {
     let app = application(store.pool().clone());
     let (_, schedules) = response(&app, "/schedules").await;
     let (_, workers) = response(&app, "/workers").await;
-    assert_eq!(
-        schedules.matches("<td class=\"state\">").count(),
-        100,
-        "/schedules rendered every one of at least 105 rows instead of capping at 100"
+    assert_eq!(schedules.matches("<td class=\"state\">").count(), 100);
+    assert_eq!(workers.matches("<td class=\"state\">").count(), 100);
+    assert!(schedules.contains("Next page"));
+    assert!(workers.contains("Next page"));
+
+    let schedule_cursor = format!("cap-{suffix}-099");
+    let (_, next_schedules) = response(&app, &format!("/schedules?after={schedule_cursor}")).await;
+    let first_schedule = format!("cap-{suffix}-100");
+    let last_schedule = format!("cap-{suffix}-104");
+    assert!(next_schedules.find(&first_schedule).unwrap() < next_schedules.find(&last_schedule).unwrap());
+
+    let (heartbeat, worker_id): (chrono::DateTime<Utc>, Uuid) = sqlx::query_as(
+        "SELECT heartbeat_at, id FROM pgtask.worker_view WHERE queue_name = $1 \
+         ORDER BY heartbeat_at DESC, id DESC OFFSET 99 LIMIT 1",
+    )
+    .bind(queue_name.as_str())
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    let path = format!(
+        "/workers?after_heartbeat={}&after_id={worker_id}",
+        heartbeat.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
     );
+    let (_, next_workers) = response(&app, &path).await;
+    let expected_worker_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM pgtask.worker_view WHERE queue_name = $1 \
+         AND (heartbeat_at, id) < ($2, $3) ORDER BY heartbeat_at DESC, id DESC",
+    )
+    .bind(queue_name.as_str())
+    .bind(heartbeat)
+    .bind(worker_id)
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(expected_worker_ids.len(), 5);
+    for worker_id in expected_worker_ids {
+        assert!(next_workers.contains(&worker_id.to_string()));
+    }
+
     assert_eq!(
-        workers.matches("<td class=\"state\">").count(),
-        100,
-        "/workers rendered every one of at least 105 rows instead of capping at 100"
+        response(&app, "/workers?after_id=00000000-0000-0000-0000-000000000000",)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
     );
 }
 

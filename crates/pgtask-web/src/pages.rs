@@ -13,7 +13,7 @@ th,td{text-align:left;padding:8px;border-bottom:1px solid #d5d8dc;vertical-align
 code,pre{font:13px ui-monospace,monospace}pre{white-space:pre-wrap;background:#f4f6f7;padding:12px;border-radius:6px}\
 .state{font-weight:600}.muted{color:#707b7c}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}\
 .card{border:1px solid #d5d8dc;border-radius:8px;padding:16px}.card h2{margin-top:0}input{padding:8px;width:min(420px,80%)}\
-button{padding:8px;margin-right:8px}.actions{display:flex;gap:8px}";
+button{padding:8px;margin-right:8px}.actions{display:flex;gap:8px}.pagination{display:flex;justify-content:flex-end;margin:0 0 28px}";
 
 fn layout(title: &str, body: &str) -> String {
     format!(
@@ -138,8 +138,8 @@ pub fn dashboard(data: &Dashboard) -> String {
          <div class=\"card\"><h2>Workers</h2><p>{} registered</p><a href=\"/workers\">Inspect workers</a></div></div>",
         queue_rows(&data.queues),
         data.tasks.len(),
-        data.schedules.len(),
-        data.workers.len(),
+        data.schedule_count,
+        data.worker_count,
     );
     layout("pgtask queues", &body)
 }
@@ -244,10 +244,16 @@ pub fn task(task: &TaskDetail, administrator: bool) -> String {
     layout("pgtask task", &body)
 }
 
-pub fn schedules(schedules: &[ScheduleSummary]) -> String {
+pub fn schedules(schedules: &[ScheduleSummary], next: Option<&str>) -> String {
+    let pagination = next.map_or_else(String::new, |cursor| {
+        format!(
+            "<div class=\"pagination\"><a href=\"/schedules?after={}\">Next page</a></div>",
+            encode_double_quoted_attribute(cursor),
+        )
+    });
     let body = format!(
         "<h1>Schedules</h1><table><tr><th>Name</th><th>Kind</th><th>Queue</th><th>Task</th><th>Next run</th>\
-         <th>Status</th></tr>{}</table>",
+         <th>Status</th></tr>{}</table>{pagination}",
         schedule_rows(schedules),
     );
     layout("pgtask schedules", &body)
@@ -303,10 +309,16 @@ pub fn schedule(detail: &ScheduleDetail, administrator: bool) -> String {
     layout("pgtask schedule", &body)
 }
 
-pub fn workers(workers: &[WorkerSummary]) -> String {
+pub fn workers(workers: &[WorkerSummary], next: Option<(DateTime<Utc>, uuid::Uuid)>) -> String {
+    let pagination = next.map_or_else(String::new, |(heartbeat, id)| {
+        format!(
+            "<div class=\"pagination\"><a href=\"/workers?after_heartbeat={}&amp;after_id={id}\">Next page</a></div>",
+            heartbeat.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        )
+    });
     let body = format!(
         "<h1>Workers</h1><table><tr><th>ID</th><th>Queue</th><th>Version</th><th>Status</th><th>Draining</th>\
-         <th>Heartbeat</th><th>Expires</th></tr>{}</table>",
+         <th>Heartbeat</th><th>Expires</th></tr>{}</table>{pagination}",
         worker_rows(workers),
     );
     layout("pgtask workers", &body)
