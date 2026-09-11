@@ -119,5 +119,10 @@ fn a_fractional_millisecond_interval_is_rejected() {
     for interval in [Duration::from_micros(500), Duration::from_micros(1_500)] {
         let error = ScheduleDefinition::interval(interval).unwrap_err();
         assert!(matches!(error, ScheduleError::UnsupportedIntervalPrecision));
+
+        let schedule = ScheduleDefinition::Interval { every: interval };
+        let now = Utc.with_ymd_and_hms(2026, 8, 15, 12, 0, 0).unwrap();
+        let error = schedule.materialize(now, now, MisfirePolicy::Latest).unwrap_err();
+        assert!(matches!(error, ScheduleError::UnsupportedIntervalPrecision));
     }
 }
