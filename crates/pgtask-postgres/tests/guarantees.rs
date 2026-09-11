@@ -67,11 +67,8 @@ fn names(prefix: &str) -> (QueueName, TaskName) {
     )
 }
 
-/// `claim` filters on `attempt < max_attempts`. This constructs that boundary
-/// directly rather than through a handler, because the filter has to hold
-/// however the row got there.
 #[tokio::test]
-async fn claim_skips_a_task_that_has_exhausted_its_attempts() {
+async fn claim_skips_a_task_that_has_exhausted_its_failure_budget() {
     let Some(database_url) = database_url() else {
         return;
     };
@@ -80,7 +77,7 @@ async fn claim_skips_a_task_that_has_exhausted_its_attempts() {
     let (queue, task_name) = names("exhausted");
 
     let task_id = store.enqueue(&request(&task_name, &queue, 2, 0)).await.unwrap().task_id;
-    sqlx::query("UPDATE pgtask.tasks SET attempt = max_attempts WHERE id = $1")
+    sqlx::query("UPDATE pgtask.tasks SET attempt = max_attempts, failed_attempts = max_attempts WHERE id = $1")
         .bind(task_id.as_uuid())
         .execute(store.pool())
         .await
@@ -89,7 +86,7 @@ async fn claim_skips_a_task_that_has_exhausted_its_attempts() {
     let claimed = claim(&store, &queue, &task_name, 10).await;
     assert!(
         claimed.is_empty(),
-        "claim handed out a task that had already used all {} of its attempts",
+        "claim handed out a task that had already used all {} failed attempts",
         2
     );
 }
@@ -308,7 +305,6 @@ async fn a_finished_parent_cancels_only_its_unfinished_children() {
 /// A durable sleep is not a failure, so resuming from one must leave the task
 /// claimable — including on its last attempt.
 #[tokio::test]
-#[ignore = "reproduces #28: sleeping on the final attempt strands the task. Un-ignore with the fix."]
 async fn a_task_that_sleeps_on_its_final_attempt_is_still_claimable() {
     let Some(database_url) = database_url() else {
         return;
@@ -339,14 +335,12 @@ async fn a_task_that_sleeps_on_its_final_attempt_is_still_claimable() {
 
     assert!(
         !claim(&store, &queue, &task_name, 10).await.is_empty(),
-        "a task that slept on its final attempt is pending and due, but no worker can \
-         claim it and no sweep recovers it: it is stranded forever"
+        "a task that slept on its final attempt must still be claimable"
     );
 }
 
 /// The same, via a signal wait.
 #[tokio::test]
-#[ignore = "reproduces #28: a signal wake on the final attempt strands the task. Un-ignore with the fix."]
 async fn a_task_woken_by_a_signal_on_its_final_attempt_is_still_claimable() {
     let Some(database_url) = database_url() else {
         return;
@@ -382,7 +376,7 @@ async fn a_task_woken_by_a_signal_on_its_final_attempt_is_still_claimable() {
     );
     assert!(
         !claim(&store, &queue, &task_name, 10).await.is_empty(),
-        "a task woken by a signal on its final attempt cannot be claimed again"
+        "a task woken by a signal on its final attempt must still be claimable"
     );
 }
 
@@ -443,4 +437,304 @@ async fn claim_ignores_a_task_whose_handler_version_it_does_not_declare() {
         vec![starved_task_id, task_id],
         "a worker declaring the task's own handler_version must claim both paths"
     );
+}
+
+/// The same, via a signal wait that times out rather than fires.
+///
+/// `recover_wait_timeouts` is a different resume path from `emit_signal`, and a
+/// task only reaches it when nothing ever signalled it -- so if this one strands,
+/// it strands the tasks nobody is watching.
+#[tokio::test]
+async fn a_task_whose_signal_wait_times_out_on_its_final_attempt_is_still_claimable() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (queue, task_name) = names("strand-wait-timeout");
+
+    store.enqueue(&request(&task_name, &queue, 1, 0)).await.unwrap();
+    let task = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
+
+    store
+        .wait_for_signal(pgtask_postgres::SignalWaitRequest {
+            task_id: task.id,
+            attempt: task.attempt,
+            lease_token: task.lease_token.unwrap(),
+            step_name: &StepName::new("await").unwrap(),
+            occurrence: 0,
+            signal_name: &SignalName::new("never").unwrap(),
+            signal_occurrence: 0,
+            timeout: Some(Duration::from_millis(1)),
+        })
+        .await
+        .unwrap()
+        .expect("the wait is accepted");
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(store.recover_wait_timeouts(10).await.unwrap(), 1);
+
+    assert!(
+        !claim(&store, &queue, &task_name, 10).await.is_empty(),
+        "a task whose signal wait timed out on its final attempt must still be claimable"
+    );
+}
+
+/// The same, via a child result.
+///
+/// This path runs inside the `resolve_task_result` trigger rather than a
+/// function the worker calls, so it is the one most easily missed.
+#[tokio::test]
+async fn a_task_woken_by_a_child_result_on_its_final_attempt_is_still_claimable() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (queue, parent_name) = names("strand-result");
+    let child_name = TaskName::new(format!("{parent_name}-child")).unwrap();
+
+    store.enqueue(&request(&parent_name, &queue, 1, 0)).await.unwrap();
+    let parent = claim(&store, &queue, &parent_name, 1).await.pop().unwrap();
+    assert_eq!(parent.attempt, 1, "the parent is on its only attempt");
+
+    let child_id = store
+        .spawn_task(SpawnRequest {
+            parent_task_id: parent.id,
+            parent_attempt: parent.attempt,
+            parent_lease_token: parent.lease_token.unwrap(),
+            step_name: &StepName::new("spawn").unwrap(),
+            occurrence: 0,
+            task: &request(&child_name, &queue, 5, 0),
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .task_id;
+
+    store
+        .wait_for_result(pgtask_postgres::ResultWaitRequest {
+            task_id: parent.id,
+            attempt: parent.attempt,
+            lease_token: parent.lease_token.unwrap(),
+            step_name: &StepName::new("await-child").unwrap(),
+            occurrence: 0,
+            result_task_id: child_id,
+            timeout: None,
+        })
+        .await
+        .unwrap()
+        .expect("the wait is accepted");
+
+    let child = claim(&store, &queue, &child_name, 1).await.pop().unwrap();
+    assert!(
+        store
+            .complete(child.id, child.attempt, child.lease_token.unwrap(), Some(&json!({})))
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(
+        store.get_task(parent.id).await.unwrap().unwrap().state,
+        TaskState::Pending,
+        "the child's result wakes the parent back to pending"
+    );
+    assert!(
+        !claim(&store, &queue, &parent_name, 10).await.is_empty(),
+        "a parent woken by its child on its final attempt must still be claimable"
+    );
+}
+
+/// The same, via a child result that never arrives.
+#[tokio::test]
+async fn a_task_whose_result_wait_times_out_on_its_final_attempt_is_still_claimable() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (queue, parent_name) = names("strand-result-timeout");
+    let child_name = TaskName::new(format!("{parent_name}-child")).unwrap();
+
+    store.enqueue(&request(&parent_name, &queue, 1, 0)).await.unwrap();
+    let parent = claim(&store, &queue, &parent_name, 1).await.pop().unwrap();
+
+    let child_id = store
+        .spawn_task(SpawnRequest {
+            parent_task_id: parent.id,
+            parent_attempt: parent.attempt,
+            parent_lease_token: parent.lease_token.unwrap(),
+            step_name: &StepName::new("spawn").unwrap(),
+            occurrence: 0,
+            task: &request(&child_name, &queue, 5, 0),
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .task_id;
+
+    store
+        .wait_for_result(pgtask_postgres::ResultWaitRequest {
+            task_id: parent.id,
+            attempt: parent.attempt,
+            lease_token: parent.lease_token.unwrap(),
+            step_name: &StepName::new("await-child").unwrap(),
+            occurrence: 0,
+            result_task_id: child_id,
+            timeout: Some(Duration::from_millis(1)),
+        })
+        .await
+        .unwrap()
+        .expect("the wait is accepted");
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_eq!(store.recover_result_wait_timeouts(10).await.unwrap(), 1);
+
+    assert!(
+        !claim(&store, &queue, &parent_name, 10).await.is_empty(),
+        "a parent whose result wait timed out on its final attempt must still be claimable"
+    );
+}
+
+#[tokio::test]
+async fn resuming_with_budget_left_does_not_raise_the_attempt_ceiling() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (queue, task_name) = names("headroom");
+
+    store.enqueue(&request(&task_name, &queue, 5, 0)).await.unwrap();
+    let task = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
+
+    store
+        .sleep_for(
+            task.id,
+            task.attempt,
+            task.lease_token.unwrap(),
+            &StepName::new("nap").unwrap(),
+            0,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap()
+        .expect("the sleep is accepted");
+
+    assert_eq!(
+        max_attempts_of(&store, task.id).await,
+        5,
+        "a task with attempts to spare must keep the ceiling the caller asked for"
+    );
+}
+
+#[tokio::test]
+async fn resuming_on_the_final_attempt_preserves_the_configured_ceiling() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (queue, task_name) = names("headroom-final");
+
+    store.enqueue(&request(&task_name, &queue, 1, 0)).await.unwrap();
+    let task = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
+
+    store
+        .sleep_for(
+            task.id,
+            task.attempt,
+            task.lease_token.unwrap(),
+            &StepName::new("nap").unwrap(),
+            0,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap()
+        .expect("the sleep is accepted");
+
+    assert_eq!(
+        max_attempts_of(&store, task.id).await,
+        1,
+        "resuming must not rewrite the retry limit configured by the caller"
+    );
+
+    let resumed = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
+    assert_eq!(resumed.attempt, 2, "the resumed run is the second execution");
+    assert_eq!(resumed.failed_attempts, 0, "suspension is not a failure");
+
+    assert_eq!(
+        store
+            .fail(
+                resumed.id,
+                resumed.attempt,
+                resumed.lease_token.unwrap(),
+                &json!({"type": "boom"}),
+                Some(Duration::ZERO),
+            )
+            .await
+            .unwrap(),
+        Some(TaskState::Failed),
+        "the resumed run is still the last one, so failing it is terminal rather than a retry"
+    );
+}
+
+#[tokio::test]
+async fn repeated_sleeps_do_not_spend_the_failure_budget() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (queue, task_name) = names("sleep-budget");
+
+    store.enqueue(&request(&task_name, &queue, 5, 0)).await.unwrap();
+
+    for nap in 0..5 {
+        let task = claim(&store, &queue, &task_name, 1)
+            .await
+            .pop()
+            .unwrap_or_else(|| panic!("nap {nap} must be claimable"));
+        assert_eq!(task.attempt, nap + 1, "each resume is a fresh attempt");
+        store
+            .sleep_for(
+                task.id,
+                task.attempt,
+                task.lease_token.unwrap(),
+                &StepName::new(format!("nap-{nap}")).unwrap(),
+                0,
+                Duration::ZERO,
+            )
+            .await
+            .unwrap()
+            .expect("the sleep is accepted");
+    }
+
+    let resumed = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
+    assert_eq!(resumed.attempt, 6);
+    assert_eq!(resumed.failed_attempts, 0);
+    assert_eq!(
+        store
+            .fail(
+                resumed.id,
+                resumed.attempt,
+                resumed.lease_token.unwrap(),
+                &json!({"type": "boom"}),
+                Some(Duration::ZERO),
+            )
+            .await
+            .unwrap(),
+        Some(TaskState::Pending),
+        "the first failure must retain the retries configured by the caller"
+    );
+    let retry = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
+    assert_eq!(retry.failed_attempts, 1);
+}
+
+async fn max_attempts_of(store: &Store, task_id: pgtask_core::TaskId) -> i32 {
+    sqlx::query_scalar("SELECT max_attempts FROM pgtask.tasks WHERE id = $1")
+        .bind(task_id.as_uuid())
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
 }
