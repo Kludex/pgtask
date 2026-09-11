@@ -1,0 +1,2 @@
+# Build output; the checker is run with `go run .`
+linearizability
