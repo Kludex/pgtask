@@ -55,6 +55,22 @@ fn names_validate_and_support_their_value_conversions() {
         TaskName::new("not allowed"),
         Err(NameError::UnsupportedCharacter { character: ' ', .. })
     ));
+
+    // A step name is row-local, so it keeps only the bounds its column enforces.
+    assert_name!(StepName, "toolset__<agent>.call_tool:tool 1/2 ✓");
+    assert!(matches!(StepName::new(""), Err(NameError::Empty { .. })));
+    assert!(matches!(
+        StepName::new("x".repeat(256)),
+        Err(NameError::TooLong {
+            maximum: 255,
+            actual: 256,
+            ..
+        })
+    ));
+    assert!(matches!(
+        StepName::new("nul\0byte"),
+        Err(NameError::UnsupportedCharacter { character: '\0', .. })
+    ));
 }
 
 #[test]

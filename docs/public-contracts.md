@@ -132,6 +132,10 @@ Queue configuration includes independent terminal-history and idempotency-retent
 Queue configuration also includes optional outstanding-task capacity and a starvation timeout. Capacity rejection uses
 the stable SQLSTATE `PT001`. The observer overview exposes the limit and current outstanding count.
 
+Queue, task, schedule, and signal names are restricted to `A-Za-z0-9._:-`, because they can reach CLI arguments,
+NOTIFY channels, and bounded metric attributes. Step names can appear in free-form span attributes but are not used for
+those bounded identifiers. They only need to be non-empty and at most 255 bytes.
+
 Additive SQL changes may keep the same protocol. A removed value, changed predicate, changed result shape, or incompatible authorization rule increments the protocol and requires an expand-and-contract migration.
 
 ## CLI
