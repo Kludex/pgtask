@@ -4,8 +4,9 @@
 //! of but bad at guaranteeing a specific boundary is ever reached. These pin the
 //! boundaries directly: one guarantee per test, no timing, no concurrency.
 
-use std::time::Duration;
+use std::{num::NonZeroU32, time::Duration};
 
+use chrono::{TimeDelta, Utc};
 use pgtask_core::{
     EnqueueRequest, HandlerVersion, QueueName, SignalName, StepName, Task, TaskName, TaskState, WorkerId,
 };
@@ -382,5 +383,64 @@ async fn a_task_woken_by_a_signal_on_its_final_attempt_is_still_claimable() {
     assert!(
         !claim(&store, &queue, &task_name, 10).await.is_empty(),
         "a task woken by a signal on its final attempt cannot be claimed again"
+    );
+}
+
+/// `claim` routes work by `(task_name, handler_version)`, not `task_name`
+/// alone -- a worker declaring capability for a different version of a
+/// handler must not be handed a task written for another one.
+///
+/// This is what makes it safe to roll old and new handler code out side by
+/// side: a task enqueued under the version the old code understands stays
+/// untouched by a worker that only declares the new one, and vice versa.
+#[tokio::test]
+async fn claim_ignores_a_task_whose_handler_version_it_does_not_declare() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (queue, task_name) = names("wrong-version");
+    let v1 = HandlerVersion::default();
+    let v2 = HandlerVersion::new(NonZeroU32::new(2).unwrap());
+
+    let mut enqueued = request(&task_name, &queue, 5, 0);
+    enqueued.handler_version = v1;
+    let task_id = store.enqueue(&enqueued).await.unwrap().task_id;
+    enqueued.run_at = Some(Utc::now() - TimeDelta::minutes(10));
+    let starved_task_id = store.enqueue(&enqueued).await.unwrap().task_id;
+
+    let mismatched = store
+        .claim(
+            &queue,
+            WorkerId::new(),
+            &[(task_name.clone(), v2)],
+            10,
+            Duration::from_mins(10),
+        )
+        .await
+        .unwrap();
+    assert!(
+        mismatched.is_empty(),
+        "a worker capable only of handler_version {} claimed a task written for {}",
+        v2.get(),
+        v1.get()
+    );
+    for task_id in [task_id, starved_task_id] {
+        assert_eq!(
+            store.get_task(task_id).await.unwrap().unwrap().attempt,
+            0,
+            "a capability mismatch must not consume an attempt"
+        );
+    }
+
+    let matched = store
+        .claim(&queue, WorkerId::new(), &[(task_name, v1)], 10, Duration::from_mins(10))
+        .await
+        .unwrap();
+    assert_eq!(
+        matched.into_iter().map(|task| task.id).collect::<Vec<_>>(),
+        vec![starved_task_id, task_id],
+        "a worker declaring the task's own handler_version must claim both paths"
     );
 }
