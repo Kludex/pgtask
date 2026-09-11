@@ -1180,7 +1180,7 @@ impl Store {
         let rows: Vec<TaskRow> = sqlx::query_as(
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
-                run_at, attempt, max_attempts, lease_token, lease_owner, lease_expires_at,
+                run_at, attempt, failed_attempts, max_attempts, lease_token, lease_owner, lease_expires_at,
                 created_at, updated_at, completed_at, result, error, parent_task_id,
                 retry_kind, retry_base_delay_milliseconds, retry_factor, retry_max_delay_milliseconds
             FROM pgtask.claim($1, $2, $3, $4, $5, $6)
@@ -1209,7 +1209,7 @@ impl Store {
         let row: Option<TaskRow> = sqlx::query_as(
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
-                run_at, attempt, max_attempts, lease_token, lease_owner, lease_expires_at,
+                run_at, attempt, failed_attempts, max_attempts, lease_token, lease_owner, lease_expires_at,
                 created_at, updated_at, completed_at, result, error, parent_task_id,
                 retry_kind, retry_base_delay_milliseconds, retry_factor, retry_max_delay_milliseconds
             FROM pgtask.get_task($1)
@@ -1927,6 +1927,7 @@ struct TaskRow {
     priority: i16,
     run_at: DateTime<Utc>,
     attempt: i32,
+    failed_attempts: i32,
     max_attempts: i32,
     retry_kind: Option<String>,
     retry_base_delay_milliseconds: Option<i64>,
@@ -1973,6 +1974,7 @@ impl TryFrom<TaskRow> for Task {
             priority: row.priority,
             run_at: row.run_at,
             attempt: u16::try_from(row.attempt).map_err(invalid_number)?,
+            failed_attempts: u16::try_from(row.failed_attempts).map_err(invalid_number)?,
             max_attempts: u16::try_from(row.max_attempts).map_err(invalid_number)?,
             retry_policy: parse_retry_policy(
                 row.retry_kind.as_deref(),

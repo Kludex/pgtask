@@ -66,11 +66,8 @@ fn names(prefix: &str) -> (QueueName, TaskName) {
     )
 }
 
-/// `claim` filters on `attempt < max_attempts`. This constructs that boundary
-/// directly rather than through a handler, because the filter has to hold
-/// however the row got there.
 #[tokio::test]
-async fn claim_skips_a_task_that_has_exhausted_its_attempts() {
+async fn claim_skips_a_task_that_has_exhausted_its_failure_budget() {
     let Some(database_url) = database_url() else {
         return;
     };
@@ -79,7 +76,7 @@ async fn claim_skips_a_task_that_has_exhausted_its_attempts() {
     let (queue, task_name) = names("exhausted");
 
     let task_id = store.enqueue(&request(&task_name, &queue, 2, 0)).await.unwrap().task_id;
-    sqlx::query("UPDATE pgtask.tasks SET attempt = max_attempts WHERE id = $1")
+    sqlx::query("UPDATE pgtask.tasks SET attempt = max_attempts, failed_attempts = max_attempts WHERE id = $1")
         .bind(task_id.as_uuid())
         .execute(store.pool())
         .await
@@ -88,7 +85,7 @@ async fn claim_skips_a_task_that_has_exhausted_its_attempts() {
     let claimed = claim(&store, &queue, &task_name, 10).await;
     assert!(
         claimed.is_empty(),
-        "claim handed out a task that had already used all {} of its attempts",
+        "claim handed out a task that had already used all {} failed attempts",
         2
     );
 }
@@ -539,12 +536,6 @@ async fn a_task_whose_result_wait_times_out_on_its_final_attempt_is_still_claima
     );
 }
 
-/// Headroom is granted only where it is needed.
-///
-/// The fix works by raising `max_attempts` to `attempt + 1` on resume, so it has
-/// to be a no-op while budget remains -- otherwise every sleep would quietly
-/// hand the task another retry, and a task that failed repeatedly would never
-/// reach `failed`.
 #[tokio::test]
 async fn resuming_with_budget_left_does_not_raise_the_attempt_ceiling() {
     let Some(database_url) = database_url() else {
@@ -577,12 +568,8 @@ async fn resuming_with_budget_left_does_not_raise_the_attempt_ceiling() {
     );
 }
 
-/// The ceiling rises by exactly one, and only on the last attempt.
-///
-/// One extra claim is what a resume needs. Anything more would turn a durable
-/// sleep into an extra retry for the handler.
 #[tokio::test]
-async fn resuming_on_the_final_attempt_grants_exactly_one_more_claim() {
+async fn resuming_on_the_final_attempt_preserves_the_configured_ceiling() {
     let Some(database_url) = database_url() else {
         return;
     };
@@ -608,15 +595,14 @@ async fn resuming_on_the_final_attempt_grants_exactly_one_more_claim() {
 
     assert_eq!(
         max_attempts_of(&store, task.id).await,
-        2,
-        "the resume needs one claim, so it gets one"
+        1,
+        "resuming must not rewrite the retry limit configured by the caller"
     );
 
     let resumed = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
-    assert_eq!(resumed.attempt, 2, "the resumed run is the second attempt");
+    assert_eq!(resumed.attempt, 2, "the resumed run is the second execution");
+    assert_eq!(resumed.failed_attempts, 0, "suspension is not a failure");
 
-    // Failing the resumed run must be terminal: the headroom paid for the
-    // resume, not for another go at the handler.
     assert_eq!(
         store
             .fail(
@@ -633,21 +619,8 @@ async fn resuming_on_the_final_attempt_grants_exactly_one_more_claim() {
     );
 }
 
-/// A durable sleep still spends an attempt.
-///
-/// This records what the fix deliberately does not change. `attempt` is
-/// incremented at claim time, and the headroom above is granted one claim at a
-/// time, so a task that sleeps repeatedly walks `attempt` up alongside
-/// `max_attempts` and reaches its sleeps with no failure budget left. It is
-/// claimable throughout -- which is what #28 was about -- but a handler that
-/// sleeps four times and then fails gets no retry, where the same handler
-/// failing four times in a row would have got four.
-///
-/// Whether a suspend/resume cycle ought to consume a retry at all is a separate
-/// question that #28 explicitly leaves open. This test exists so that whichever
-/// way it is answered, the answer is a deliberate one.
 #[tokio::test]
-async fn repeated_sleeps_still_spend_the_attempt_budget() {
+async fn repeated_sleeps_do_not_spend_the_failure_budget() {
     let Some(database_url) = database_url() else {
         return;
     };
@@ -657,7 +630,6 @@ async fn repeated_sleeps_still_spend_the_attempt_budget() {
 
     store.enqueue(&request(&task_name, &queue, 5, 0)).await.unwrap();
 
-    // Sleep through the whole budget: five claims, five naps.
     for nap in 0..5 {
         let task = claim(&store, &queue, &task_name, 1)
             .await
@@ -678,12 +650,9 @@ async fn repeated_sleeps_still_spend_the_attempt_budget() {
             .expect("the sleep is accepted");
     }
 
-    // Still claimable -- the point of the fix.
     let resumed = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
     assert_eq!(resumed.attempt, 6);
-
-    // But out of budget: failing now is terminal, even though the handler has
-    // never actually failed before.
+    assert_eq!(resumed.failed_attempts, 0);
     assert_eq!(
         store
             .fail(
@@ -695,9 +664,11 @@ async fn repeated_sleeps_still_spend_the_attempt_budget() {
             )
             .await
             .unwrap(),
-        Some(TaskState::Failed),
-        "sleeping still spends the budget, so the first real failure is the last"
+        Some(TaskState::Pending),
+        "the first failure must retain the retries configured by the caller"
     );
+    let retry = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
+    assert_eq!(retry.failed_attempts, 1);
 }
 
 async fn max_attempts_of(store: &Store, task_id: pgtask_core::TaskId) -> i32 {

@@ -670,7 +670,9 @@ async fn execute(
                             return Ok(());
                         }
                         let retry_after = if error.retryable {
-                            task.retry_policy.unwrap_or(handler.retry_policy).delay_for(task.attempt)
+                            task.retry_policy
+                                .unwrap_or(handler.retry_policy)
+                                .delay_for(task.failed_attempts.saturating_add(1))
                         } else {
                             None
                         };
@@ -697,7 +699,9 @@ async fn execute(
                                 task.attempt,
                                 lease_token,
                                 &error,
-                                task.retry_policy.unwrap_or(handler.retry_policy).delay_for(task.attempt),
+                                task.retry_policy
+                                    .unwrap_or(handler.retry_policy)
+                                    .delay_for(task.failed_attempts.saturating_add(1)),
                             )
                             .await?;
                         if state.is_none() {
