@@ -10,7 +10,7 @@ use pgtask_core::{
     EnqueueRequest, EnqueueResult, HandlerVersion, LeaseRenewal, QueueConfig, QueueName, RetryPolicy,
     STORAGE_PROTOCOL_RANGE, STORAGE_PROTOCOL_VERSION, StepName, TaskName, TaskState, WorkerId,
 };
-use pgtask_postgres::{PostgresError, Store, StoreConfig};
+use pgtask_postgres::{PostgresError, Store, StoreConfig, TaskCompletion, TaskFailure};
 use serde_json::json;
 use sqlx::{
     Acquire, PgConnection,
@@ -96,7 +96,7 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             .await
             .unwrap();
     assert_eq!(capable_tasks, 1);
-    let maintenance_grants: (bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+    let maintenance_grants: (bool, bool, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         r"
         SELECT
             has_function_privilege(current_user, 'pgtask.put_schedule(uuid, text, text, bigint, text, text, integer, text, text, integer, jsonb, jsonb, smallint, integer, timestamptz)', 'EXECUTE'),
@@ -105,13 +105,18 @@ async fn assert_worker_protocol_grants(connection: &mut PgConnection, queue_name
             has_function_privilege(current_user, 'pgtask.recover_result_wait_timeouts(integer)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.register_worker(uuid, text, text, text[], integer[], text[], bigint[], integer[], bigint[], bigint)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.delete_expired_idempotency_keys(text, integer)', 'EXECUTE'),
+            has_function_privilege(current_user, 'pgtask.complete_tasks(jsonb)', 'EXECUTE'),
+            has_function_privilege(current_user, 'pgtask.fail_tasks(jsonb)', 'EXECUTE'),
             has_function_privilege(current_user, 'pgtask.sample_queue_demand(text, bigint)', 'EXECUTE')
         ",
     )
     .fetch_one(&mut *connection)
     .await
     .unwrap();
-    assert_eq!(maintenance_grants, (true, true, true, true, true, true, true));
+    assert_eq!(
+        maintenance_grants,
+        (true, true, true, true, true, true, true, true, true)
+    );
 }
 
 async fn can_execute(connection: &mut PgConnection, function: &str) -> bool {
@@ -685,6 +690,159 @@ async fn fenced_transitions_and_expired_lease_recovery() {
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn batch_transitions_preserve_order_fencing_and_retry_states() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("batch-transitions-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("batch-transitions-task-{suffix}")).unwrap();
+    let capabilities = [(task_name.clone(), HandlerVersion::default())];
+    let requests: Vec<_> = (0..6)
+        .map(|index| {
+            let mut request = EnqueueRequest::new(task_name.clone(), json!({"index": index}));
+            request.queue_name = queue_name.clone();
+            request
+        })
+        .collect();
+    store.enqueue_many(&requests).await.unwrap();
+    let tasks = store
+        .claim(&queue_name, WorkerId::new(), &capabilities, 6, Duration::from_secs(30))
+        .await
+        .unwrap();
+    assert_eq!(tasks.len(), 6);
+
+    let completions = [
+        TaskCompletion {
+            task_id: tasks[0].id,
+            attempt: tasks[0].attempt,
+            lease_token: tasks[0].lease_token.unwrap(),
+            result: Some(json!({"done": true})),
+        },
+        TaskCompletion {
+            task_id: tasks[1].id,
+            attempt: tasks[1].attempt,
+            lease_token: tasks[1].lease_token.unwrap(),
+            result: None,
+        },
+        TaskCompletion {
+            task_id: tasks[2].id,
+            attempt: tasks[2].attempt,
+            lease_token: pgtask_core::LeaseToken::new(),
+            result: Some(json!(null)),
+        },
+    ];
+    assert_eq!(store.complete_many(&completions).await.unwrap(), [true, true, false]);
+    assert_eq!(
+        store.get_task(tasks[0].id).await.unwrap().unwrap().result,
+        Some(json!({"done": true}))
+    );
+    assert_eq!(store.get_task(tasks[1].id).await.unwrap().unwrap().result, None);
+    assert_eq!(
+        store.get_task(tasks[2].id).await.unwrap().unwrap().state,
+        TaskState::Running
+    );
+
+    let failures = [
+        TaskFailure {
+            task_id: tasks[3].id,
+            attempt: tasks[3].attempt,
+            lease_token: tasks[3].lease_token.unwrap(),
+            error: json!({"message": "retry"}),
+            retry_after: Some(Duration::ZERO),
+        },
+        TaskFailure {
+            task_id: tasks[4].id,
+            attempt: tasks[4].attempt,
+            lease_token: tasks[4].lease_token.unwrap(),
+            error: json!({"message": "stop"}),
+            retry_after: None,
+        },
+        TaskFailure {
+            task_id: tasks[5].id,
+            attempt: tasks[5].attempt,
+            lease_token: pgtask_core::LeaseToken::new(),
+            error: json!({"message": "stale"}),
+            retry_after: None,
+        },
+    ];
+    assert_eq!(
+        store.fail_many(&failures).await.unwrap(),
+        [Some(TaskState::Pending), Some(TaskState::Failed), None]
+    );
+    assert!(store.complete_many(&[]).await.unwrap().is_empty());
+    assert!(store.fail_many(&[]).await.unwrap().is_empty());
+    assert!(matches!(
+        store
+            .complete_many(&[completions[0].clone(), completions[0].clone()])
+            .await,
+        Err(PostgresError::InvalidTask(_))
+    ));
+    assert!(matches!(
+        store.fail_many(&[failures[0].clone(), failures[0].clone()]).await,
+        Err(PostgresError::InvalidTask(_))
+    ));
+}
+
+#[tokio::test]
+async fn batch_failures_preserve_retry_budget_after_durable_resume() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let queue_name = QueueName::new(format!("batch-resume-{}", Uuid::new_v4())).unwrap();
+    let task_name = TaskName::new("batch-resume").unwrap();
+    let capabilities = [(task_name.clone(), HandlerVersion::default())];
+    let mut request = EnqueueRequest::new(task_name, json!({}));
+    request.queue_name = queue_name.clone();
+    request.max_attempts = 2;
+    store.enqueue(&request).await.unwrap();
+
+    let first = store
+        .claim(&queue_name, WorkerId::new(), &capabilities, 1, Duration::from_secs(30))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    store
+        .sleep_for(
+            first.id,
+            first.attempt,
+            first.lease_token.unwrap(),
+            &StepName::new("resume").unwrap(),
+            0,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    for (expected_attempt, expected_state) in [(2, TaskState::Pending), (3, TaskState::Failed)] {
+        let task = store
+            .claim(&queue_name, WorkerId::new(), &capabilities, 1, Duration::from_secs(30))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(task.attempt, expected_attempt);
+        assert_eq!(task.failed_attempts, expected_attempt - 2);
+        let failure = TaskFailure {
+            task_id: task.id,
+            attempt: task.attempt,
+            lease_token: task.lease_token.unwrap(),
+            error: json!({"type": "boom"}),
+            retry_after: Some(Duration::ZERO),
+        };
+        assert_eq!(store.fail_many(&[failure]).await.unwrap(), [Some(expected_state)]);
+    }
+    let final_task = store.get_task(first.id).await.unwrap().unwrap();
+    assert_eq!(final_task.failed_attempts, 2);
 }
 
 #[tokio::test]

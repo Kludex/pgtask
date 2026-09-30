@@ -28,6 +28,9 @@ function commit_checkpoint(p_task_id uuid, p_attempt integer, p_lease_token uuid
 function complete_task(p_task_id uuid, p_attempt integer, p_lease_token uuid, p_result jsonb) -> boolean VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
 
+function complete_tasks(p_completions jsonb) -> TABLE(request_index bigint, completed boolean) VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
 function configure_grants(p_owner regrole, p_producer regrole, p_worker regrole, p_observer regrole, p_administrator regrole) -> void VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: {owner}=X/{owner}
 
@@ -56,6 +59,9 @@ function ensure_queue_for_task() -> trigger VOLATILE
   grants: {owner}=X/{owner}
 
 function fail_task(p_task_id uuid, p_attempt integer, p_lease_token uuid, p_error jsonb, p_retry_milliseconds bigint) -> text VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
+function fail_tasks(p_failures jsonb) -> TABLE(request_index bigint, state text) VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
 
 function get_checkpoint(p_task_id uuid, p_handler_version integer, p_step_name text, p_occurrence integer) -> SETOF pgtask.checkpoints STABLE SECURITY DEFINER SET search_path=pg_catalog, pgtask

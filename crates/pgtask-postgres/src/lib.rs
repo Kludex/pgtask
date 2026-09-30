@@ -8,5 +8,5 @@ pub use pgtask_core::{
 };
 pub use store::{
     Notification, PostgresError, QueueDemand, QueueDemandSample, ReadyListener, ResultWait, ResultWaitRequest,
-    SignalWait, SignalWaitRequest, SpawnRequest, Store, StoreConfig, TaskResultWait,
+    SignalWait, SignalWaitRequest, SpawnRequest, Store, StoreConfig, TaskCompletion, TaskFailure, TaskResultWait,
 };
