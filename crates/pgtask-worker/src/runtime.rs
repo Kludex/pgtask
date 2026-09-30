@@ -355,6 +355,7 @@ impl Worker {
         self.control.clone()
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn run(self, shutdown: CancellationToken) -> Result<(), WorkerError> {
         self.ensure_storage_protocol().await?;
         let _supervisor = self.start_supervisor()?;
@@ -797,7 +798,9 @@ async fn fail_execution(
     started_at: std::time::Instant,
 ) -> Result<(), TransitionError> {
     let retry_after = if error.retryable {
-        task.retry_policy.unwrap_or(retry_policy).delay_for(task.attempt)
+        task.retry_policy
+            .unwrap_or(retry_policy)
+            .delay_for(task.failed_attempts.saturating_add(1))
     } else {
         None
     };
@@ -843,7 +846,10 @@ async fn record_panicked_execution(
             attempt: task.attempt,
             lease_token,
             error: json!({"type": "handler_panic"}),
-            retry_after: task.retry_policy.unwrap_or(retry_policy).delay_for(task.attempt),
+            retry_after: task
+                .retry_policy
+                .unwrap_or(retry_policy)
+                .delay_for(task.failed_attempts.saturating_add(1)),
         })
         .await?;
     if state.is_none() {

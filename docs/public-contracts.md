@@ -164,7 +164,7 @@ Task identifiers, payloads, results, errors, and idempotency keys are never metr
 
 The integration suite compiles against the public Rust entry point, checks the Python export list, type-checks the
 TypeScript package, tests the Go module with the race detector, drives the CLI help and mutations, exercises every SQL
-operation through PostgreSQL 17 and 18, and records telemetry through the public engine paths. Release CI builds every
+operation through PostgreSQL 16, 17, and 18, and records telemetry through the public engine paths. Release CI builds every
 artifact from one version and rejects an engine version mismatch.
 
 The 1.0 contract freeze remains open until both adopter pilots pass. After 1.0, incompatible Rust, Python, SQL, CLI, or telemetry changes require a new major version.

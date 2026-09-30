@@ -536,20 +536,20 @@ async fn task_transitions_only_notify_their_deterministic_shards() {
     let mut listener = PgListener::connect(&database_url).await.unwrap();
     listener.listen("pgtask_ready").await.unwrap();
     listener.listen(&ready_channel).await.unwrap();
+    let marker_channel = format!("notification_marker_{}", suffix.simple());
+    listener.listen(&marker_channel).await.unwrap();
 
     let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
     request.queue_name = queue_name.clone();
     let task_id = store.enqueue(&request).await.unwrap().task_id;
-    let notification = tokio::time::timeout(Duration::from_secs(1), listener.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(notification.channel(), ready_channel);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), listener.recv())
-            .await
-            .is_err()
-    );
+    assert_notification_channel(
+        &store,
+        &mut listener,
+        &marker_channel,
+        queue_name.as_str(),
+        &ready_channel,
+    )
+    .await;
 
     let task = store
         .claim(
@@ -576,16 +576,14 @@ async fn task_transitions_only_notify_their_deterministic_shards() {
             .await
             .unwrap()
     );
-    let notification = tokio::time::timeout(Duration::from_secs(1), listener.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(notification.channel(), result_channel);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), listener.recv())
-            .await
-            .is_err()
-    );
+    assert_notification_channel(
+        &store,
+        &mut listener,
+        &marker_channel,
+        &task_id.to_string(),
+        &result_channel,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -789,6 +787,62 @@ async fn batch_transitions_preserve_order_fencing_and_retry_states() {
         store.fail_many(&[failures[0].clone(), failures[0].clone()]).await,
         Err(PostgresError::InvalidTask(_))
     ));
+}
+
+#[tokio::test]
+async fn batch_failures_preserve_retry_budget_after_durable_resume() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let queue_name = QueueName::new(format!("batch-resume-{}", Uuid::new_v4())).unwrap();
+    let task_name = TaskName::new("batch-resume").unwrap();
+    let capabilities = [(task_name.clone(), HandlerVersion::default())];
+    let mut request = EnqueueRequest::new(task_name, json!({}));
+    request.queue_name = queue_name.clone();
+    request.max_attempts = 2;
+    store.enqueue(&request).await.unwrap();
+
+    let first = store
+        .claim(&queue_name, WorkerId::new(), &capabilities, 1, Duration::from_secs(30))
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    store
+        .sleep_for(
+            first.id,
+            first.attempt,
+            first.lease_token.unwrap(),
+            &StepName::new("resume").unwrap(),
+            0,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    for (expected_attempt, expected_state) in [(2, TaskState::Pending), (3, TaskState::Failed)] {
+        let task = store
+            .claim(&queue_name, WorkerId::new(), &capabilities, 1, Duration::from_secs(30))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(task.attempt, expected_attempt);
+        assert_eq!(task.failed_attempts, expected_attempt - 2);
+        let failure = TaskFailure {
+            task_id: task.id,
+            attempt: task.attempt,
+            lease_token: task.lease_token.unwrap(),
+            error: json!({"type": "boom"}),
+            retry_after: Some(Duration::ZERO),
+        };
+        assert_eq!(store.fail_many(&[failure]).await.unwrap(), [Some(expected_state)]);
+    }
+    let final_task = store.get_task(first.id).await.unwrap().unwrap();
+    assert_eq!(final_task.failed_attempts, 2);
 }
 
 #[tokio::test]
@@ -2182,7 +2236,7 @@ async fn concurrent_workers_elect_one_queue_demand_sampler_per_interval() {
     let worker_ids = [WorkerId::new(), WorkerId::new(), WorkerId::new(), WorkerId::new()];
     for worker_id in worker_ids {
         store
-            .register_worker(worker_id, &queue_name, "test", &registrations, Duration::from_secs(1))
+            .register_worker(worker_id, &queue_name, "test", &registrations, Duration::from_mins(1))
             .await
             .unwrap();
     }
@@ -2309,4 +2363,39 @@ async fn a_listener_requires_at_least_one_queue() {
         store.ready_listener_for(&[]).await,
         Err(PostgresError::MissingQueues)
     ));
+}
+
+async fn assert_notification_channel(
+    store: &Store,
+    listener: &mut PgListener,
+    marker_channel: &str,
+    payload: &str,
+    expected_channel: &str,
+) {
+    sqlx::query("SELECT pg_notify($1, 'unrelated')")
+        .bind(expected_channel)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    // PostgreSQL delivers notifications in transaction commit order.
+    sqlx::query("SELECT pg_notify($1, '')")
+        .bind(marker_channel)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let channels = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut channels = Vec::new();
+        loop {
+            let notification = listener.recv().await.unwrap();
+            if notification.channel() == marker_channel {
+                break channels;
+            }
+            if notification.payload() == payload {
+                channels.push(notification.channel().to_owned());
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(channels, [expected_channel]);
 }

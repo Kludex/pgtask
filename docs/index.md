@@ -39,5 +39,6 @@ functions.
 Pick the entry point that matches what you need right now.
 
 - [What pgtask is](start/what-pgtask-is.md) explains the guarantees and the limits before you commit to it.
+- [Compare pgtask](compare/index.md) shows where it differs from Absurd, Celery, Dramatiq, and ARQ.
 - [Your first task](start/first-task.md) gets a handler running.
 - [The shape of the system](architecture/index.md) explains how it works and why it is built this way.

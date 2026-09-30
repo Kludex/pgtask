@@ -43,7 +43,8 @@ The policy decides *when* to retry. `max_attempts` on the request decides *how m
 render.request({"report_id": "report-123"}, max_attempts=3)
 ```
 
-When attempts are exhausted the task becomes `failed` and stays there for inspection. The default is 5.
+When failed attempts exhaust the budget, the task becomes `failed` and stays there for inspection. The default is 5.
+A durable sleep or wait starts a new execution when it resumes, but it does not consume this failure budget.
 
 ## Why the policy is frozen
 

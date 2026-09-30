@@ -14,9 +14,7 @@ pub enum ScheduleDefinition {
 
 impl ScheduleDefinition {
     pub fn interval(every: Duration) -> Result<Self, ScheduleError> {
-        if every.is_zero() {
-            return Err(ScheduleError::ZeroInterval);
-        }
+        interval_milliseconds(every)?;
         TimeDelta::from_std(every).map_err(|_| ScheduleError::IntervalOutOfRange)?;
         Ok(Self::Interval { every })
     }
@@ -47,11 +45,7 @@ impl ScheduleDefinition {
     fn due_count(&self, first_due: DateTime<Utc>, now: DateTime<Utc>) -> Result<u64, ScheduleError> {
         match self {
             Self::Interval { every } => {
-                let every_milliseconds =
-                    i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)?;
-                if every_milliseconds == 0 {
-                    return Err(ScheduleError::ZeroInterval);
-                }
+                let every_milliseconds = interval_milliseconds(*every)?;
                 let elapsed_milliseconds = (now - first_due).num_milliseconds().max(0);
                 Ok(u64::try_from(elapsed_milliseconds / every_milliseconds).unwrap_or(0) + 1)
             }
@@ -70,8 +64,7 @@ impl ScheduleDefinition {
     fn latest_due(&self, first_due: DateTime<Utc>, now: DateTime<Utc>) -> Result<DateTime<Utc>, ScheduleError> {
         match self {
             Self::Interval { every } => {
-                let every_milliseconds =
-                    i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)?;
+                let every_milliseconds = interval_milliseconds(*every)?;
                 let elapsed_milliseconds = (now - first_due).num_milliseconds();
                 let intervals = elapsed_milliseconds / every_milliseconds;
                 first_due
@@ -198,6 +191,8 @@ pub struct Materialization {
 pub enum ScheduleError {
     #[error("interval must be greater than zero")]
     ZeroInterval,
+    #[error("interval must use whole-millisecond precision")]
+    UnsupportedIntervalPrecision,
     #[error("interval exceeds the supported date range")]
     IntervalOutOfRange,
     #[error("cron expression must contain exactly six fields: second minute hour day-of-month month day-of-week")]
@@ -208,6 +203,16 @@ pub enum ScheduleError {
     NoFutureOccurrence,
     #[error("schedule date exceeds the supported range")]
     DateOutOfRange,
+}
+
+fn interval_milliseconds(every: Duration) -> Result<i64, ScheduleError> {
+    if every.is_zero() {
+        return Err(ScheduleError::ZeroInterval);
+    }
+    if !every.as_nanos().is_multiple_of(1_000_000) {
+        return Err(ScheduleError::UnsupportedIntervalPrecision);
+    }
+    i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)
 }
 
 fn parse_cron(expression: &str) -> Result<CronSchedule, ScheduleError> {

@@ -49,9 +49,12 @@ nav = [
     "schema-compatibility.md",
     "public-contracts.md",
   ] },
-  { "Migrating" = [
-    "migrate-from-arq.md",
-    "migrate-from-absurd.md",
+  { "Compare" = [
+    "compare/index.md",
+    "compare/absurd.md",
+    "compare/celery.md",
+    "compare/dramatiq.md",
+    "compare/arq.md",
   ] },
 ]
 

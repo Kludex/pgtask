@@ -733,11 +733,14 @@ impl Store {
             .await?;
         let next_run_at = config.start_at.unwrap_or(config.definition.next_after(now)?);
         let (kind, interval_milliseconds, cron_expression) = match &config.definition {
-            ScheduleDefinition::Interval { every } => (
-                "interval",
-                Some(i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)?),
-                None,
-            ),
+            ScheduleDefinition::Interval { every } => {
+                ScheduleDefinition::interval(*every)?;
+                (
+                    "interval",
+                    Some(i64::try_from(every.as_millis()).map_err(|_| ScheduleError::IntervalOutOfRange)?),
+                    None,
+                )
+            }
             ScheduleDefinition::Cron { expression } => ("cron", None, Some(expression.as_str())),
         };
         let (misfire_policy, catch_up_limit) = match config.misfire_policy {
@@ -1197,10 +1200,12 @@ impl Store {
         let rows: Vec<TaskRow> = sqlx::query_as(
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
-                run_at, attempt, max_attempts, lease_token, lease_owner, lease_expires_at,
-                created_at, updated_at, completed_at, result, error, parent_task_id,
-                retry_kind, retry_base_delay_milliseconds, retry_factor, retry_max_delay_milliseconds
-            FROM pgtask.claim($1, $2, $3, $4, $5, $6)
+                run_at, attempt,
+                COALESCE((to_jsonb(claimed)->>'failed_attempts')::integer, attempt) AS failed_attempts,
+                max_attempts, lease_token, lease_owner, lease_expires_at, created_at, updated_at,
+                completed_at, result, error, parent_task_id, retry_kind, retry_base_delay_milliseconds,
+                retry_factor, retry_max_delay_milliseconds
+            FROM pgtask.claim($1, $2, $3, $4, $5, $6) AS claimed
             ",
         )
         .bind(queue_name.as_str())
@@ -1226,10 +1231,12 @@ impl Store {
         let row: Option<TaskRow> = sqlx::query_as(
             r"
             SELECT id, queue_name, task_name, handler_version, payload, headers, state, priority,
-                run_at, attempt, max_attempts, lease_token, lease_owner, lease_expires_at,
-                created_at, updated_at, completed_at, result, error, parent_task_id,
-                retry_kind, retry_base_delay_milliseconds, retry_factor, retry_max_delay_milliseconds
-            FROM pgtask.get_task($1)
+                run_at, attempt,
+                COALESCE((to_jsonb(task)->>'failed_attempts')::integer, attempt) AS failed_attempts,
+                max_attempts, lease_token, lease_owner, lease_expires_at, created_at, updated_at,
+                completed_at, result, error, parent_task_id, retry_kind, retry_base_delay_milliseconds,
+                retry_factor, retry_max_delay_milliseconds
+            FROM pgtask.get_task($1) AS task
             ",
         )
         .bind(task_id.as_uuid())
@@ -2026,6 +2033,7 @@ struct TaskRow {
     priority: i16,
     run_at: DateTime<Utc>,
     attempt: i32,
+    failed_attempts: i32,
     max_attempts: i32,
     retry_kind: Option<String>,
     retry_base_delay_milliseconds: Option<i64>,
@@ -2072,6 +2080,7 @@ impl TryFrom<TaskRow> for Task {
             priority: row.priority,
             run_at: row.run_at,
             attempt: u16::try_from(row.attempt).map_err(invalid_number)?,
+            failed_attempts: u16::try_from(row.failed_attempts).map_err(invalid_number)?,
             max_attempts: u16::try_from(row.max_attempts).map_err(invalid_number)?,
             retry_policy: parse_retry_policy(
                 row.retry_kind.as_deref(),

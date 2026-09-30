@@ -93,7 +93,11 @@ BEGIN
     failed_tasks AS (
         UPDATE pgtask.tasks
         SET state = CASE
-                WHEN requested.retry_milliseconds IS NOT NULL AND tasks.attempt < tasks.max_attempts THEN 'pending'
+                WHEN requested.retry_milliseconds IS NOT NULL
+                    AND COALESCE(tasks.failed_attempts, (
+                        SELECT count(*)::integer FROM pgtask.attempts AS history
+                        WHERE history.task_id = tasks.id AND history.state IN ('failed', 'lost')
+                    )) + 1 < tasks.max_attempts THEN 'pending'
                 ELSE 'failed'
             END,
             run_at = CASE
@@ -105,11 +109,19 @@ BEGIN
             lease_owner = NULL,
             lease_expires_at = NULL,
             completed_at = CASE
-                WHEN requested.retry_milliseconds IS NOT NULL AND tasks.attempt < tasks.max_attempts THEN NULL
+                WHEN requested.retry_milliseconds IS NOT NULL
+                    AND COALESCE(tasks.failed_attempts, (
+                        SELECT count(*)::integer FROM pgtask.attempts AS history
+                        WHERE history.task_id = tasks.id AND history.state IN ('failed', 'lost')
+                    )) + 1 < tasks.max_attempts THEN NULL
                 ELSE statement_timestamp()
             END,
             updated_at = statement_timestamp(),
-            error = requested.error
+            error = requested.error,
+            failed_attempts = COALESCE(tasks.failed_attempts, (
+                SELECT count(*)::integer FROM pgtask.attempts AS history
+                WHERE history.task_id = tasks.id AND history.state IN ('failed', 'lost')
+            )) + 1
         FROM requested
         WHERE tasks.id = requested.task_id
             AND tasks.state = 'running'

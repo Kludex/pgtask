@@ -59,4 +59,4 @@ No known critical or high-severity issue remains in the reviewed 0.1.0 implement
 - PostgreSQL denial-of-service protection depends on deployment limits and capacity.
 - Dependency and artifact checks must run again for every release candidate.
 
-Run the role integration suite on PostgreSQL 17 and 18, `cargo deny check`, Clippy with warnings denied, the Python type and coverage suite, and Helm validation before accepting a release candidate.
+Run the role integration suite on PostgreSQL 16, 17, and 18, `cargo deny check`, Clippy with warnings denied, the Python type and coverage suite, and Helm validation before accepting a release candidate.

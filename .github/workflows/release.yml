@@ -20,14 +20,7 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -eu
-          version="${TAG#v}"
-          case $version in
-              [0-9]*.[0-9]*.[0-9]*) ;;
-              *)
-                  echo "release tag $TAG is not vMAJOR.MINOR.PATCH" >&2
-                  exit 1
-                  ;;
-          esac
+          version=$(./scripts/validate-release-version.sh "${TAG#v}")
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   quality:
@@ -36,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        postgres: [17, 18]
+        postgres: [16, 17, 18]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}

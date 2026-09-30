@@ -24,7 +24,7 @@ The image and the chart are tagged with the release version and signed with Sigs
 the version you want.
 
 Every client calls the same versioned SQL functions, so you can enqueue from one language and run the handler in
-another. You need PostgreSQL 17 or newer, and nothing else.
+another. You need PostgreSQL 16 or newer, and nothing else.
 
 ## Your first task
 

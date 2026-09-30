@@ -159,6 +159,7 @@ pub struct Task {
     pub priority: i16,
     pub run_at: DateTime<Utc>,
     pub attempt: u16,
+    pub failed_attempts: u16,
     pub max_attempts: u16,
     pub retry_policy: Option<RetryPolicy>,
     pub lease_token: Option<LeaseToken>,

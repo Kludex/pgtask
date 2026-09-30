@@ -2,6 +2,13 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
+const PAGE_SIZE: usize = 100;
+
+pub struct Page<T, C> {
+    pub items: Vec<T>,
+    pub next: Option<C>,
+}
+
 #[derive(FromRow)]
 pub struct QueueSummary {
     pub name: String,
@@ -176,13 +183,25 @@ pub struct ScheduleSummary {
 }
 
 impl ScheduleSummary {
-    pub async fn all(pool: &PgPool) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as(
+    pub async fn page(pool: &PgPool, after: Option<&str>) -> Result<Page<Self, String>, sqlx::Error> {
+        let mut items: Vec<Self> = sqlx::query_as(
             "SELECT id, name, kind, queue_name, task_name, next_run_at, paused_at \
-             FROM pgtask.schedule_view ORDER BY name",
+             FROM pgtask.schedule_view WHERE $1::text IS NULL OR name > $1 \
+             ORDER BY name LIMIT 101",
         )
+        .bind(after)
         .fetch_all(pool)
-        .await
+        .await?;
+        let has_more = items.len() > PAGE_SIZE;
+        items.truncate(PAGE_SIZE);
+        let next = has_more.then(|| items.last().unwrap().name.clone());
+        Ok(Page { items, next })
+    }
+
+    async fn count(pool: &PgPool) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT count(*) FROM pgtask.schedule_view")
+            .fetch_one(pool)
+            .await
     }
 }
 
@@ -242,18 +261,40 @@ pub struct WorkerSummary {
     pub version: String,
     pub draining: bool,
     pub live: bool,
+    pub started_at: DateTime<Utc>,
     pub heartbeat_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
 }
 
 impl WorkerSummary {
-    pub async fn all(pool: &PgPool) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as(
-            "SELECT id, queue_name, version, draining, live, heartbeat_at, expires_at \
-             FROM pgtask.worker_view ORDER BY heartbeat_at DESC",
+    pub async fn page(
+        pool: &PgPool,
+        after: Option<(DateTime<Utc>, Uuid)>,
+    ) -> Result<Page<Self, (DateTime<Utc>, Uuid)>, sqlx::Error> {
+        let (after_started, after_id) = after.unzip();
+        let mut items: Vec<Self> = sqlx::query_as(
+            "SELECT id, queue_name, version, draining, live, started_at, heartbeat_at, expires_at \
+             FROM pgtask.worker_view \
+             WHERE $1::timestamptz IS NULL OR (started_at, id) < ($1, $2) \
+             ORDER BY started_at DESC, id DESC LIMIT 101",
         )
+        .bind(after_started)
+        .bind(after_id)
         .fetch_all(pool)
-        .await
+        .await?;
+        let has_more = items.len() > PAGE_SIZE;
+        items.truncate(PAGE_SIZE);
+        let next = has_more.then(|| {
+            let worker = items.last().unwrap();
+            (worker.started_at, worker.id)
+        });
+        Ok(Page { items, next })
+    }
+
+    async fn count(pool: &PgPool) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar("SELECT count(*) FROM pgtask.worker_view")
+            .fetch_one(pool)
+            .await
     }
 }
 
@@ -271,7 +312,7 @@ pub struct WorkerDetail {
 impl WorkerDetail {
     pub async fn load(pool: &PgPool, worker_id: Uuid) -> Result<Option<Self>, sqlx::Error> {
         let worker = sqlx::query_as(
-            "SELECT id, queue_name, version, draining, live, heartbeat_at, expires_at \
+            "SELECT id, queue_name, version, draining, live, started_at, heartbeat_at, expires_at \
              FROM pgtask.worker_view WHERE id = $1",
         )
         .bind(worker_id)
@@ -294,23 +335,23 @@ impl WorkerDetail {
 pub struct Dashboard {
     pub queues: Vec<QueueSummary>,
     pub tasks: Vec<TaskSummary>,
-    pub schedules: Vec<ScheduleSummary>,
-    pub workers: Vec<WorkerSummary>,
+    pub schedule_count: i64,
+    pub worker_count: i64,
 }
 
 impl Dashboard {
     pub async fn load(pool: &PgPool) -> Result<Self, sqlx::Error> {
-        let (queues, tasks, schedules, workers) = tokio::try_join!(
+        let (queues, tasks, schedule_count, worker_count) = tokio::try_join!(
             QueueSummary::all(pool),
             TaskSummary::search(pool, None),
-            ScheduleSummary::all(pool),
-            WorkerSummary::all(pool),
+            ScheduleSummary::count(pool),
+            WorkerSummary::count(pool),
         )?;
         Ok(Self {
             queues,
             tasks,
-            schedules,
-            workers,
+            schedule_count,
+            worker_count,
         })
     }
 }

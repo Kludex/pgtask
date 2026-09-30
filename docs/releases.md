@@ -81,7 +81,7 @@ gh release create v1.0.0 --draft --generate-notes
 Publishing the draft starts the workflow. Nothing happens while it stays a draft, so the notes can be
 written and reviewed before anything is published to a registry.
 
-The workflow reruns the full Rust suite on PostgreSQL 17 and 18 before any artifact is published,
+The workflow reruns the full Rust suite on PostgreSQL 16, 17, and 18 before any artifact is published,
 then attaches the wheels, source distribution, npm package, and chart to the release you published.
 It also creates the matching `sdks/go/v1.0.0` tag at the same commit so the Go module proxy resolves
 the release.
