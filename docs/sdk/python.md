@@ -189,6 +189,8 @@ asyncio.run(main())
 
 Keep names and occurrences stable. Code outside a completed `step` can run again. Use `handler_version` when a deployment changes the order or meaning of durable operations.
 
+A step name is any non-empty string of at most 255 bytes, so a framework composing one from an agent or function name needs no normalization. Signal names keep the stricter `A-Za-z0-9._:-` set. See [Durable execution](../durable-execution.md#name-repeated-steps).
+
 ## Reach the task from anywhere below the handler
 
 Your handler receives the `Task` as an argument, which is all you need when you control every frame. When a

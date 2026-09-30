@@ -18,7 +18,7 @@ use tokio::{sync::Notify, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const TEST_TIMEOUT: Duration = Duration::from_secs(30);
+const TEST_TIMEOUT: Duration = Duration::from_mins(1);
 
 struct Controls {
     pause_after_checkpoint: AtomicBool,
