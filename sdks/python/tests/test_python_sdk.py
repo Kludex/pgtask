@@ -581,42 +581,52 @@ async def test_python_worker_retention_options_are_honoured(retention_enabled: b
     await client.migrate()
     queue_name = f"python-retention-{os.urandom(8).hex()}"
     registry = TaskRegistry(queue_name)
+    ran: list[str] = []
 
     @registry.task("python.retained")
     async def retained(task: Task, payload: None) -> None:
         assert payload is None
+        ran.append(task.id)
 
-    connection = await AsyncConnection.connect(database_url, autocommit=True)
-    await connection.execute("SELECT pgtask.put_queue(%s, 0, 0, NULL, 300)", (queue_name,))
-    tasks = [await client.enqueue(retained.request(None)) for _ in range(3)]
-    worker = Worker(
-        database_url,
-        registry,
-        retention_enabled=retention_enabled,
-        retention_batch_size=1,
-        retention_interval=0.05,
-    )
-    running = asyncio.create_task(worker.run())
+    async with await AsyncConnection.connect(database_url, autocommit=True) as connection:
 
-    async def remaining() -> int:
-        cursor = await connection.execute(
-            "SELECT count(*)::integer FROM pgtask.task_view WHERE queue_name = %s", (queue_name,)
+        async def count(state: str | None = None) -> int:
+            cursor = await connection.execute(
+                "SELECT count(*)::integer FROM pgtask.task_view WHERE queue_name = %s AND state = COALESCE(%s, state)",
+                (queue_name, state),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            return cast(int, row[0])
+
+        async def until(state: str | None, expected: int) -> None:
+            while await count(state) != expected:
+                await asyncio.sleep(0.01)
+
+        # Terminal tasks in this queue expire as soon as they finish. Their results are never read,
+        # because retention may delete a task before anyone looks at it.
+        await connection.execute("SELECT pgtask.put_queue(%s, 0, 0, NULL, 300)", (queue_name,))
+        for _ in range(3):
+            await client.enqueue(retained.request(None))
+        assert await count() == 3
+        worker = Worker(
+            database_url,
+            registry,
+            retention_enabled=retention_enabled,
+            retention_batch_size=1,
+            retention_interval=0.05,
         )
-        row = await cursor.fetchone()
-        assert row is not None
-        return cast(int, row[0])
-
-    async def until_deleted() -> None:
-        while await remaining():
-            await asyncio.sleep(0.01)
-
-    for task in tasks:
-        assert await task.result(timeout=2.0) is not None
-    if retention_enabled:
-        await asyncio.wait_for(until_deleted(), timeout=5)
-    else:
-        await asyncio.sleep(0.3)
-        assert await remaining() == 3
-    worker.shutdown()
-    await running
-    await connection.close()
+        running = asyncio.create_task(worker.run())
+        try:
+            if retention_enabled:
+                # Batches of one, drained in a tick, remove all three finished tasks.
+                await asyncio.wait_for(until(None, 0), timeout=5)
+                assert len(ran) == 3
+            else:
+                await asyncio.wait_for(until("succeeded", 3), timeout=5)
+                # Several retention intervals pass and nothing is deleted.
+                await asyncio.sleep(0.3)
+                assert await count("succeeded") == 3
+        finally:
+            worker.shutdown()
+            await running
