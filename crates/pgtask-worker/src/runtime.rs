@@ -34,6 +34,8 @@ use crate::{
 
 const MAX_RECOVERY_DRAIN_BATCHES: usize = 16;
 const MAX_RETENTION_DRAIN_BATCHES: usize = 16;
+/// How long a stopping worker waits for PostgreSQL to take back the leases of aborted handlers.
+const LEASE_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
@@ -555,8 +557,49 @@ impl Worker {
                 }
             }
         }
-        active_leases.lock().await.clear();
+        // Let aborted handlers unwind, so none of them is still between its handler and its
+        // transition write. A handler that finished removed its own lease; what is left belongs to
+        // the aborted ones.
+        while let Some(result) = handlers.join_next().await {
+            match result {
+                Err(error) if error.is_cancelled() => {}
+                result => handle_handler_result(result),
+            }
+        }
+        let aborted: Vec<_> = active_leases
+            .lock()
+            .await
+            .drain()
+            .map(|(_, lease)| lease.renewal)
+            .collect();
+        self.release_aborted_leases(&aborted).await;
         Ok(())
+    }
+
+    /// Hands the tasks of aborted handlers back as pending without charging them an attempt.
+    /// Best effort: whatever is not released is recovered once its lease expires, as before.
+    async fn release_aborted_leases(&self, leases: &[LeaseRenewal]) {
+        if leases.is_empty() {
+            return;
+        }
+        match tokio::time::timeout(LEASE_RELEASE_TIMEOUT, self.store.release_leases(leases)).await {
+            Ok(Ok(released)) => {
+                tracing::info!(
+                    released = released.len(),
+                    aborted = leases.len(),
+                    "released the leases of handlers aborted at shutdown"
+                );
+            }
+            Ok(Err(error)) => {
+                warn!(%error, aborted = leases.len(), "could not release aborted leases; they will expire instead");
+            }
+            Err(_) => {
+                warn!(
+                    aborted = leases.len(),
+                    "releasing aborted leases timed out; they will expire instead"
+                );
+            }
+        }
     }
 
     async fn next_task_delay(&self, capabilities: &[(TaskName, HandlerVersion)]) -> Duration {

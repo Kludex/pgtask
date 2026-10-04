@@ -52,6 +52,7 @@ struct PythonWorker {
     lease_duration: Duration,
     poll_interval: Duration,
     retention: RetentionOptions,
+    shutdown_grace: Duration,
     health_address: Option<SocketAddr>,
     queues: Vec<QueueName>,
     shutdown: CancellationToken,
@@ -76,6 +77,7 @@ struct PythonWorkerOptions {
     retention_enabled: bool,
     retention_batch_size: u16,
     retention_interval: f64,
+    shutdown_grace: f64,
 }
 
 struct PythonFutureGuard {
@@ -374,6 +376,7 @@ impl PythonWorker {
                     .filter(|interval| !interval.is_zero())
                     .ok_or_else(|| PyValueError::new_err("retention_interval must be positive"))?,
             },
+            shutdown_grace: Duration::try_from_secs_f64(options.shutdown_grace).map_err(value_error)?,
             health_address: options
                 .health_address
                 .map(|value| value.parse())
@@ -431,6 +434,7 @@ impl PythonWorker {
         let lease_duration = self.lease_duration;
         let poll_interval = self.poll_interval;
         let retention = self.retention;
+        let shutdown_grace = self.shutdown_grace;
         let health_address = self.health_address;
         let shutdown = self.shutdown.clone();
         pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals.clone(), async move {
@@ -456,6 +460,7 @@ impl PythonWorker {
             config.retention_enabled = retention.enabled;
             config.retention_batch_size = retention.batch_size;
             config.retention_interval = retention.interval;
+            config.shutdown_grace = shutdown_grace;
             config.health_address = health_address;
             Worker::new(store, registry, config)
                 .map_err(runtime_error)?

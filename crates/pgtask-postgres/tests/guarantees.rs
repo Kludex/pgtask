@@ -738,3 +738,38 @@ async fn max_attempts_of(store: &Store, task_id: pgtask_core::TaskId) -> i32 {
         .await
         .unwrap()
 }
+
+#[tokio::test]
+async fn releasing_a_lease_is_fenced_and_spends_no_budget() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let (stale, live) = reclaim(&store, "release-fence").await;
+    let lease = |task: &Task| pgtask_core::LeaseRenewal {
+        task_id: task.id,
+        attempt: task.attempt,
+        lease_token: task.lease_token.unwrap(),
+    };
+    assert!(store.release_leases(&[lease(&stale)]).await.unwrap().is_empty());
+    assert_eq!(
+        store.get_task(live.id).await.unwrap().unwrap().state,
+        TaskState::Running
+    );
+    assert_eq!(store.release_leases(&[lease(&live)]).await.unwrap(), [live.id]);
+    let released = store.get_task(live.id).await.unwrap().unwrap();
+    assert_eq!(released.state, TaskState::Pending);
+    assert_eq!(released.lease_token, None);
+    assert_eq!(released.failed_attempts, live.failed_attempts);
+    assert!(store.release_leases(&[lease(&live)]).await.unwrap().is_empty());
+
+    // A task on its only attempt comes back claimable.
+    let (queue, task_name) = names("release-last-attempt");
+    store.enqueue(&request(&task_name, &queue, 1, 0)).await.unwrap();
+    let only = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
+    assert_eq!(store.release_leases(&[lease(&only)]).await.unwrap(), [only.id]);
+    let again = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
+    assert_eq!((again.id, again.attempt, again.failed_attempts), (only.id, 2, 0));
+}

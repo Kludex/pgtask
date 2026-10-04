@@ -13,7 +13,7 @@ stateDiagram-v2
     pending --> running: claim
     running --> waiting: suspend
     waiting --> pending: signal, result, or timeout
-    running --> pending: retry, or lease expired
+    running --> pending: retry, lease expired, or released at shutdown
     running --> succeeded: complete
     running --> failed: attempts exhausted
     running --> cancelled: cancel
@@ -39,6 +39,8 @@ Six steps take a task from enqueued to finished:
 4. A background task renews active leases in batches. Your handler can checkpoint steps or suspend itself while it runs.
 5. The worker completes, retries, or fails the task using its task ID, attempt number, and lease token.
 6. If the worker disappears, another worker recovers the task once the lease expires, as a new attempt with a new token.
+   A worker that shuts down cleanly does not wait for that: after its grace period it releases the leases of the
+   handlers it had to abort, and those tasks are pending again without a failed attempt.
 
 Step 3 deserves more attention than it usually gets. The tempting design is to claim and run inside one transaction, so
 a crash rolls the claim back. It is simpler, and it is a trap: your task throughput becomes bound to your connection

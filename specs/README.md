@@ -80,12 +80,21 @@ happen is two of them writing a result.
 expired keeps running and will try to write later. Without that, the fencing
 invariant would be checking nothing.
 
+`attempt` counts claims and is part of the fence. `failures` is
+`failed_attempts`, the budget that `claim` checks. They come apart only
+through `Release`, which models `release_tasks`: a stopping worker hands an
+unfinished task back as pending without charging it a failure. Release is
+fenced like every other transition (dropping `Owns(h)` from it violates
+`FencedMutations`), and `MaxReleases` bounds it to keep the model finite.
+`CoverReleased` witnesses a task claimed `MaxAttempts` times that is pending and
+claimable again, which only a release can produce.
+
 Safety checks: `AtMostOneFencedWriter`, `RunningIffLeased`, `TerminalUnleased`,
 `AttemptBounded`, `TokensUnique`, and `FencedMutations`. Temporal checks:
 `TerminalIsStable`, `AttemptMonotonic`, and `EventuallyTerminal`.
 
 `TaskLifecycle.cfg` checks safety and liveness at 2 tasks / 2 workers / 2
-attempts. `TaskLifecycleLarge.cfg` widens to 3 tasks but checks safety only -
+attempts / 1 release. `TaskLifecycleLarge.cfg` widens to 3 tasks but checks safety only -
 liveness checking is what makes the state space explode.
 
 ## Vacuity

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -372,6 +374,7 @@ class Worker:
         retention_enabled: bool = True,
         retention_batch_size: int = 100,
         retention_interval: float = 60.0,
+        shutdown_grace: float = 30.0,
     ) -> None:
         """Run handlers from one or more registries.
 
@@ -400,6 +403,7 @@ class Worker:
                 "retention_enabled": retention_enabled,
                 "retention_batch_size": retention_batch_size,
                 "retention_interval": retention_interval,
+                "shutdown_grace": shutdown_grace,
             },
         )
         definitions = [definition for entry in registries for definition in entry.definitions]
@@ -427,7 +431,24 @@ class Worker:
             )
 
     async def run(self) -> None:
-        await self._native.run()
+        """Claim and run tasks until :meth:`shutdown` is called.
+
+        To stop gracefully, call ``shutdown()`` and keep awaiting ``run()``. Running handlers get
+        ``shutdown_grace`` seconds to finish. Those still running are then cancelled, and their
+        tasks go back to ``pending`` without using up an attempt.
+
+        Cancelling ``run()`` itself takes the same path: the worker shuts down, and the
+        cancellation is re-raised once it has stopped. Cancelling a second time stops waiting at
+        once, and the leases of unfinished tasks then expire instead.
+        """
+        native = asyncio.ensure_future(self._native.run())
+        try:
+            await asyncio.shield(native)
+        except asyncio.CancelledError:
+            self._native.shutdown()
+            with contextlib.suppress(Exception):
+                await native
+            raise
 
     def shutdown(self) -> None:
         self._native.shutdown()

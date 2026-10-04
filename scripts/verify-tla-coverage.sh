@@ -33,7 +33,7 @@ fi
 CASES=(
     "WaitProtocol:SignalWait:CoverParks CoverResumes CoverResolved"
     "WaitProtocol:ResultWait:CoverParks CoverResumes NoConcurrentRegistration"
-    "TaskLifecycle:TaskLifecycle:CoverRunning CoverRetried CoverStaleHandler CoverExhausted CoverConcurrentHandlers"
+    "TaskLifecycle:TaskLifecycle:CoverRunning CoverRetried CoverStaleHandler CoverExhausted CoverConcurrentHandlers CoverReleased"
 )
 
 failures=0

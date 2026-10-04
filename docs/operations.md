@@ -56,7 +56,13 @@ An enqueue deduplicated after task history was removed returns the original task
 
 ## Drain a worker
 
-Stop new producers or route them to the replacement queue. Stop claim admission on the old Deployment and wait until its running count reaches zero. Kubernetes then sends `SIGTERM`; the worker stops claiming and waits for active handlers up to its configured grace period. A forced deletion is safe, but unfinished work waits for lease expiry and may execute again.
+Stop new producers or route them to the replacement queue. Stop claim admission on the old Deployment and wait until its running count reaches zero. Kubernetes then sends `SIGTERM`; the worker stops claiming and waits for active handlers up to its configured grace period (`shutdown_grace`, 30 s by default). A forced deletion is safe, but unfinished work waits for lease expiry and may execute again.
+
+When the grace period ends, the worker aborts the handlers that are still running and releases their leases with
+`pgtask.release_tasks`. Their tasks go back to `pending` straight away, `failed_attempts` is unchanged, and the
+attempt is recorded with the state `released`, so a restart does not use up a task's last attempt. The release is
+best effort and waits at most 5 seconds. A lease it misses expires and is recovered as before, which counts a failed
+attempt. Keep the pod's termination grace period longer than `shutdown_grace`, so the release gets a chance to run.
 
 ## Read health
 
