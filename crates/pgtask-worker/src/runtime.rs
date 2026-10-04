@@ -33,6 +33,7 @@ use crate::{
 };
 
 const MAX_RECOVERY_DRAIN_BATCHES: usize = 16;
+const MAX_RETENTION_DRAIN_BATCHES: usize = 16;
 
 #[derive(Clone, Debug)]
 pub struct WorkerConfig {
@@ -53,6 +54,8 @@ pub struct WorkerConfig {
     pub retention_enabled: bool,
     pub retention_batch_size: NonZeroU16,
     pub retention_interval: Duration,
+    /// How long a worker row is kept after it expires before retention deletes it.
+    pub expired_worker_retention: Duration,
     pub declared_schedules: Vec<ScheduleConfig>,
     pub health_address: Option<SocketAddr>,
     pub supervisor_interval: Duration,
@@ -105,6 +108,7 @@ impl WorkerConfig {
             retention_enabled: true,
             retention_batch_size: NonZeroU16::new(100).expect("100 is nonzero"),
             retention_interval: Duration::from_mins(1),
+            expired_worker_retention: Duration::from_hours(24),
             declared_schedules: Vec::new(),
             health_address: None,
             supervisor_interval: Duration::from_secs(1),
@@ -417,14 +421,7 @@ impl Worker {
             schedule_wakeup,
             runtime_shutdown.clone(),
         );
-        let retention = delete_expired_terminal(
-            self.store.clone(),
-            self.config.queues.clone(),
-            self.config.retention_enabled,
-            self.config.retention_batch_size,
-            self.config.retention_interval,
-            runtime_shutdown.clone(),
-        );
+        let retention = delete_expired_rows(self.store.clone(), &self.config, runtime_shutdown.clone());
         let heartbeat = heartbeat_worker(
             self.store.clone(),
             HeartbeatConfig {
@@ -1279,35 +1276,70 @@ fn schedule_error_backoff(previous: Option<Duration>, failed: bool, cap: Duratio
     })
 }
 
-async fn delete_expired_terminal(
-    store: Store,
-    queues: Vec<QueueName>,
-    enabled: bool,
-    batch_size: NonZeroU16,
-    retention_interval: Duration,
-    shutdown: CancellationToken,
-) {
-    let mut interval = tokio::time::interval(retention_interval);
+/// Each tick drains every kind of expired row until a batch comes back short or the per-tick budget
+/// runs out, the way lease recovery does, so retention keeps up with a busy queue.
+async fn delete_expired_rows(store: Store, config: &WorkerConfig, shutdown: CancellationToken) {
+    if !config.retention_enabled {
+        return;
+    }
+    let limit = config.retention_batch_size.get();
+    let mut interval = tokio::time::interval(config.retention_interval);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             () = shutdown.cancelled() => return,
-            _ = interval.tick() => {
-                for queue_name in &queues {
-                    if enabled
-                        && let Err(error) = store.delete_expired_terminal(queue_name, batch_size.get()).await
-                    {
-                        warn!(%error, "could not delete expired terminal tasks");
-                    }
-                    if enabled
-                        && let Err(error) = store.delete_expired_idempotency_keys(queue_name, batch_size.get()).await
-                    {
-                        warn!(%error, "could not delete expired idempotency keys");
-                    }
-                }
+            _ = interval.tick() => {}
+        }
+        for queue_name in &config.queues {
+            let drained = drain_retention(&shutdown, "expired terminal tasks", limit, || {
+                store.delete_expired_terminal(queue_name, limit)
+            })
+            .await
+                && drain_retention(&shutdown, "expired idempotency keys", limit, || {
+                    store.delete_expired_idempotency_keys(queue_name, limit)
+                })
+                .await;
+            if !drained {
+                return;
+            }
+        }
+        if !drain_retention(&shutdown, "expired worker rows", limit, || {
+            store.delete_expired_workers(config.expired_worker_retention, limit)
+        })
+        .await
+        {
+            return;
+        }
+    }
+}
+
+/// Returns false when shutdown interrupted the drain.
+async fn drain_retention<F, Fut>(shutdown: &CancellationToken, rows: &str, limit: u16, mut delete: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<u64, PostgresError>>,
+{
+    for batch in 0..MAX_RETENTION_DRAIN_BATCHES {
+        let result = tokio::select! {
+            () = shutdown.cancelled() => return false,
+            result = delete() => result,
+        };
+        match result {
+            Ok(deleted) if deleted < u64::from(limit) => break,
+            Ok(_) if batch + 1 == MAX_RETENTION_DRAIN_BATCHES => {
+                warn!(
+                    rows,
+                    "retention drain reached its batch budget; the rest waits for the next tick"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(%error, rows, "could not delete expired rows");
+                break;
             }
         }
     }
+    true
 }
 
 async fn heartbeat_worker(store: Store, config: HeartbeatConfig, shutdown: CancellationToken, health: Health) {

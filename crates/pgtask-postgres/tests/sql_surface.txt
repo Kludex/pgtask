@@ -40,6 +40,9 @@ function delete_expired_idempotency_keys(p_queue_name text, p_limit integer) -> 
 function delete_expired_terminal(p_queue_name text, p_limit integer) -> bigint VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
 
+function delete_expired_workers(p_grace_milliseconds bigint, p_limit integer) -> bigint VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_administrator=X/{owner}, pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
 function delete_schedule(p_id uuid) -> boolean VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: pgtask_surface_administrator=X/{owner}, {owner}=X/{owner}
 

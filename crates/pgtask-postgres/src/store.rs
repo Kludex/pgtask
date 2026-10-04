@@ -967,6 +967,20 @@ impl Store {
         u64::try_from(deleted).map_err(invalid_number)
     }
 
+    /// Deletes up to `limit` worker rows, with their capabilities, that expired more than `grace` ago.
+    pub async fn delete_expired_workers(&self, grace: Duration, limit: u16) -> Result<u64, PostgresError> {
+        if limit == 0 {
+            return Err(PostgresError::InvalidRetentionLimit);
+        }
+        let grace_milliseconds = i64::try_from(grace.as_millis()).map_err(invalid_number)?;
+        let deleted: i64 = sqlx::query_scalar("SELECT pgtask.delete_expired_workers($1, $2)")
+            .bind(grace_milliseconds)
+            .bind(i32::from(limit))
+            .fetch_one(&self.pool)
+            .await?;
+        u64::try_from(deleted).map_err(invalid_number)
+    }
+
     pub async fn enqueue(&self, request: &EnqueueRequest) -> Result<EnqueueResult, PostgresError> {
         Self::validate_request(request)?;
         let handler_version =

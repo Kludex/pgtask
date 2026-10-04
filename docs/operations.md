@@ -45,6 +45,13 @@ zero for oldest-first rescue on every claim. Priority ordering fills the other s
 
 Terminal history and idempotency reservations have separate per-queue retention windows. Keep idempotency retention at least as long as producers may retry a logical request. Cleanup uses bounded transactions. Run it repeatedly until it reports zero when reclaiming a backlog. Check autovacuum progress after a large cleanup. Do not use an unbounded `DELETE` against the task table.
 
+Every worker also runs retention unless `retention_enabled` is off. Each `retention_interval` (60 s by default), for each
+of its queues, it deletes terminal tasks and then idempotency keys in batches of `retention_batch_size` (100 by default)
+until a batch comes back short, up to 16 batches per kind per tick. Replicas split the work with `SKIP LOCKED`. On the
+same tick it deletes worker rows, and their registered capabilities, that expired more than `expired_worker_retention`
+(24 hours by default) ago. The Python `Worker` accepts `retention_enabled`, `retention_batch_size`, and
+`retention_interval`.
+
 An enqueue deduplicated after task history was removed returns the original task identifier with `created = false`. Result inspection then returns no task. This is intentional: history retention controls visibility, while idempotency retention controls whether the side effect may be requested again.
 
 ## Drain a worker
