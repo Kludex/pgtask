@@ -104,6 +104,16 @@ Enforced by check constraints, so an oversized value is rejected at write time r
 
 Payloads are for identifiers and parameters. Put the bytes in object storage and pass a reference.
 
+Sizes are measured as `octet_length(value::text)`, the way PostgreSQL prints `jsonb`. `jsonb` also rejects `\u0000`.
+The Rust and Python workers check handler outcomes before writing them:
+
+- `\u0000` in a result or error string, or in an object key, is written as the six characters `\u0000`.
+- A result over the limit fails the task without a retry, with `{"type": "result_too_large", "bytes": n, "limit": 1048576}`.
+- An error over the limit has its longest strings shortened and gains `"truncated": true` and `"original_bytes": n`.
+- If PostgreSQL still rejects a result, the task fails with `result_rejected` and the database message. A rejected
+  error is replaced by `error_rejected` with that message, and the task keeps its retry policy.
+  A batch that `complete_tasks` or `fail_tasks` rejects is written again one task at a time, so only that task is affected.
+
 ## Roles
 
 | Role | Capabilities |

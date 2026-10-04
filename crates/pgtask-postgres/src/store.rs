@@ -77,6 +77,26 @@ pub enum PostgresError {
     Schedule(#[from] ScheduleError),
 }
 
+impl PostgresError {
+    /// The SQLSTATE PostgreSQL reported, when the error came from a statement it rejected.
+    pub fn database_code(&self) -> Option<String> {
+        match self {
+            Self::Database(error) => error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .map(std::borrow::Cow::into_owned),
+            _ => None,
+        }
+    }
+
+    /// Whether PostgreSQL rejected a value (SQLSTATE class 22, data exception, or 23, integrity
+    /// constraint violation), so writing the same value again fails the same way.
+    pub fn is_rejected_value(&self) -> bool {
+        self.database_code()
+            .is_some_and(|code| code.starts_with("22") || code.starts_with("23"))
+    }
+}
+
 #[derive(Clone)]
 pub struct StoreConfig {
     database_url: String,

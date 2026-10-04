@@ -1,6 +1,7 @@
 #![doc = "Worker and scheduler runtime for pgtask."]
 
 mod health;
+mod outcome;
 mod registry;
 mod runtime;
 

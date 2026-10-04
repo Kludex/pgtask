@@ -28,6 +28,7 @@ use tracing::{Instrument, info_span, warn};
 use crate::{
     HandlerRegistry,
     health::{Health, Supervisor},
+    outcome::{self, PreparedResult},
     registry::RegisteredHandler,
 };
 
@@ -766,14 +767,30 @@ async fn complete_execution(
     result: serde_json::Value,
     started_at: std::time::Instant,
 ) -> Result<(), TransitionError> {
-    let completed = writer
+    let result = match outcome::prepare_result(result) {
+        PreparedResult::Result(result) => result,
+        PreparedResult::TooLarge(error) => {
+            warn!(%error, "task result exceeds the result size limit; failing the task");
+            return fail_rejected_result(writer, task, lease_token, error, started_at).await;
+        }
+    };
+    let completed = match writer
         .complete(TaskCompletion {
             task_id: task.id,
             attempt: task.attempt,
             lease_token,
             result: Some(result),
         })
-        .await?;
+        .await
+    {
+        Ok(completed) => completed,
+        Err(TransitionError::Postgres(error)) if error.is_rejected_value() => {
+            warn!(%error, "PostgreSQL rejected the task result; failing the task");
+            let error = outcome::rejected_value_error("result_rejected", &error.to_string());
+            return fail_rejected_result(writer, task, lease_token, error, started_at).await;
+        }
+        Err(error) => return Err(error),
+    };
     if completed {
         pgtask_otel::record_succeeded(task.queue_name.as_str(), task.task_name.as_str());
         pgtask_otel::record_execution(
@@ -786,6 +803,29 @@ async fn complete_execution(
         pgtask_otel::record_lease_lost(task.queue_name.as_str(), task.task_name.as_str());
         warn!("task completion lost its lease");
     }
+    Ok(())
+}
+
+/// A result the database cannot store fails the task for good: running it again returns the same value.
+async fn fail_rejected_result(
+    writer: &TransitionWriter,
+    task: &Task,
+    lease_token: pgtask_core::LeaseToken,
+    error: serde_json::Value,
+    started_at: std::time::Instant,
+) -> Result<(), TransitionError> {
+    let state = write_failure(writer, task, lease_token, error, None).await?;
+    if state.is_none() {
+        pgtask_otel::record_lease_lost(task.queue_name.as_str(), task.task_name.as_str());
+        warn!("task failure lost its lease");
+    }
+    record_failure_state(task, state);
+    pgtask_otel::record_execution(
+        task.queue_name.as_str(),
+        task.task_name.as_str(),
+        "failed",
+        started_at.elapsed(),
+    );
     Ok(())
 }
 
@@ -804,15 +844,7 @@ async fn fail_execution(
     } else {
         None
     };
-    let state = writer
-        .fail(TaskFailure {
-            task_id: task.id,
-            attempt: task.attempt,
-            lease_token,
-            error: error.error,
-            retry_after,
-        })
-        .await?;
+    let state = write_failure(writer, task, lease_token, error.error, retry_after).await?;
     if state.is_none() {
         pgtask_otel::record_lease_lost(task.queue_name.as_str(), task.task_name.as_str());
         warn!("task failure lost its lease");
@@ -840,18 +872,11 @@ async fn record_panicked_execution(
     retry_policy: RetryPolicy,
     started_at: std::time::Instant,
 ) -> Result<(), TransitionError> {
-    let state = writer
-        .fail(TaskFailure {
-            task_id: task.id,
-            attempt: task.attempt,
-            lease_token,
-            error: json!({"type": "handler_panic"}),
-            retry_after: task
-                .retry_policy
-                .unwrap_or(retry_policy)
-                .delay_for(task.failed_attempts.saturating_add(1)),
-        })
-        .await?;
+    let retry_after = task
+        .retry_policy
+        .unwrap_or(retry_policy)
+        .delay_for(task.failed_attempts.saturating_add(1));
+    let state = write_failure(writer, task, lease_token, json!({"type": "handler_panic"}), retry_after).await?;
     if state.is_none() {
         pgtask_otel::record_lease_lost(task.queue_name.as_str(), task.task_name.as_str());
         warn!("panicked task lost its lease");
@@ -864,6 +889,37 @@ async fn record_panicked_execution(
         started_at.elapsed(),
     );
     Ok(())
+}
+
+/// Writes a failure with its error made storable. If PostgreSQL still rejects the error, the
+/// failure is recorded with a short replacement so the task follows its retry policy instead of
+/// waiting for its lease to expire.
+async fn write_failure(
+    writer: &TransitionWriter,
+    task: &Task,
+    lease_token: pgtask_core::LeaseToken,
+    error: serde_json::Value,
+    retry_after: Option<Duration>,
+) -> Result<Option<TaskState>, TransitionError> {
+    let failure = TaskFailure {
+        task_id: task.id,
+        attempt: task.attempt,
+        lease_token,
+        error: outcome::prepare_error(error),
+        retry_after,
+    };
+    match writer.fail(failure.clone()).await {
+        Err(TransitionError::Postgres(error)) if error.is_rejected_value() => {
+            warn!(%error, "PostgreSQL rejected the task error; recording a replacement");
+            writer
+                .fail(TaskFailure {
+                    error: outcome::rejected_value_error("error_rejected", &error.to_string()),
+                    ..failure
+                })
+                .await
+        }
+        result => result,
+    }
 }
 
 fn record_failure_state(task: &Task, state: Option<TaskState>) {
@@ -936,9 +992,18 @@ async fn write_transition_batch(store: &Store, requests: Vec<TransitionRequest>,
             }
         }
         Err(error) => {
-            let error = Arc::new(error);
-            for response in completion_responses {
-                let _ = response.send(Err(Arc::clone(&error)));
+            warn!(%error, batch = completions.len(), "batched task completion failed; writing each completion alone");
+            for (completion, response) in completions.iter().zip(completion_responses) {
+                let result = tokio::select! {
+                    () = shutdown.cancelled() => return false,
+                    result = store.complete(
+                        completion.task_id,
+                        completion.attempt,
+                        completion.lease_token,
+                        completion.result.as_ref(),
+                    ) => result,
+                };
+                let _ = response.send(result.map_err(Arc::new));
             }
         }
     }
@@ -953,9 +1018,19 @@ async fn write_transition_batch(store: &Store, requests: Vec<TransitionRequest>,
             }
         }
         Err(error) => {
-            let error = Arc::new(error);
-            for response in failure_responses {
-                let _ = response.send(Err(Arc::clone(&error)));
+            warn!(%error, batch = failures.len(), "batched task failure failed; writing each failure alone");
+            for (failure, response) in failures.iter().zip(failure_responses) {
+                let result = tokio::select! {
+                    () = shutdown.cancelled() => return false,
+                    result = store.fail(
+                        failure.task_id,
+                        failure.attempt,
+                        failure.lease_token,
+                        &failure.error,
+                        failure.retry_after,
+                    ) => result,
+                };
+                let _ = response.send(result.map_err(Arc::new));
             }
         }
     }
