@@ -1130,6 +1130,8 @@ async fn listen_for_ready(
     }
 }
 
+const SCHEDULE_ERROR_BACKOFF_START: Duration = Duration::from_millis(100);
+
 async fn materialize_schedules(
     store: Store,
     enabled: bool,
@@ -1139,14 +1141,19 @@ async fn materialize_schedules(
     wakeup: Arc<Notify>,
     shutdown: CancellationToken,
 ) {
+    let mut error_backoff = None;
     loop {
+        let mut failed = false;
         if enabled && let Err(error) = store.materialize_due_schedules(schedule_batch_size.get()).await {
+            failed = true;
             warn!(%error, "could not materialize due schedules");
         }
         if let Err(error) = store.recover_wait_timeouts(wait_batch_size.get()).await {
+            failed = true;
             warn!(%error, "could not recover signal wait timeouts");
         }
         if let Err(error) = store.recover_result_wait_timeouts(wait_batch_size.get()).await {
+            failed = true;
             warn!(%error, "could not recover result wait timeouts");
         }
         let mut delay = reconciliation_interval;
@@ -1157,7 +1164,10 @@ async fn materialize_schedules(
                         delay = delay.min(schedule_delay);
                     }
                 }
-                Err(error) => warn!(%error, "could not read the next schedule deadline"),
+                Err(error) => {
+                    failed = true;
+                    warn!(%error, "could not read the next schedule deadline");
+                }
             }
         }
         match store.next_wait_delay().await {
@@ -1166,7 +1176,17 @@ async fn materialize_schedules(
                     delay = delay.min(wait_delay);
                 }
             }
-            Err(error) => warn!(%error, "could not read the next wait deadline"),
+            Err(error) => {
+                failed = true;
+                warn!(%error, "could not read the next wait deadline");
+            }
+        }
+        // A deadline that is still due after a failed sweep is the work that failed. Sleeping
+        // until it would retry at once, so back off instead, doubling up to the reconciliation
+        // interval, and reset after the first clean sweep.
+        error_backoff = schedule_error_backoff(error_backoff, failed, reconciliation_interval);
+        if let Some(backoff) = error_backoff {
+            delay = delay.max(backoff);
         }
         tokio::select! {
             () = shutdown.cancelled() => return,
@@ -1174,6 +1194,14 @@ async fn materialize_schedules(
             () = tokio::time::sleep(delay) => {}
         }
     }
+}
+
+fn schedule_error_backoff(previous: Option<Duration>, failed: bool, cap: Duration) -> Option<Duration> {
+    failed.then(|| {
+        previous
+            .map_or(SCHEDULE_ERROR_BACKOFF_START, |backoff| backoff * 2)
+            .min(cap)
+    })
 }
 
 async fn delete_expired_terminal(
@@ -1272,5 +1300,29 @@ async fn sample_queue_demand(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::schedule_error_backoff;
+
+    #[test]
+    fn schedule_error_backoff_doubles_to_the_cap_and_resets_after_success() {
+        let cap = Duration::from_millis(500);
+        let mut backoff = None;
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            backoff = schedule_error_backoff(backoff, true, cap);
+            seen.push(backoff.unwrap().as_millis());
+        }
+        assert_eq!(seen, [100, 200, 400, 500, 500]);
+        assert_eq!(schedule_error_backoff(backoff, false, cap), None);
+        assert_eq!(
+            schedule_error_backoff(None, true, Duration::from_millis(10)),
+            Some(Duration::from_millis(10))
+        );
     }
 }

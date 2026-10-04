@@ -188,3 +188,89 @@ async fn signal_wait_timeout_resumes_with_a_durable_timeout_checkpoint() {
         Some(SignalWait::Ready(json!({"outcome": "timeout"})))
     );
 }
+
+async fn claim_for_signal(store: &Store, queue_name: &QueueName, task_name: &TaskName) -> pgtask_core::Task {
+    store
+        .claim(
+            queue_name,
+            WorkerId::new(),
+            &[(task_name.clone(), HandlerVersion::default())],
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn cancelled_signal_wait_waits_again_after_an_administrator_retry() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let queue_name = QueueName::new(format!("signal-retry-{suffix}")).unwrap();
+    let task_name = TaskName::new(format!("signal-retry-task-{suffix}")).unwrap();
+    let signal_name = SignalName::new("go").unwrap();
+    let step_name = StepName::new("wait-for-go").unwrap();
+    let mut request = EnqueueRequest::new(task_name.clone(), json!({}));
+    request.queue_name = queue_name.clone();
+    let task_id = store.enqueue(&request).await.unwrap().task_id;
+    let wait = |task: &pgtask_core::Task| SignalWaitRequest {
+        task_id,
+        attempt: task.attempt,
+        lease_token: task.lease_token.unwrap(),
+        step_name: &step_name,
+        occurrence: 0,
+        signal_name: &signal_name,
+        signal_occurrence: 0,
+        timeout: None,
+    };
+
+    let first = claim_for_signal(&store, &queue_name, &task_name).await;
+    assert_eq!(
+        store.wait_for_signal(wait(&first)).await.unwrap(),
+        Some(SignalWait::Waiting)
+    );
+    assert!(store.cancel(task_id).await.unwrap());
+    let outcome: (Option<String>, bool) =
+        sqlx::query_as("SELECT outcome, resolved_at IS NOT NULL FROM pgtask.waits WHERE task_id = $1")
+            .bind(task_id.as_uuid())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(outcome, (Some("cancelled".to_owned()), true));
+
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT pgtask.admin_retry_task($1, 'ops')")
+            .bind(task_id.as_uuid())
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    );
+    let retried = claim_for_signal(&store, &queue_name, &task_name).await;
+    assert_eq!(
+        store.wait_for_signal(wait(&retried)).await.unwrap(),
+        Some(SignalWait::Waiting)
+    );
+    assert_eq!(
+        store.get_task(task_id).await.unwrap().unwrap().state,
+        TaskState::Waiting
+    );
+
+    store
+        .emit_signal(task_id, &signal_name, 0, &json!({"approved": true}))
+        .await
+        .unwrap();
+    let resumed = claim_for_signal(&store, &queue_name, &task_name).await;
+    assert_eq!(
+        store.wait_for_signal(wait(&resumed)).await.unwrap(),
+        Some(SignalWait::Ready(
+            json!({"outcome": "signal", "value": {"approved": true}})
+        ))
+    );
+}

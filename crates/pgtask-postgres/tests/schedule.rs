@@ -7,9 +7,9 @@ use std::{
 use chrono::{DateTime, TimeDelta, Utc};
 use pgtask_core::{
     EnqueueRequest, HandlerVersion, MisfirePolicy, QueueConfig, QueueName, ScheduleConfig, ScheduleDefinition,
-    ScheduleId, ScheduleName, Task, TaskName, WorkerId,
+    ScheduleError, ScheduleId, ScheduleName, Task, TaskName, WorkerId,
 };
-use pgtask_postgres::Store;
+use pgtask_postgres::{PostgresError, Store};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -313,4 +313,106 @@ async fn missed_occurrence_materialization_is_idempotent_across_restarts() {
         .unwrap();
     assert_eq!(claimed.len(), 1);
     assert!(store.delete_schedule(schedule.config.id).await.unwrap());
+}
+
+/// A database of its own: `claim_due_schedules` has no queue filter, so a schedule left due here
+/// would reach every other test sharing the database.
+async fn isolated_schedule_store(database_url: &str) -> (Store, sqlx::PgPool, String) {
+    use std::str::FromStr;
+
+    let database_name = format!("pgtask_schedule_{}", Uuid::new_v4().simple());
+    let options = sqlx::postgres::PgConnectOptions::from_str(database_url).unwrap();
+    let maintenance = sqlx::PgPool::connect_with(options.clone().database("postgres"))
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database_name}")))
+        .execute(&maintenance)
+        .await
+        .unwrap();
+    let store = Store::from_pool(
+        sqlx::PgPool::connect_with(options.database(&database_name))
+            .await
+            .unwrap(),
+    );
+    store.migrate().await.unwrap();
+    (store, maintenance, database_name)
+}
+
+#[tokio::test]
+async fn put_schedule_rejects_a_definition_with_no_future_occurrence_even_with_a_start() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let mut config = ScheduleConfig::new(
+        ScheduleName::new(format!("february-30-{}", Uuid::new_v4())).unwrap(),
+        ScheduleDefinition::cron("0 0 0 30 2 *").unwrap(),
+        EnqueueRequest::new(TaskName::new("never").unwrap(), json!({})),
+    );
+    config.start_at = Some(Utc::now());
+    assert!(matches!(
+        store.put_schedule(&config).await,
+        Err(PostgresError::Schedule(ScheduleError::NoFutureOccurrence))
+    ));
+    config.start_at = None;
+    assert!(matches!(
+        store.put_schedule(&config).await,
+        Err(PostgresError::Schedule(ScheduleError::NoFutureOccurrence))
+    ));
+}
+
+#[tokio::test]
+async fn an_unmaterializable_schedule_is_deferred_and_the_rest_of_the_batch_commits() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let (store, maintenance, database_name) = isolated_schedule_store(&database_url).await;
+
+    // The SQL protocol stores a cron expression without evaluating it, so this row can exist.
+    let broken: Uuid = sqlx::query_scalar(
+        r"
+        SELECT id FROM pgtask.put_schedule(
+            gen_random_uuid(), 'february-30', 'cron', NULL, '0 0 0 30 2 *', 'latest', NULL,
+            'schedules', 'broken', 1, '{}'::jsonb, '{}'::jsonb, 0::smallint, 5,
+            statement_timestamp() - interval '1 minute'
+        )
+        ",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    let mut healthy = ScheduleConfig::new(
+        ScheduleName::new("healthy").unwrap(),
+        ScheduleDefinition::interval(Duration::from_secs(5)).unwrap(),
+        EnqueueRequest::new(TaskName::new("healthy").unwrap(), json!({})),
+    );
+    healthy.task.queue_name = QueueName::new("schedules").unwrap();
+    healthy.start_at = Some(Utc::now() - TimeDelta::seconds(1));
+    let healthy = store.put_schedule(&healthy).await.unwrap();
+
+    let before = Utc::now();
+    assert_eq!(store.materialize_due_schedules(10).await.unwrap(), 1);
+    let materialized: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtask.tasks WHERE schedule_id = $1")
+        .bind(healthy.config.id.as_uuid())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(materialized, 1);
+    let deferred_until: DateTime<Utc> = sqlx::query_scalar("SELECT next_run_at FROM pgtask.schedules WHERE id = $1")
+        .bind(broken)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert!(deferred_until >= before + TimeDelta::seconds(55));
+    assert!(store.next_schedule_delay().await.unwrap() > Some(Duration::ZERO));
+
+    store.pool().close().await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DROP DATABASE {database_name} WITH (FORCE)"
+    )))
+    .execute(&maintenance)
+    .await
+    .unwrap();
 }

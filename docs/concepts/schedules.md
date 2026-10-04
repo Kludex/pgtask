@@ -15,6 +15,20 @@ same trick used for every other piece of background maintenance in the system.
 If a worker dies in the middle, the transaction rolls back. The schedule keeps its old `next_run_at` and the next worker
 picks it up. There is no partially advanced schedule.
 
+## A schedule that cannot be materialized
+
+Each claimed schedule is materialized inside its own savepoint, so one bad row does not roll back the rest of the batch.
+
+A schedule fails the same way every time when its cron expression has no next occurrence (`0 0 0 30 2 *` asks for
+February 30), when the worker cannot read the row (one written by a newer release during a rolling deploy, for
+example), or when PostgreSQL rejects the tasks it would create. The worker logs a warning and moves that schedule's
+`next_run_at` one minute forward without creating tasks, then tries it again. Occurrences that fall inside that minute
+are not created. Other errors roll back the sweep, and the worker retries it with exponential backoff, up to
+`schedule_reconciliation_interval`.
+
+`Store::put_schedule` rejects a definition with no occurrence after its start. The SQL function `pgtask.put_schedule`
+does not evaluate cron expressions, so a client that writes schedules over SQL must check that itself.
+
 ## The guarantee that makes it safe
 
 A unique index on `(schedule_id, scheduled_for)` is what actually prevents duplicates:
