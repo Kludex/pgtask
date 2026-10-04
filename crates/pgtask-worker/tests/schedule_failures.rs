@@ -150,7 +150,6 @@ async fn an_unmaterializable_schedule_neither_spins_workers_nor_blocks_other_sch
         .fetch_one(store.pool())
         .await
         .unwrap();
-    println!("{claims} schedule sweeps and {materialized} healthy occurrences in {OBSERVED:?}");
     // One sweep per healthy occurrence, plus slack for wake-ups. Before the fix: thousands.
     assert!(claims <= 20, "{claims} schedule sweeps in {OBSERVED:?}");
     // Occurrences at roughly 0 s, 1 s, 2 s and 3 s.
