@@ -185,6 +185,12 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+Stop a worker with `worker.shutdown()` and then keep awaiting `run()`, as above. Handlers that are still running get
+`shutdown_grace` seconds to finish (`Worker(..., shutdown_grace=30.0)` is the default). After that they are cancelled,
+and their tasks go back to `pending` without using up an attempt. Cancelling the `run()` task does the same thing, then
+re-raises `CancelledError` once the worker has stopped. A second cancellation stops waiting immediately, and those
+tasks are recovered only when their leases expire.
+
 `step` stores the operation result as JSON and reuses it after a retry or restart. `sleep_for`, `sleep_until`, `wait_for_signal`, and `wait_for_result` suspend the task and release its worker slot. `spawn` creates the child and records its identifier atomically.
 
 Keep names and occurrences stable. Code outside a completed `step` can run again. Use `handler_version` when a deployment changes the order or meaning of durable operations.

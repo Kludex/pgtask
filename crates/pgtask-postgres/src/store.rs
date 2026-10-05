@@ -65,6 +65,8 @@ pub enum PostgresError {
     InvalidRetryPolicy,
     #[error("notification listener failed: {0}")]
     Notification(String),
+    #[error("notification listener lost its connection and reconnected; notifications sent meanwhile were missed")]
+    NotificationReconnected,
     #[error("invalid storage protocol range {minimum}..={maximum} returned by Postgres")]
     InvalidStorageProtocolRange { minimum: i32, maximum: i32 },
     #[error(
@@ -179,6 +181,7 @@ impl ReadyListener {
                 }
                 Ok(NotificationEvent::Ready(_)) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Ok(NotificationEvent::Disconnected(error)) => return Err(PostgresError::Notification(error)),
+                Ok(NotificationEvent::Reconnected) => return Err(PostgresError::NotificationReconnected),
                 Err(broadcast::error::RecvError::Closed) => {
                     return Err(PostgresError::Notification("notification hub stopped".to_owned()));
                 }
@@ -191,6 +194,8 @@ impl ReadyListener {
 enum NotificationEvent {
     Ready(Notification),
     Disconnected(String),
+    /// The connection dropped and was re-established, so notifications may have been missed.
+    Reconnected,
 }
 
 #[derive(Debug)]
@@ -333,7 +338,12 @@ async fn run_notification_hub(
     while let Some(command) = commands.recv().await {
         channels.extend(command.channels);
         let mut listener = match PgListener::connect_with(&pool).await {
-            Ok(listener) => listener,
+            Ok(mut listener) => {
+                // Reconnect inside try_recv, before it reports the lost connection, so the
+                // channels are listened to again by the time listeners are told to catch up.
+                listener.eager_reconnect(true);
+                listener
+            }
             Err(error) => {
                 let _ = command.ready.send(Err(error.to_string()));
                 continue;
@@ -366,13 +376,18 @@ async fn run_notification_hub(
                     }
                     let _ = command.ready.send(Ok(()));
                 }
-                notification = listener.recv() => {
+                // recv() would reconnect silently after EOF and similar I/O errors; try_recv()
+                // reports it, so listeners can catch up on what they missed.
+                notification = listener.try_recv() => {
                     match notification {
-                        Ok(notification) => {
+                        Ok(Some(notification)) => {
                             let _ = events.send(NotificationEvent::Ready(Notification {
                                 channel: notification.channel().to_owned(),
                                 payload: notification.payload().to_owned(),
                             }));
+                        }
+                        Ok(None) => {
+                            let _ = events.send(NotificationEvent::Reconnected);
                         }
                         Err(error) => {
                             let _ = events.send(NotificationEvent::Disconnected(error.to_string()));
@@ -1484,9 +1499,11 @@ impl Store {
 
         let wait = async {
             loop {
-                let notification = listener.recv().await?;
-                if notification.payload() != task_id.to_string() {
-                    continue;
+                match listener.recv().await {
+                    Ok(notification) if notification.payload() != task_id.to_string() => continue,
+                    // A missed completion notification is caught by reading the task again.
+                    Ok(_) | Err(PostgresError::NotificationReconnected) => {}
+                    Err(error) => return Err(error),
                 }
                 let result = self.task_result(task_id).await?.ok_or_else(|| {
                     PostgresError::InvalidTask("task disappeared while waiting for result".to_owned())
@@ -1595,6 +1612,25 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         Ok(renewed.into_iter().map(TaskId::from_uuid).collect())
+    }
+
+    /// Hands leased tasks back without charging an attempt, for a worker that stops before their
+    /// handlers finish. Each task becomes pending and claimable at once, and its attempt is
+    /// recorded as `released`. Returns the tasks this lease still owned.
+    pub async fn release_leases(&self, leases: &[LeaseRenewal]) -> Result<Vec<TaskId>, PostgresError> {
+        if leases.is_empty() {
+            return Ok(Vec::new());
+        }
+        let task_ids: Vec<_> = leases.iter().map(|lease| lease.task_id.as_uuid()).collect();
+        let attempts: Vec<_> = leases.iter().map(|lease| i32::from(lease.attempt)).collect();
+        let lease_tokens: Vec<_> = leases.iter().map(|lease| lease.lease_token.as_uuid()).collect();
+        let released: Vec<Uuid> = sqlx::query_scalar("SELECT * FROM pgtask.release_tasks($1, $2, $3)")
+            .bind(&task_ids)
+            .bind(&attempts)
+            .bind(&lease_tokens)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(released.into_iter().map(TaskId::from_uuid).collect())
     }
 
     pub async fn complete(

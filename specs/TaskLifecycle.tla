@@ -15,45 +15,59 @@
 (* `inflight` is the set of handler executions that still believe they own a  *)
 (* task. Expiry deliberately leaves them there, which is what makes the       *)
 (* fencing check meaningful.                                                 *)
+(*                                                                          *)
+(* `attempt` counts claims and is the fence; `failures` is failed_attempts,   *)
+(* the budget claim checks. They differ only through Release, a worker that  *)
+(* stops handing a task back unfinished: a new claim, no failure. Releases   *)
+(* are bounded by MaxReleases so the model stays finite, the way shutdowns   *)
+(* are finite in practice.                                                   *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
-CONSTANTS Tasks, Workers, MaxAttempts
+CONSTANTS Tasks, Workers, MaxAttempts, MaxReleases
 
 ASSUME MaxAttempts \in Nat /\ MaxAttempts > 0
+ASSUME MaxReleases \in Nat
 
 VARIABLES
     state,      \* state[t]: the task's state column
     attempt,    \* attempt[t]: the attempt counter
+    failures,   \* failures[t]: the failed_attempts column
     lease,      \* lease[t]: the fencing token, 0 when there is no lease
     inflight,   \* handler executions that think they hold a lease
-    nextToken   \* hands out unique lease tokens
+    nextToken,  \* hands out unique lease tokens
+    releases    \* how many releases have happened, across all tasks
 
-vars == <<state, attempt, lease, inflight, nextToken>>
+vars == <<state, attempt, failures, lease, inflight, nextToken, releases>>
 
 Terminal == {"succeeded", "failed", "cancelled"}
 States == {"pending", "running"} \union Terminal
 
-\* Every claim mints one token and each task is claimed at most MaxAttempts
-\* times, which bounds the token space for the model checker.
-MaxTokens == Cardinality(Tasks) * MaxAttempts
+\* Every claim mints one token. A task is claimed at most MaxAttempts times
+\* plus once per release, which bounds the token space for the model checker.
+MaxClaims == MaxAttempts + MaxReleases
+MaxTokens == Cardinality(Tasks) * MaxAttempts + MaxReleases
 
 \* A handler execution: worker w believes it holds task t at (a, tok).
-Handlers == [w: Workers, t: Tasks, a: 1..MaxAttempts, tok: 1..MaxTokens]
+Handlers == [w: Workers, t: Tasks, a: 1..MaxClaims, tok: 1..MaxTokens]
 
 TypeOK ==
     /\ state \in [Tasks -> States]
-    /\ attempt \in [Tasks -> 0..MaxAttempts]
+    /\ attempt \in [Tasks -> 0..MaxClaims]
+    /\ failures \in [Tasks -> 0..MaxAttempts]
     /\ lease \in [Tasks -> Nat]
     /\ inflight \subseteq Handlers
     /\ nextToken \in 1..(MaxTokens + 1)
+    /\ releases \in 0..MaxReleases
 
 Init ==
     /\ state = [t \in Tasks |-> "pending"]
     /\ attempt = [t \in Tasks |-> 0]
+    /\ failures = [t \in Tasks |-> 0]
     /\ lease = [t \in Tasks |-> 0]
     /\ inflight = {}
     /\ nextToken = 1
+    /\ releases = 0
 
 \* The fencing predicate, exactly as the SQL WHERE clauses spell it out:
 \* id matches, state is running, attempt matches, lease token matches.
@@ -67,13 +81,14 @@ Owns(h) ==
 (***************************************************************************)
 Claim(w, t) ==
     /\ state[t] = "pending"
-    /\ attempt[t] < MaxAttempts          \* claim filters attempt < max_attempts
+    /\ failures[t] < MaxAttempts         \* claim filters failed_attempts < max_attempts
     /\ state' = [state EXCEPT ![t] = "running"]
     /\ attempt' = [attempt EXCEPT ![t] = @ + 1]
     /\ lease' = [lease EXCEPT ![t] = nextToken]
     /\ nextToken' = nextToken + 1
     /\ inflight' = inflight \union
          {[w |-> w, t |-> t, a |-> attempt[t] + 1, tok |-> nextToken]}
+    /\ UNCHANGED <<failures, releases>>
 
 (***************************************************************************)
 (* pgtask.complete_task / fail_task, both fenced                            *)
@@ -84,24 +99,43 @@ Complete(h) ==
     /\ state' = [state EXCEPT ![h.t] = "succeeded"]
     /\ lease' = [lease EXCEPT ![h.t] = 0]
     /\ inflight' = inflight \ {h}
-    /\ UNCHANGED <<attempt, nextToken>>
+    /\ UNCHANGED <<attempt, failures, nextToken, releases>>
 
 FailWithRetry(h) ==
     /\ h \in inflight
     /\ Owns(h)
-    /\ attempt[h.t] < MaxAttempts
+    /\ failures[h.t] + 1 < MaxAttempts
     /\ state' = [state EXCEPT ![h.t] = "pending"]
+    /\ failures' = [failures EXCEPT ![h.t] = @ + 1]
     /\ lease' = [lease EXCEPT ![h.t] = 0]
     /\ inflight' = inflight \ {h}
-    /\ UNCHANGED <<attempt, nextToken>>
+    /\ UNCHANGED <<attempt, nextToken, releases>>
 
 FailTerminally(h) ==
     /\ h \in inflight
     /\ Owns(h)
     /\ state' = [state EXCEPT ![h.t] = "failed"]
+    /\ failures' = [failures EXCEPT ![h.t] = @ + 1]
     /\ lease' = [lease EXCEPT ![h.t] = 0]
     /\ inflight' = inflight \ {h}
-    /\ UNCHANGED <<attempt, nextToken>>
+    /\ UNCHANGED <<attempt, nextToken, releases>>
+
+(***************************************************************************)
+(* pgtask.release_tasks, fenced like the others                             *)
+(*                                                                          *)
+(* A worker shutting down aborts a handler and hands its task back: pending, *)
+(* claimable at once, and failures untouched, because the handler did not    *)
+(* fail. The next claim still gets a new attempt and token.                  *)
+(***************************************************************************)
+Release(h) ==
+    /\ h \in inflight
+    /\ Owns(h)
+    /\ releases < MaxReleases
+    /\ state' = [state EXCEPT ![h.t] = "pending"]
+    /\ lease' = [lease EXCEPT ![h.t] = 0]
+    /\ inflight' = inflight \ {h}
+    /\ releases' = releases + 1
+    /\ UNCHANGED <<attempt, failures, nextToken>>
 
 \* A handler that no longer owns its task discovers this and gives up. The
 \* SQL matched zero rows, so nothing was written.
@@ -109,7 +143,7 @@ LeaseLost(h) ==
     /\ h \in inflight
     /\ ~Owns(h)
     /\ inflight' = inflight \ {h}
-    /\ UNCHANGED <<state, attempt, lease, nextToken>>
+    /\ UNCHANGED <<state, attempt, failures, lease, nextToken, releases>>
 
 (***************************************************************************)
 (* pgtask.recover_expired                                                   *)
@@ -121,9 +155,10 @@ LeaseLost(h) ==
 ExpireLease(t) ==
     /\ state[t] = "running"
     /\ state' = [state EXCEPT ![t] =
-                    IF attempt[t] < MaxAttempts THEN "pending" ELSE "failed"]
+                    IF failures[t] + 1 < MaxAttempts THEN "pending" ELSE "failed"]
+    /\ failures' = [failures EXCEPT ![t] = @ + 1]
     /\ lease' = [lease EXCEPT ![t] = 0]
-    /\ UNCHANGED <<attempt, inflight, nextToken>>
+    /\ UNCHANGED <<attempt, inflight, nextToken, releases>>
 
 (***************************************************************************)
 (* pgtask.cancel_task on a task that is not running                         *)
@@ -131,12 +166,12 @@ ExpireLease(t) ==
 Cancel(t) ==
     /\ state[t] = "pending"
     /\ state' = [state EXCEPT ![t] = "cancelled"]
-    /\ UNCHANGED <<attempt, lease, inflight, nextToken>>
+    /\ UNCHANGED <<attempt, failures, lease, inflight, nextToken, releases>>
 
 Next ==
     \/ \E w \in Workers, t \in Tasks : Claim(w, t)
     \/ \E h \in inflight :
-         Complete(h) \/ FailWithRetry(h) \/ FailTerminally(h) \/ LeaseLost(h)
+         Complete(h) \/ FailWithRetry(h) \/ FailTerminally(h) \/ Release(h) \/ LeaseLost(h)
     \/ \E t \in Tasks : ExpireLease(t) \/ Cancel(t)
     \/ (\A t \in Tasks : state[t] \in Terminal) /\ inflight = {} /\ UNCHANGED vars
 
@@ -166,9 +201,13 @@ RunningIffLeased ==
 TerminalUnleased ==
     \A t \in Tasks : state[t] \in Terminal => lease[t] = 0
 
-\* claim never runs a task beyond its budget.
+\* claim never runs a task beyond its failure budget, and only a release buys
+\* an extra run. failed_attempts <= attempt mirrors the table's CHECK.
 AttemptBounded ==
-    \A t \in Tasks : attempt[t] <= MaxAttempts
+    \A t \in Tasks :
+        /\ failures[t] <= MaxAttempts
+        /\ failures[t] <= attempt[t]
+        /\ attempt[t] <= MaxAttempts + releases
 
 \* Lease tokens are never reused, so a stale token can never be mistaken for
 \* a live one.
@@ -187,7 +226,7 @@ Safety ==
 \* attempt and lease-token fence.
 FencedMutations ==
     [][\A h \in inflight :
-        (Complete(h) \/ FailWithRetry(h) \/ FailTerminally(h)) => Owns(h)]_vars
+        (Complete(h) \/ FailWithRetry(h) \/ FailTerminally(h) \/ Release(h)) => Owns(h)]_vars
 
 \* Terminal states are absorbing: nothing ever moves a finished task.
 TerminalIsStable ==
@@ -228,5 +267,11 @@ CoverExhausted == ~(\E t \in Tasks : attempt[t] = MaxAttempts)
 \* at-least-once delivery means.
 CoverConcurrentHandlers ==
     ~(\E h1, h2 \in inflight : h1 # h2 /\ h1.t = h2.t)
+
+\* A task that has been claimed MaxAttempts times is pending again and
+\* claimable. Only a release gets there, so this witnesses that Release fires
+\* and that it spends no budget.
+CoverReleased ==
+    ~(\E t \in Tasks : state[t] = "pending" /\ attempt[t] = MaxAttempts)
 
 =============================================================================

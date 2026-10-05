@@ -133,6 +133,9 @@ function recover_wait_timeouts(p_limit integer) -> bigint VOLATILE SECURITY DEFI
 function register_worker(p_worker_id uuid, p_queue_name text, p_version text, p_task_names text[], p_handler_versions integer[], p_retry_kinds text[], p_retry_base_delay_milliseconds bigint[], p_retry_factors integer[], p_retry_max_delay_milliseconds bigint[], p_ttl_milliseconds bigint) -> void VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
 
+function release_tasks(p_task_ids uuid[], p_attempts integer[], p_lease_tokens uuid[]) -> SETOF uuid VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
+  grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
+
 function renew_leases(p_task_ids uuid[], p_attempts integer[], p_lease_tokens uuid[], p_lease_milliseconds bigint) -> SETOF uuid VOLATILE SECURITY DEFINER SET search_path=pg_catalog, pgtask
   grants: pgtask_surface_worker=X/{owner}, {owner}=X/{owner}
 
