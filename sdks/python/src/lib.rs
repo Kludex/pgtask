@@ -51,9 +51,17 @@ struct PythonWorker {
     handlers: Mutex<Vec<PythonHandler>>,
     lease_duration: Duration,
     poll_interval: Duration,
+    retention: RetentionOptions,
     health_address: Option<SocketAddr>,
     queues: Vec<QueueName>,
     shutdown: CancellationToken,
+}
+
+#[derive(Clone, Copy)]
+struct RetentionOptions {
+    enabled: bool,
+    batch_size: NonZeroU16,
+    interval: Duration,
 }
 
 #[derive(Deserialize)]
@@ -65,6 +73,9 @@ struct PythonWorkerOptions {
     listener_url: Option<String>,
     max_query_connections: u32,
     max_listener_connections: u32,
+    retention_enabled: bool,
+    retention_batch_size: u16,
+    retention_interval: f64,
 }
 
 struct PythonFutureGuard {
@@ -355,6 +366,14 @@ impl PythonWorker {
             handlers: Mutex::new(Vec::new()),
             lease_duration: Duration::try_from_secs_f64(options.lease_duration).map_err(value_error)?,
             poll_interval: Duration::try_from_secs_f64(options.poll_interval).map_err(value_error)?,
+            retention: RetentionOptions {
+                enabled: options.retention_enabled,
+                batch_size: NonZeroU16::new(options.retention_batch_size)
+                    .ok_or_else(|| PyValueError::new_err("retention_batch_size must be positive"))?,
+                interval: Some(Duration::try_from_secs_f64(options.retention_interval).map_err(value_error)?)
+                    .filter(|interval| !interval.is_zero())
+                    .ok_or_else(|| PyValueError::new_err("retention_interval must be positive"))?,
+            },
             health_address: options
                 .health_address
                 .map(|value| value.parse())
@@ -411,6 +430,7 @@ impl PythonWorker {
         let concurrency = self.concurrency;
         let lease_duration = self.lease_duration;
         let poll_interval = self.poll_interval;
+        let retention = self.retention;
         let health_address = self.health_address;
         let shutdown = self.shutdown.clone();
         pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals.clone(), async move {
@@ -433,6 +453,9 @@ impl PythonWorker {
             config.claim_batch_size = concurrency;
             config.lease_duration = lease_duration;
             config.poll_interval = poll_interval;
+            config.retention_enabled = retention.enabled;
+            config.retention_batch_size = retention.batch_size;
+            config.retention_interval = retention.interval;
             config.health_address = health_address;
             Worker::new(store, registry, config)
                 .map_err(runtime_error)?

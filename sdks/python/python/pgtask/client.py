@@ -369,7 +369,17 @@ class Worker:
         listener_url: str | None = None,
         max_query_connections: int = 10,
         max_listener_connections: int = 1,
+        retention_enabled: bool = True,
+        retention_batch_size: int = 100,
+        retention_interval: float = 60.0,
     ) -> None:
+        """Run handlers from one or more registries.
+
+        Every worker also deletes expired terminal tasks, idempotency keys and worker rows. Each
+        ``retention_interval`` seconds it deletes them in batches of ``retention_batch_size`` until
+        a batch comes back short. Set ``retention_enabled=False`` when a separate process runs
+        retention.
+        """
         registries = [registry] if isinstance(registry, TaskRegistry) else list(registry)
         if not registries:
             raise ValueError("at least one registry is required")
@@ -387,6 +397,9 @@ class Worker:
                 "listener_url": listener_url,
                 "max_query_connections": max_query_connections,
                 "max_listener_connections": max_listener_connections,
+                "retention_enabled": retention_enabled,
+                "retention_batch_size": retention_batch_size,
+                "retention_interval": retention_interval,
             },
         )
         definitions = [definition for entry in registries for definition in entry.definitions]

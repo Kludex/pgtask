@@ -2399,3 +2399,58 @@ async fn assert_notification_channel(
     .unwrap();
     assert_eq!(channels, [expected_channel]);
 }
+
+#[tokio::test]
+async fn expired_worker_rows_are_deleted_after_their_grace_period() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let queue_name = QueueName::new(format!("expired-workers-{}", Uuid::new_v4())).unwrap();
+    let capabilities = [(
+        TaskName::new("expired-workers").unwrap(),
+        HandlerVersion::default(),
+        RetryPolicy::Never,
+    )];
+    let expired = WorkerId::new();
+    store
+        .register_worker(expired, &queue_name, "test", &capabilities, Duration::from_millis(1))
+        .await
+        .unwrap();
+    let live = WorkerId::new();
+    store
+        .register_worker(live, &queue_name, "test", &capabilities, Duration::from_hours(1))
+        .await
+        .unwrap();
+    // Other tests read their own rows right after expiring them; stay well clear of that.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(matches!(
+        store.delete_expired_workers(Duration::ZERO, 0).await,
+        Err(PostgresError::InvalidRetentionLimit)
+    ));
+    // Still inside its grace period.
+    while store
+        .delete_expired_workers(Duration::from_hours(1), 100)
+        .await
+        .unwrap()
+        == 100
+    {}
+    assert!(store.get_worker(expired).await.unwrap().is_some());
+    while store
+        .delete_expired_workers(Duration::from_millis(200), 100)
+        .await
+        .unwrap()
+        == 100
+    {}
+    assert!(store.get_worker(expired).await.unwrap().is_none());
+    assert!(store.get_worker(live).await.unwrap().is_some());
+    let capabilities: i64 = sqlx::query_scalar("SELECT count(*) FROM pgtask.worker_capabilities WHERE worker_id = $1")
+        .bind(expired.as_uuid())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(capabilities, 0);
+}

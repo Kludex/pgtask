@@ -74,6 +74,9 @@ def test_public_python_contract() -> None:
         "listener_url",
         "max_query_connections",
         "max_listener_connections",
+        "retention_enabled",
+        "retention_batch_size",
+        "retention_interval",
     )
 
 
@@ -288,6 +291,12 @@ async def test_worker_configuration_rejects_invalid_values() -> None:
         Worker(database_url, empty, lease_duration=-1)
     with pytest.raises(ValueError):
         Worker(database_url, empty, health_address="not-an-address")
+    with pytest.raises(ValueError, match="retention_batch_size must be positive"):
+        Worker(database_url, empty, retention_batch_size=0)
+    with pytest.raises(ValueError, match="retention_interval must be positive"):
+        Worker(database_url, empty, retention_interval=0)
+    with pytest.raises(ValueError):
+        Worker(database_url, empty, retention_interval=float("nan"))
 
     async def handler(task: Task, payload: None) -> None:
         assert task
@@ -562,3 +571,62 @@ async def test_ambient_task_is_reachable_from_any_frame_below_the_handler() -> N
     assert pgtask.get_current_task() is None
     worker.shutdown()
     await running
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("retention_enabled", [True, False])
+async def test_python_worker_retention_options_are_honoured(retention_enabled: bool) -> None:
+    database_url = os.environ["PGTASK_DATABASE_URL"]
+    client = await Client.connect(database_url)
+    await client.migrate()
+    queue_name = f"python-retention-{os.urandom(8).hex()}"
+    registry = TaskRegistry(queue_name)
+    ran: list[str] = []
+
+    @registry.task("python.retained")
+    async def retained(task: Task, payload: None) -> None:
+        assert payload is None
+        ran.append(task.id)
+
+    async with await AsyncConnection.connect(database_url, autocommit=True) as connection:
+
+        async def count(state: str | None = None) -> int:
+            cursor = await connection.execute(
+                "SELECT count(*)::integer FROM pgtask.task_view WHERE queue_name = %s AND state = COALESCE(%s, state)",
+                (queue_name, state),
+            )
+            row = await cursor.fetchone()
+            assert row is not None
+            return cast(int, row[0])
+
+        async def until(state: str | None, expected: int) -> None:
+            while await count(state) != expected:
+                await asyncio.sleep(0.01)
+
+        # Terminal tasks in this queue expire as soon as they finish. Their results are never read,
+        # because retention may delete a task before anyone looks at it.
+        await connection.execute("SELECT pgtask.put_queue(%s, 0, 0, NULL, 300)", (queue_name,))
+        for _ in range(3):
+            await client.enqueue(retained.request(None))
+        assert await count() == 3
+        worker = Worker(
+            database_url,
+            registry,
+            retention_enabled=retention_enabled,
+            retention_batch_size=1,
+            retention_interval=0.05,
+        )
+        running = asyncio.create_task(worker.run())
+        try:
+            if retention_enabled:
+                # Batches of one, drained in a tick, remove all three finished tasks.
+                await asyncio.wait_for(until(None, 0), timeout=5)
+                assert len(ran) == 3
+            else:
+                await asyncio.wait_for(until("succeeded", 3), timeout=5)
+                # Several retention intervals pass and nothing is deleted.
+                await asyncio.sleep(0.3)
+                assert await count("succeeded") == 3
+        finally:
+            worker.shutdown()
+            await running
