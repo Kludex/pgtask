@@ -8,8 +8,8 @@ use axum::{
 use chrono::{TimeDelta, Utc};
 use pgtask::{
     core::{
-        EnqueueRequest, HandlerVersion, QueueName, RetryPolicy, ScheduleConfig, ScheduleDefinition, ScheduleName,
-        SignalName, StepName, TaskName, WorkerId,
+        EnqueueRequest, HandlerVersion, QueueConfig, QueueName, RetryPolicy, ScheduleConfig, ScheduleDefinition,
+        ScheduleName, SignalName, StepName, TaskName, WorkerId,
     },
     postgres::Store,
 };
@@ -216,13 +216,26 @@ async fn observer_pages_cover_queues_tasks_schedules_workers_and_not_found() {
     let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
         return;
     };
-    let (app, _store, task_id, schedule_id, worker_id) = seeded_application(&database_url).await;
+    let (app, store, task_id, schedule_id, worker_id) = seeded_application(&database_url).await;
     for path in ["/", "/healthz", "/tasks", "/schedules", "/workers"] {
         assert_eq!(response(&app, path).await.0, StatusCode::OK);
     }
-    let (_, queues) = response(&app, "/").await;
+    // The queue list is paginated by name and shared with every other test in the database, so
+    // start the page just before this test's queue and look at its own row.
+    let queue_name: String = sqlx::query_scalar("SELECT queue_name FROM pgtask.task_view WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let cursor = &queue_name[..queue_name.len() - 1];
+    let (_, queues) = response(&app, &format!("/?after={cursor}")).await;
     assert!(queues.contains("Routable"));
     assert!(queues.contains("Unroutable"));
+    let queue_row = queues
+        .split("<tr>")
+        .find(|row| row.contains(&format!("<td>{queue_name}</td>")))
+        .expect("the seeded queue is listed");
+    assert!(queue_row.contains("<td class=\"state\">active</td>"));
     let (_, tasks) = response(&app, "/tasks?query=%3Cscript%3E").await;
     assert!(tasks.contains("&lt;script&gt;"));
     assert!(!tasks.contains("value=\"<script>\""));
@@ -241,6 +254,39 @@ async fn observer_pages_cover_queues_tasks_schedules_workers_and_not_found() {
     ] {
         assert_eq!(response(&app, path).await.0, StatusCode::NOT_FOUND);
     }
+}
+
+#[tokio::test]
+async fn queue_list_is_paginated() {
+    let Ok(database_url) = std::env::var("PGTASK_DATABASE_URL") else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let prefix = format!("page-{}-", Uuid::new_v4());
+    for index in 0..105 {
+        let queue_name = QueueName::new(format!("{prefix}{index:03}")).unwrap();
+        store.put_queue(&QueueConfig::new(queue_name)).await.unwrap();
+    }
+
+    let app = application(store.pool().clone());
+    let (_, first_page) = response(&app, "/").await;
+    assert_eq!(first_page.matches("<td class=\"state\">").count(), 100);
+    assert!(first_page.contains("Next page"));
+
+    // No other queue sorts between these names, so a page starting at the prefix holds the
+    // first 100 of them and links to the rest.
+    let (_, own_page) = response(&app, &format!("/?after={prefix}")).await;
+    assert!(own_page.contains(&format!("<td>{prefix}000</td>")));
+    assert!(own_page.contains(&format!("<td>{prefix}099</td>")));
+    assert!(!own_page.contains(&format!("<td>{prefix}100</td>")));
+    assert!(own_page.contains(&format!("<a href=\"/?after={prefix}099\">Next page</a>")));
+
+    let (_, next_page) = response(&app, &format!("/?after={prefix}099")).await;
+    assert!(!next_page.contains(&format!("<td>{prefix}099</td>")));
+    let first_queue = next_page.find(&format!("<td>{prefix}100</td>")).unwrap();
+    let last_queue = next_page.find(&format!("<td>{prefix}104</td>")).unwrap();
+    assert!(first_queue < last_queue);
 }
 
 #[tokio::test]

@@ -67,7 +67,7 @@ struct TaskSearch {
 }
 
 #[derive(Deserialize)]
-struct SchedulePagination {
+struct NamePagination {
     after: Option<String>,
 }
 
@@ -110,8 +110,13 @@ async fn health(State(state): State<AppState>) -> Result<&'static str, WebError>
     Ok("healthy")
 }
 
-async fn dashboard(State(state): State<AppState>) -> Result<Html<String>, WebError> {
-    Ok(Html(pages::dashboard(&Dashboard::load(&state.pool).await?)))
+async fn dashboard(
+    State(state): State<AppState>,
+    Query(pagination): Query<NamePagination>,
+) -> Result<Html<String>, WebError> {
+    Ok(Html(pages::dashboard(
+        &Dashboard::load(&state.pool, pagination.after.as_deref()).await?,
+    )))
 }
 
 async fn tasks(State(state): State<AppState>, Query(search): Query<TaskSearch>) -> Result<Html<String>, WebError> {
@@ -130,7 +135,7 @@ async fn task(State(state): State<AppState>, Path(task_id): Path<Uuid>) -> Resul
 
 async fn schedules(
     State(state): State<AppState>,
-    Query(pagination): Query<SchedulePagination>,
+    Query(pagination): Query<NamePagination>,
 ) -> Result<Html<String>, WebError> {
     let page = model::ScheduleSummary::page(&state.pool, pagination.after.as_deref()).await?;
     Ok(Html(pages::schedules(&page.items, page.next.as_deref())))

@@ -128,15 +128,21 @@ fn worker_rows(workers: &[WorkerSummary]) -> String {
 }
 
 pub fn dashboard(data: &Dashboard) -> String {
+    let pagination = data.queues.next.as_deref().map_or_else(String::new, |cursor| {
+        format!(
+            "<div class=\"pagination\"><a href=\"/?after={}\">Next page</a></div>",
+            encode_double_quoted_attribute(cursor),
+        )
+    });
     let body = format!(
         "<h1>Queues</h1><table><thead><tr><th>Queue</th><th>Status</th><th>Pending</th><th>Ready</th>\
          <th>Routable</th><th>Unroutable</th><th>Running</th><th>Waiting</th><th>Terminal</th>\
          <th>Capacity</th><th>Starvation rescue</th></tr></thead>\
-         <tbody>{}</tbody></table>\
+         <tbody>{}</tbody></table>{pagination}\
          <div class=\"grid\"><div class=\"card\"><h2>Recent tasks</h2><p>{} visible</p><a href=\"/tasks\">Inspect tasks</a></div>\
          <div class=\"card\"><h2>Schedules</h2><p>{} configured</p><a href=\"/schedules\">Inspect schedules</a></div>\
          <div class=\"card\"><h2>Workers</h2><p>{} registered</p><a href=\"/workers\">Inspect workers</a></div></div>",
-        queue_rows(&data.queues),
+        queue_rows(&data.queues.items),
         data.tasks.len(),
         data.schedule_count,
         data.worker_count,
