@@ -48,10 +48,13 @@ def test_public_python_contract() -> None:
         "TaskRegistry",
         "TaskResult",
         "TaskState",
+        "TaskSuspended",
         "TransactionConnection",
         "Worker",
         "get_current_task",
     ]
+    assert issubclass(pgtask.TaskSuspended, Exception)
+    assert pgtask.TaskSuspended is pgtask._native.TaskSuspended
     assert tuple(inspect.signature(TaskRegistry.task).parameters) == (
         "self",
         "name",
@@ -88,7 +91,7 @@ async def test_python_worker_executes_a_registered_async_handler() -> None:
     await client.migrate()
     queue_name = f"python-{os.urandom(8).hex()}"
     registry = TaskRegistry(queue_name)
-    attempts: list[int] = []
+    attempts: list[tuple[int, int]] = []
 
     @registry.task("python.echo")
     async def echo(task: Task, payload: dict[str, int]) -> JSONValue:
@@ -104,7 +107,7 @@ async def test_python_worker_executes_a_registered_async_handler() -> None:
     @registry.task("python.retry", retry_delay=0.001)
     async def retry(task: Task, payload: dict[str, JSONValue]) -> JSONValue:
         assert payload == {}
-        attempts.append(task.attempt)
+        attempts.append((task.attempt, task.failed_attempts))
         if task.attempt == 1:
             raise RuntimeError("retry once")
         return {"attempt": task.attempt}
@@ -125,7 +128,7 @@ async def test_python_worker_executes_a_registered_async_handler() -> None:
     retried = await retry_task.result(timeout=2.0)
     assert retried is not None
     assert retried.result == {"attempt": 2}
-    assert attempts == [1, 2]
+    assert attempts == [(1, 0), (2, 1)]
     worker.shutdown()
     await running
 
@@ -492,6 +495,7 @@ async def test_python_handler_uses_durable_workflow_operations() -> None:
     registry = TaskRegistry(queue_name)
     waiting = asyncio.Event()
     step_calls = 0
+    runs: list[tuple[int, int]] = []
 
     @registry.task("python.durable-child")
     async def child(task: Task, payload: dict[str, int]) -> int:
@@ -502,6 +506,7 @@ async def test_python_handler_uses_durable_workflow_operations() -> None:
     @registry.task("python.durable-parent")
     async def parent(task: Task, payload: dict[str, int]) -> JSONValue:
         assert task.parent_task_id is None
+        runs.append((task.attempt, task.failed_attempts))
 
         async def checkpointed_value() -> int:
             nonlocal step_calls
@@ -533,6 +538,10 @@ async def test_python_handler_uses_durable_workflow_operations() -> None:
         "child": {"error": None, "result": 42, "state": "succeeded"},
     }
     assert step_calls == 1
+    # Every resume is a new claim with a higher attempt, and none of them is a failure.
+    assert [attempt for attempt, _ in runs] == list(range(1, len(runs) + 1))
+    assert len(runs) > 1
+    assert {failed for _, failed in runs} == {0}
     worker.shutdown()
     await running
 

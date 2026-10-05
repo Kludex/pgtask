@@ -160,6 +160,11 @@ class Task:
     headers: dict[str, JSONValue]
     state: TaskState
     attempt: int
+    """How many times the task has been claimed, this run included. A resume after a durable sleep, a signal or
+    result wait, or a release on shutdown is a new claim, so this is not a count of failures."""
+    failed_attempts: int
+    """How many earlier runs failed or lost their lease. Only these count against ``max_attempts``: a failure in
+    this run is retried only while ``failed_attempts + 1 < max_attempts``."""
     max_attempts: int
     run_at: datetime
     created_at: datetime
@@ -177,6 +182,7 @@ class Task:
             headers=cast(dict[str, JSONValue], value["headers"]),
             state=cast(TaskState, value["state"]),
             attempt=int(value["attempt"]),
+            failed_attempts=int(value["failed_attempts"]),
             max_attempts=int(value["max_attempts"]),
             run_at=datetime.fromisoformat(value["run_at"].replace("Z", "+00:00")),
             created_at=datetime.fromisoformat(value["created_at"].replace("Z", "+00:00")),

@@ -193,6 +193,19 @@ tasks are recovered only when their leases expire.
 
 `step` stores the operation result as JSON and reuses it after a retry or restart. `sleep_for`, `sleep_until`, `wait_for_signal`, and `wait_for_result` suspend the task and release its worker slot. `spawn` creates the child and records its identifier atomically.
 
+A suspending call unwinds the handler by raising `pgtask.TaskSuspended`. It is an ordinary `Exception`, so a handler that wraps durable calls in `except Exception` must re-raise it first, or the worker records a failure instead of a suspension:
+
+```python
+try:
+    await task.sleep_for("settle", 0.1)
+except pgtask.TaskSuspended:
+    raise
+except Exception:
+    ...
+```
+
+Each resume is a new claim, so `task.attempt` counts suspensions as well as retries. `task.failed_attempts` counts only the runs that failed or lost their lease, which are the ones `max_attempts` limits: a failure in the current run is retried only while `task.failed_attempts + 1 < task.max_attempts`.
+
 Keep names and occurrences stable. Code outside a completed `step` can run again. Use `handler_version` when a deployment changes the order or meaning of durable operations.
 
 ## Reach the task from anywhere below the handler
