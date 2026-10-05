@@ -29,6 +29,7 @@ use tokio_util::sync::CancellationToken;
 pub use pgtask::core::{STORAGE_PROTOCOL_MAX_VERSION, STORAGE_PROTOCOL_MIN_VERSION, STORAGE_PROTOCOL_VERSION};
 
 create_exception!(_native, TaskSuspended, PyException);
+create_exception!(_native, NonRetryableError, PyException);
 
 #[pyclass(name = "Client")]
 struct PythonClient {
@@ -538,7 +539,7 @@ async fn run_python_handler(
             if error.is_instance_of::<TaskSuspended>(py) {
                 HandlerError::suspended()
             } else {
-                HandlerError::retryable(error.to_string())
+                python_failure(py, &error)
             }
         })
     })?;
@@ -579,7 +580,7 @@ async fn run_python_operation(
     .map_err(|error: PyErr| HandlerError::retryable(error.to_string()))?;
     let result = future
         .await
-        .map_err(|error| HandlerError::retryable(error.to_string()))?;
+        .map_err(|error| Python::attach(|py| python_failure(py, &error)))?;
     Python::attach(|py| depythonize(result.bind(py)))
         .map_err(|error| HandlerError::terminal(format!("step returned invalid JSON: {error}")))
 }
@@ -602,6 +603,25 @@ fn value_error(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
+/// Fails terminally when the exception is a `NonRetryableError` or was raised from one.
+fn python_failure(py: Python<'_>, error: &PyErr) -> HandlerError {
+    let mut seen = Vec::new();
+    let mut current = Some(error.clone_ref(py));
+    while let Some(exception) = current {
+        if seen.contains(&exception.value(py).as_ptr()) {
+            break;
+        }
+        if exception.is_instance_of::<NonRetryableError>(py) {
+            let mut failure = HandlerError::terminal(error.to_string());
+            failure.error["retryable"] = Value::Bool(false);
+            return failure;
+        }
+        seen.push(exception.value(py).as_ptr());
+        current = exception.cause(py);
+    }
+    HandlerError::retryable(error.to_string())
+}
+
 fn handler_error(error: &HandlerError) -> PyErr {
     if error.is_suspended() {
         TaskSuspended::new_err("task suspended")
@@ -611,7 +631,11 @@ fn handler_error(error: &HandlerError) -> PyErr {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("task handler failed");
-        PyRuntimeError::new_err(message.to_owned())
+        if error.retryable {
+            PyRuntimeError::new_err(message.to_owned())
+        } else {
+            NonRetryableError::new_err(message.to_owned())
+        }
     }
 }
 
@@ -622,5 +646,6 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PythonTaskContext>()?;
     module.add_class::<PythonWorker>()?;
     module.add("TaskSuspended", module.py().get_type::<TaskSuspended>())?;
+    module.add("NonRetryableError", module.py().get_type::<NonRetryableError>())?;
     Ok(())
 }

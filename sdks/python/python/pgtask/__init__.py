@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pgtask._native import TaskSuspended
+from pgtask._native import NonRetryableError, TaskSuspended
 from pgtask.client import (
     BatchTransactionConnection,
     Client,
@@ -23,6 +23,7 @@ __all__ = [
     "Client",
     "EnqueueRequest",
     "JSONValue",
+    "NonRetryableError",
     "Task",
     "TaskDefinition",
     "TaskHandle",
