@@ -52,6 +52,16 @@ def parked_tests(only_target: str | None) -> list[str]:
     return [path for path in EXCLUDED_TESTS if not path.endswith(f"/{only_target}.rs")]
 
 
+# The kernel no longer reads `failed_attempts` bare: rows written before it was
+# added fall back to counting their failed and lost attempts.
+HISTORICAL_FAILURES = (
+    "(SELECT count(*)::integer FROM pgtask.attempts AS history "
+    "WHERE history.task_id = tasks.id AND history.state IN ('failed', 'lost')))"
+)
+FAILED_ATTEMPTS = "COALESCE(failed_attempts, " + HISTORICAL_FAILURES
+TASKS_FAILED_ATTEMPTS = "COALESCE(tasks.failed_attempts, " + HISTORICAL_FAILURES
+
+
 @dataclasses.dataclass(frozen=True)
 class Mutant:
     name: str
@@ -64,6 +74,10 @@ class Mutant:
     """How many copies of `old` to replace. A predicate repeated across CTEs has
     to be removed from all of them, or the untouched copy still enforces the
     rule and the mutant survives for the wrong reason."""
+    equivalent: str = ""
+    """Why no test can kill this mutant, when that has been worked out. An
+    equivalent mutant is still checked to apply, so it cannot drift silently,
+    but it is not run or scored: a survivor nothing could kill is not a gap."""
 
 
 MUTANTS: list[Mutant] = [
@@ -102,6 +116,8 @@ MUTANTS: list[Mutant] = [
         "AND attempt = p_attempt",
         "",
         "A mutation applies only while the attempt number still matches.",
+        equivalent="Every claim mints a fresh random lease token, so the token alone already "
+        "identifies the attempt; nothing holds the current token with a different attempt.",
     ),
     Mutant(
         "fencing-complete-ignores-state",
@@ -109,6 +125,8 @@ MUTANTS: list[Mutant] = [
         "AND state = 'running'",
         "",
         "A mutation applies only while the task is still running.",
+        equivalent="Every transition out of running clears lease_token in the same UPDATE, so "
+        "no presented token can match a task that is not running.",
     ),
     Mutant(
         "fencing-fail-ignores-lease-token",
@@ -159,6 +177,8 @@ MUTANTS: list[Mutant] = [
         "AND tasks.cancel_requested_at IS NULL",
         "",
         "A heartbeat cancels the handler once cancellation is requested.",
+        equivalent="Every write of cancel_requested_at also sets state = 'cancelled' and clears "
+        "lease_token in the same UPDATE, so the state and token checks already refuse the renewal.",
     ),
     Mutant(
         "cancel-children-ignores-state",
@@ -171,7 +191,7 @@ MUTANTS: list[Mutant] = [
     Mutant(
         "attempts-claim-ignores-budget",
         "pgtask.claim(text, uuid, text[], integer[], integer, bigint)",
-        "AND tasks.failed_attempts < tasks.max_attempts",
+        f"AND {TASKS_FAILED_ATTEMPTS} < tasks.max_attempts",
         "",
         "claim filters out tasks that have exhausted their failure budget.",
         # Once in the starvation CTE and once in the priority CTE.
@@ -180,16 +200,16 @@ MUTANTS: list[Mutant] = [
     Mutant(
         "attempts-fail-off-by-one",
         "pgtask.fail_task(uuid, integer, uuid, jsonb, bigint)",
-        "failed_attempts + 1 < max_attempts",
-        "failed_attempts + 1 <= max_attempts",
+        f"{FAILED_ATTEMPTS} + 1 < max_attempts",
+        f"{FAILED_ATTEMPTS} + 1 <= max_attempts",
         "A task retries only while failed attempts remain.",
         occurrences=2,
     ),
     Mutant(
         "attempts-recover-off-by-one",
         "pgtask.recover_expired(text, integer)",
-        "tasks.failed_attempts + 1 < tasks.max_attempts",
-        "tasks.failed_attempts + 1 <= tasks.max_attempts",
+        f"{TASKS_FAILED_ATTEMPTS} + 1 < tasks.max_attempts",
+        f"{TASKS_FAILED_ATTEMPTS} + 1 <= tasks.max_attempts",
         "Recovery fails a task when no failed attempts remain.",
         occurrences=3,
     ),
@@ -197,8 +217,8 @@ MUTANTS: list[Mutant] = [
     Mutant(
         "schedule-claim-ignores-run-at",
         "pgtask.claim(text, uuid, text[], integer[], integer, bigint)",
-        "AND tasks.run_at <= statement_timestamp()\n            AND tasks.failed_attempts",
-        "AND tasks.failed_attempts",
+        "AND tasks.run_at <= statement_timestamp()\n            AND COALESCE(tasks.failed_attempts",
+        "AND COALESCE(tasks.failed_attempts",
         "A task does not run before its run_at time.",
     ),
     Mutant(
@@ -389,6 +409,7 @@ def main() -> int:
 
     killed: list[Mutant] = []
     survived: list[Mutant] = []
+    equivalent: list[Mutant] = []
     inconclusive: list[Mutant] = []
     inapplicable: list[tuple[Mutant, str]] = []
 
@@ -415,6 +436,10 @@ def main() -> int:
             except RuntimeError as error:
                 print(f"    SKIPPED - {error}\n", flush=True)
                 inapplicable.append((mutant, str(error)))
+                continue
+            if mutant.equivalent:
+                print(f"    EQUIVALENT - applies, not scored: {mutant.equivalent}", flush=True)
+                equivalent.append(mutant)
                 continue
             try:
                 passed, tail = run_suite(url, only_target=args.only_test)
@@ -463,6 +488,10 @@ def main() -> int:
             print(f"  {mutant.name}")
             print(f"      function: {mutant.signature.split('(')[0]}")
             print(f"      unenforced: {mutant.rule}\n")
+    if equivalent:
+        print(f"\n{len(equivalent)} equivalent mutant(s) not scored:")
+        for mutant in equivalent:
+            print(f"  {mutant.name}")
     if inapplicable:
         print(f"{len(inapplicable)} mutants could not be applied (pattern drift):")
         for mutant, _ in inapplicable:

@@ -8,7 +8,8 @@ use std::{num::NonZeroU32, time::Duration};
 
 use chrono::{TimeDelta, Utc};
 use pgtask_core::{
-    EnqueueRequest, HandlerVersion, QueueName, SignalName, StepName, Task, TaskName, TaskState, WorkerId,
+    EnqueueRequest, HandlerVersion, LeaseToken, QueueName, SignalName, StepName, Task, TaskId, TaskName, TaskState,
+    WorkerId,
 };
 use pgtask_postgres::{SpawnRequest, Store};
 use serde_json::json;
@@ -772,4 +773,145 @@ async fn releasing_a_lease_is_fenced_and_spends_no_budget() {
     assert_eq!(store.release_leases(&[lease(&only)]).await.unwrap(), [only.id]);
     let again = claim(&store, &queue, &task_name, 1).await.pop().unwrap();
     assert_eq!((again.id, again.attempt, again.failed_attempts), (only.id, 2, 0));
+}
+
+/// The lease token, not the attempt number, is what authorizes a lease-owned
+/// transition. An attempt is a small integer anyone who can see the task can
+/// guess; only the worker the claim handed the token to has that. So every
+/// transition must refuse the current attempt paired with any other token.
+///
+/// A stale lease differs from the live one in both attempt and token, so the
+/// reclaim tests above pass with either check alone. This one pins the token.
+#[tokio::test]
+async fn the_current_attempt_without_its_lease_token_cannot_drive_a_transition() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+    let (queue, task_name) = names("forged-token");
+    let step = StepName::new("step").unwrap();
+    let forged = LeaseToken::new();
+    let other = store
+        .enqueue(&request(
+            &task_name,
+            &QueueName::new(format!("{queue}-other")).unwrap(),
+            1,
+            0,
+        ))
+        .await
+        .unwrap()
+        .task_id;
+
+    let mut leases = Vec::new();
+    for _ in 0..6 {
+        store.enqueue(&request(&task_name, &queue, 5, 0)).await.unwrap();
+        leases.push(claim(&store, &queue, &task_name, 1).await.pop().unwrap());
+    }
+    let [complete, fail, sleep, signal, result, spawn] = &leases[..] else {
+        unreachable!()
+    };
+
+    assert!(
+        !store
+            .complete(complete.id, complete.attempt, forged, Some(&json!({})))
+            .await
+            .unwrap(),
+        "complete"
+    );
+    assert_eq!(
+        store
+            .fail(
+                fail.id,
+                fail.attempt,
+                forged,
+                &json!({"type": "test"}),
+                Some(Duration::ZERO)
+            )
+            .await
+            .unwrap(),
+        None,
+        "fail"
+    );
+    assert_eq!(
+        store
+            .sleep_until(sleep.id, sleep.attempt, forged, &step, 0, Utc::now())
+            .await
+            .unwrap(),
+        None,
+        "sleep"
+    );
+    assert_forged_durable_steps_are_rejected(&store, [signal, result, spawn], forged, other, &queue, &task_name).await;
+
+    // Every task is still running under the lease it was claimed with, so the
+    // real holder can still finish it.
+    for lease in &leases {
+        let task = store.get_task(lease.id).await.unwrap().unwrap();
+        assert_eq!((task.state, task.lease_token), (TaskState::Running, lease.lease_token));
+        assert!(
+            store
+                .complete(lease.id, lease.attempt, lease.lease_token.unwrap(), None)
+                .await
+                .unwrap()
+        );
+    }
+}
+
+async fn assert_forged_durable_steps_are_rejected(
+    store: &Store,
+    [signal, result, spawn]: [&Task; 3],
+    forged: LeaseToken,
+    other: TaskId,
+    queue: &QueueName,
+    task_name: &TaskName,
+) {
+    let step = StepName::new("step").unwrap();
+    assert!(
+        store
+            .wait_for_signal(pgtask_postgres::SignalWaitRequest {
+                task_id: signal.id,
+                attempt: signal.attempt,
+                lease_token: forged,
+                step_name: &step,
+                occurrence: 0,
+                signal_name: &SignalName::new("go").unwrap(),
+                signal_occurrence: 0,
+                timeout: None,
+            })
+            .await
+            .unwrap()
+            .is_none(),
+        "wait_for_signal"
+    );
+    assert!(
+        store
+            .wait_for_result(pgtask_postgres::ResultWaitRequest {
+                task_id: result.id,
+                attempt: result.attempt,
+                lease_token: forged,
+                step_name: &step,
+                occurrence: 0,
+                result_task_id: other,
+                timeout: None,
+            })
+            .await
+            .unwrap()
+            .is_none(),
+        "wait_for_result"
+    );
+    assert!(
+        store
+            .spawn_task(SpawnRequest {
+                parent_task_id: spawn.id,
+                parent_attempt: spawn.attempt,
+                parent_lease_token: forged,
+                step_name: &step,
+                occurrence: 0,
+                task: &request(task_name, queue, 5, 0),
+            })
+            .await
+            .unwrap()
+            .is_none(),
+        "spawn_task"
+    );
 }
