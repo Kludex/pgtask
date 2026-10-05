@@ -1,6 +1,7 @@
 #![doc = "Python bindings for pgtask."]
 
 use std::{
+    collections::HashSet,
     net::SocketAddr,
     num::{NonZeroU16, NonZeroU32},
     sync::{Arc, Mutex},
@@ -19,7 +20,7 @@ use pyo3::{
     create_exception,
     exceptions::{PyException, PyRuntimeError, PyValueError},
     prelude::*,
-    types::{PyAny, PyDict, PyModule},
+    types::{PyAny, PyDict, PyModule, PyTuple},
 };
 use pythonize::{depythonize, pythonize};
 use serde::Deserialize;
@@ -239,10 +240,13 @@ impl PythonTaskContext {
         let step_name = StepName::new(name).map_err(value_error)?;
         let locals = pyo3_async_runtimes::TaskLocals::with_running_loop(py)?.copy_context(py)?;
         pyo3_async_runtimes::tokio::future_into_py_with_locals(py, locals.clone(), async move {
+            let raised = StepException::default();
             let value = context
-                .step(&step_name, occurrence, || run_python_operation(operation, locals))
+                .step(&step_name, occurrence, || {
+                    run_python_operation(operation, locals, raised.clone())
+                })
                 .await
-                .map_err(|error| handler_error(&error))?;
+                .map_err(|error| raised.take().unwrap_or_else(|| handler_error(&error)))?;
             Python::attach(|py| pythonize(py, &value).map(Bound::unbind).map_err(value_error))
         })
     }
@@ -550,6 +554,7 @@ async fn run_python_handler(
 async fn run_python_operation(
     operation: Py<PyAny>,
     locals: pyo3_async_runtimes::TaskLocals,
+    raised: StepException,
 ) -> Result<Value, HandlerError> {
     let (future, _guard) = Python::attach(|py| {
         let operation_locals = locals.clone().with_context(locals.context(py).call_method0("copy")?);
@@ -578,9 +583,13 @@ async fn run_python_operation(
         ))
     })
     .map_err(|error: PyErr| HandlerError::retryable(error.to_string()))?;
-    let result = future
-        .await
-        .map_err(|error| Python::attach(|py| python_failure(py, &error)))?;
+    let result = future.await.map_err(|error| {
+        Python::attach(|py| {
+            let failure = python_failure(py, &error);
+            raised.keep(py, error);
+            failure
+        })
+    })?;
     Python::attach(|py| depythonize(result.bind(py)))
         .map_err(|error| HandlerError::terminal(format!("step returned invalid JSON: {error}")))
 }
@@ -603,23 +612,74 @@ fn value_error(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
 }
 
-/// Fails terminally when the exception is a `NonRetryableError` or was raised from one.
+/// The exception a step's operation raised, so `step` can raise that same object in the handler.
+///
+/// A failed step is never checkpointed, so the exception only has to outlive the one `step` call that ran the
+/// operation. A failure that did not come from the operation, such as a checkpoint write error, leaves it empty.
+#[derive(Clone, Default)]
+struct StepException(Arc<Mutex<Option<PyErr>>>);
+
+impl StepException {
+    /// Keeps an ordinary exception. `TaskSuspended` and `BaseException`s such as `CancelledError` keep today's
+    /// conversion, so raising them inside a step can neither suspend nor cancel the handler.
+    fn keep(&self, py: Python<'_>, error: PyErr) {
+        if error.is_instance_of::<PyException>(py) && !error.is_instance_of::<TaskSuspended>(py) {
+            *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+        }
+    }
+
+    fn take(&self) -> Option<PyErr> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+    }
+}
+
+/// Fails terminally when the exception is a `NonRetryableError` or holds one.
 fn python_failure(py: Python<'_>, error: &PyErr) -> HandlerError {
-    let mut seen = Vec::new();
-    let mut current = Some(error.clone_ref(py));
-    while let Some(exception) = current {
-        if seen.contains(&exception.value(py).as_ptr()) {
-            break;
+    if holds_non_retryable(py, error) {
+        HandlerError::terminal(error.to_string())
+    } else {
+        HandlerError::retryable(error.to_string())
+    }
+}
+
+/// Searches the exception, its `__cause__` chain and, for an exception group, every exception it holds at any depth
+/// for a `NonRetryableError`. `__context__` is not followed: an error raised while handling another is not caused by
+/// it.
+fn holds_non_retryable(py: Python<'_>, error: &PyErr) -> bool {
+    let groups = exception_group_types(py);
+    let mut seen = HashSet::new();
+    let mut pending = vec![error.clone_ref(py)];
+    while let Some(exception) = pending.pop() {
+        if !seen.insert(exception.value(py).as_ptr()) {
+            continue;
         }
         if exception.is_instance_of::<NonRetryableError>(py) {
-            let mut failure = HandlerError::terminal(error.to_string());
-            failure.error["retryable"] = Value::Bool(false);
-            return failure;
+            return true;
         }
-        seen.push(exception.value(py).as_ptr());
-        current = exception.cause(py);
+        pending.extend(exception.cause(py));
+        let value = exception.value(py);
+        if groups.iter().any(|group| value.is_instance(group).unwrap_or(false)) {
+            let members = value
+                .getattr("exceptions")
+                .and_then(|members| members.cast_into::<PyTuple>().map_err(PyErr::from));
+            pending.extend(members.iter().flatten().map(PyErr::from_value));
+        }
     }
-    HandlerError::retryable(error.to_string())
+    false
+}
+
+/// `BaseExceptionGroup` (Python 3.11+), and the `exceptiongroup` backport's when it has been imported, which is how
+/// Python 3.10 code such as `anyio` raises groups.
+fn exception_group_types(py: Python<'_>) -> Vec<Bound<'_, PyAny>> {
+    let builtin = py
+        .import("builtins")
+        .and_then(|builtins| builtins.getattr("BaseExceptionGroup"));
+    let backport = py
+        .import("sys")
+        .and_then(|sys| sys.getattr("modules"))
+        .and_then(|modules| modules.call_method1("get", ("exceptiongroup",)))
+        .and_then(|module| module.getattr("BaseExceptionGroup"));
+    builtin.into_iter().chain(backport).collect()
 }
 
 fn handler_error(error: &HandlerError) -> PyErr {

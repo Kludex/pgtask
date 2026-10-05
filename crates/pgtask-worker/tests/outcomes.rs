@@ -170,7 +170,10 @@ async fn oversized_outcomes_fail_only_their_own_task() {
     let (small_error, runs) = &finished["small-error"];
     assert_eq!((small_error.state, *runs), (TaskState::Failed, 1));
     assert_eq!(small_error.failed_attempts, 1);
-    assert_eq!(small_error.error.as_ref().unwrap()["message"], "small failed normally");
+    assert_eq!(
+        small_error.error,
+        Some(json!({"type": "handler_error", "message": "small failed normally", "retryable": false}))
+    );
 
     let (big_result, runs) = &finished["big-result"];
     assert_eq!((big_result.state, *runs), (TaskState::Failed, 1));
@@ -186,6 +189,7 @@ async fn oversized_outcomes_fail_only_their_own_task() {
     let error = big_error.error.as_ref().unwrap();
     assert_eq!(error["type"], "handler_error");
     assert_eq!(error["truncated"], true);
+    assert_eq!(error["retryable"], true);
     assert!(error["message"].as_str().unwrap().starts_with("eeee"));
 }
 
@@ -224,7 +228,10 @@ async fn a_rejected_batch_falls_back_to_writing_each_transition_alone() {
     let (small_error, runs) = &finished["small-error"];
     assert_eq!((small_error.state, *runs), (TaskState::Failed, 1));
     assert_eq!(small_error.failed_attempts, 1);
-    assert_eq!(small_error.error.as_ref().unwrap()["message"], "small failed normally");
+    assert_eq!(
+        small_error.error,
+        Some(json!({"type": "handler_error", "message": "small failed normally", "retryable": false}))
+    );
 
     let (poison_result, runs) = &finished["poison-result"];
     assert_eq!((poison_result.state, *runs), (TaskState::Failed, 1));
@@ -273,7 +280,7 @@ async fn a_lone_unstorable_outcome_records_why_instead_of_expiring() {
                     (TaskState::Failed, &json!("handler_error"))
                 );
                 assert_eq!(error["truncated"], true);
-                assert_eq!(error["original_bytes"], 300_040);
+                assert_eq!(error["original_bytes"], 300_060);
             }
             "nul-result" => {
                 assert_eq!(task.state, TaskState::Succeeded);
@@ -283,7 +290,7 @@ async fn a_lone_unstorable_outcome_records_why_instead_of_expiring() {
                 assert_eq!(task.state, TaskState::Failed);
                 assert_eq!(
                     task.error,
-                    Some(json!({"type": "handler_error", "message": "a\\u0000b"}))
+                    Some(json!({"type": "handler_error", "message": "a\\u0000b", "retryable": false}))
                 );
             }
         }

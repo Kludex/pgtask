@@ -50,7 +50,7 @@ The worker fills its available handler slots with one claim per queue, up to `co
 
 Set `handler_version` when a long-lived task changes its durable protocol. An exception is retryable by default. Pass `retry_delay=None` for a terminal failure on the first exception.
 
-To fail a task terminally for one kind of error, such as an invalid payload or a deleted resource, raise `pgtask.NonRetryableError`, a subclass of it, or an exception raised `from` one:
+To fail a task terminally for one kind of error, such as an invalid payload or a deleted resource, raise `pgtask.NonRetryableError`, a subclass of it, an exception raised `from` one, or an exception group that holds one:
 
 ```python
 from pgtask import NonRetryableError
@@ -67,7 +67,9 @@ async def publish(task: Task, request: RenderRequest) -> RenderResult:
     return {"report_id": request["report_id"], "attempt": task.attempt}
 ```
 
-The task fails with no further retries, and its error records `"retryable": false`. Inside `task.step`, the operation's error surfaces from `step` as `pgtask.NonRetryableError`, so it stays terminal unless the handler catches it.
+The task fails with no further retries, and its error records `"retryable": false`. pgtask follows `__cause__`, not `__context__`, so an error raised while handling a `NonRetryableError` is retried unless it is raised `from` it. An `ExceptionGroup`, such as one from `asyncio.TaskGroup`, is terminal when any exception in it, at any depth, is terminal by these rules. On Python 3.10 this covers groups from the `exceptiongroup` backport, which `anyio` raises.
+
+A failing `task.step` raises the operation's own exception object, with its attributes, `__cause__` and traceback, so `except InvalidReport:` around `await task.step(...)` catches it. Left uncaught, it fails the task exactly as it would outside a step. `TaskSuspended`, and exceptions that are not `Exception` subclasses such as `CancelledError`, raised inside the operation surface as `RuntimeError` instead, so they cannot suspend or cancel the handler.
 
 ## Enqueue and wait
 
