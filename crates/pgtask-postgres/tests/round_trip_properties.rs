@@ -11,7 +11,8 @@
 use std::{sync::OnceLock, time::Duration};
 
 use pgtask_core::{
-    EnqueueRequest, MisfirePolicy, QueueName, ScheduleConfig, ScheduleDefinition, ScheduleError, ScheduleName, TaskName,
+    EnqueueRequest, MisfirePolicy, QueueName, Schedule, ScheduleConfig, ScheduleDefinition, ScheduleError,
+    ScheduleName, TaskName,
 };
 use pgtask_postgres::{PostgresError, Store};
 use proptest::prelude::*;
@@ -72,6 +73,19 @@ fn any_name(max_len: usize) -> impl Strategy<Value = String> {
     .prop_map(|characters| characters.into_iter().collect())
 }
 
+/// Deletes a schedule a case stored, once it has been read back.
+///
+/// Every later test binary in `cargo test --workspace` shares this database, and a stored schedule
+/// is live: workers materialize it. Left behind, `PROPTEST_CASES` schedules with intervals of a
+/// few milliseconds stay due forever, and `claim_due_schedules` takes the oldest due schedules
+/// first, so a worker test's own schedule waits behind all of them and times out.
+fn forget_schedule(runtime: &Runtime, store: &Store, schedule: &Schedule) {
+    let deleted = runtime
+        .block_on(store.delete_schedule(schedule.config.id))
+        .expect("failed to delete the schedule");
+    assert!(deleted, "the schedule this case stored was already gone");
+}
+
 proptest! {
     #![proptest_config(config())]
 
@@ -124,6 +138,7 @@ proptest! {
             }
         };
 
+        forget_schedule(runtime, store, &stored);
         prop_assert_eq!(
             stored.config.definition,
             definition,
@@ -179,6 +194,7 @@ proptest! {
         config.misfire_policy = policy;
 
         let stored = runtime.block_on(store.put_schedule(&config)).expect("storable schedule");
+        forget_schedule(runtime, store, &stored);
         prop_assert_eq!(stored.config.misfire_policy, policy);
     }
 }
