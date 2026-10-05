@@ -50,6 +50,25 @@ The worker fills its available handler slots with one claim per queue, up to `co
 
 Set `handler_version` when a long-lived task changes its durable protocol. An exception is retryable by default. Pass `retry_delay=None` for a terminal failure on the first exception.
 
+To fail a task terminally for one kind of error, such as an invalid payload or a deleted resource, raise `pgtask.NonRetryableError`, a subclass of it, or an exception raised `from` one:
+
+```python
+from pgtask import NonRetryableError
+
+
+class InvalidReport(NonRetryableError):
+    pass
+
+
+@tasks.task("reports.publish")
+async def publish(task: Task, request: RenderRequest) -> RenderResult:
+    if not request["report_id"]:
+        raise InvalidReport("report_id is empty")
+    return {"report_id": request["report_id"], "attempt": task.attempt}
+```
+
+The task fails with no further retries, and its error records `"retryable": false`. Inside `task.step`, the operation's error surfaces from `step` as `pgtask.NonRetryableError`, so it stays terminal unless the handler catches it.
+
 ## Enqueue and wait
 
 The producer enqueues a task and waits on a notification rather than polling:

@@ -41,6 +41,7 @@ def test_public_python_contract() -> None:
         "Client",
         "EnqueueRequest",
         "JSONValue",
+        "NonRetryableError",
         "Task",
         "TaskDefinition",
         "TaskHandle",
@@ -55,6 +56,8 @@ def test_public_python_contract() -> None:
     ]
     assert issubclass(pgtask.TaskSuspended, Exception)
     assert pgtask.TaskSuspended is pgtask._native.TaskSuspended
+    assert issubclass(pgtask.NonRetryableError, Exception)
+    assert pgtask.NonRetryableError is pgtask._native.NonRetryableError
     assert tuple(inspect.signature(TaskRegistry.task).parameters) == (
         "self",
         "name",
@@ -431,6 +434,111 @@ async def test_definitions_cover_defer_deduplication_versions_and_failures() -> 
     assert "expected failure" in cast(dict[str, str], failure.error)["message"]
     worker.shutdown()
     await running
+
+
+class InvalidPayload(pgtask.NonRetryableError):
+    pass
+
+
+@pytest.mark.anyio
+async def test_non_retryable_errors_fail_the_task_without_retrying() -> None:
+    database_url = os.environ["PGTASK_DATABASE_URL"]
+    client = await Client.connect(database_url)
+    registry = TaskRegistry(f"python-non-retryable-{os.urandom(8).hex()}")
+    attempts: dict[str, list[int]] = {}
+    surfaced: list[type[BaseException]] = []
+
+    def record(task: Task) -> None:
+        attempts.setdefault(task.task_name, []).append(task.attempt)
+
+    @registry.task("non-retryable.direct", retry_delay=0.001)
+    async def direct(task: Task, payload: None) -> JSONValue:
+        record(task)
+        raise pgtask.NonRetryableError("payload is invalid")
+
+    @registry.task("non-retryable.subclass", retry_delay=0.001)
+    async def subclass(task: Task, payload: None) -> JSONValue:
+        record(task)
+        raise InvalidPayload("missing field")
+
+    @registry.task("non-retryable.step", retry_delay=0.001)
+    async def in_step(task: Task, payload: None) -> JSONValue:
+        record(task)
+
+        async def lookup() -> JSONValue:
+            raise InvalidPayload("resource was deleted")
+
+        try:
+            return await task.step("lookup", lookup)
+        except Exception as error:
+            surfaced.append(type(error))
+            raise
+
+    @registry.task("non-retryable.cause", retry_delay=0.001)
+    async def caused(task: Task, payload: None) -> JSONValue:
+        record(task)
+        try:
+            raise pgtask.NonRetryableError("permission denied")
+        except pgtask.NonRetryableError as error:
+            raise RuntimeError("could not load the report") from error
+
+    @registry.task("non-retryable.ordinary", retry_delay=0.001)
+    async def ordinary(task: Task, payload: None) -> JSONValue:
+        record(task)
+
+        async def flaky() -> JSONValue:
+            raise RuntimeError("try again")
+
+        return await task.step("flaky", flaky)
+
+    @registry.task("non-retryable.cycle", retry_delay=0.001)
+    async def cycle(task: Task, payload: None) -> JSONValue:
+        record(task)
+        error = RuntimeError("caused by itself")
+        raise error from error
+
+    handles = {
+        "non-retryable.direct": await client.enqueue(direct.request(None)),
+        "non-retryable.subclass": await client.enqueue(subclass.request(None)),
+        "non-retryable.step": await client.enqueue(in_step.request(None)),
+        "non-retryable.cause": await client.enqueue(caused.request(None)),
+        "non-retryable.ordinary": await client.enqueue(ordinary.request(None, max_attempts=2)),
+        "non-retryable.cycle": await client.enqueue(cycle.request(None, max_attempts=2)),
+    }
+    worker = Worker(database_url, registry, concurrency=6)
+    running = asyncio.create_task(worker.run())
+    errors: dict[str, dict[str, JSONValue]] = {}
+    for name, handle in handles.items():
+        result = await handle.result(timeout=5)
+        assert result is not None
+        assert result.state == "failed"
+        errors[name] = cast(dict[str, JSONValue], result.error)
+    worker.shutdown()
+    await running
+
+    assert attempts == {
+        "non-retryable.direct": [1],
+        "non-retryable.subclass": [1],
+        "non-retryable.step": [1],
+        "non-retryable.cause": [1],
+        "non-retryable.ordinary": [1, 2],
+        "non-retryable.cycle": [1, 2],
+    }
+    assert surfaced == [pgtask.NonRetryableError]
+    assert errors["non-retryable.direct"] == {
+        "type": "handler_error",
+        "message": "NonRetryableError: payload is invalid",
+        "retryable": False,
+    }
+    assert errors["non-retryable.subclass"]["message"] == "InvalidPayload: missing field"
+    assert errors["non-retryable.step"]["message"] == "NonRetryableError: InvalidPayload: resource was deleted"
+    assert errors["non-retryable.cause"]["message"] == "RuntimeError: could not load the report"
+    for name in ["non-retryable.subclass", "non-retryable.step", "non-retryable.cause"]:
+        assert errors[name]["retryable"] is False
+    assert errors["non-retryable.ordinary"] == {
+        "type": "handler_error",
+        "message": "RuntimeError: RuntimeError: try again",
+    }
 
 
 @pytest.mark.anyio
