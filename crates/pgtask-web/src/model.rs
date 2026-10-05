@@ -26,15 +26,21 @@ pub struct QueueSummary {
 }
 
 impl QueueSummary {
-    async fn all(pool: &PgPool) -> Result<Vec<Self>, sqlx::Error> {
-        sqlx::query_as(
+    async fn page(pool: &PgPool, after: Option<&str>) -> Result<Page<Self, String>, sqlx::Error> {
+        let mut items: Vec<Self> = sqlx::query_as(
             "SELECT name, paused_at, pending_count, ready_count, routable_count, unroutable_count, \
              running_count, waiting_count, terminal_count, outstanding_count, max_outstanding_tasks, \
              starvation_timeout_seconds \
-             FROM pgtask.queue_overview ORDER BY name",
+             FROM pgtask.queue_overview WHERE $1::text IS NULL OR name > $1 \
+             ORDER BY name LIMIT 101",
         )
+        .bind(after)
         .fetch_all(pool)
-        .await
+        .await?;
+        let has_more = items.len() > PAGE_SIZE;
+        items.truncate(PAGE_SIZE);
+        let next = has_more.then(|| items.last().unwrap().name.clone());
+        Ok(Page { items, next })
     }
 }
 
@@ -333,16 +339,16 @@ impl WorkerDetail {
 }
 
 pub struct Dashboard {
-    pub queues: Vec<QueueSummary>,
+    pub queues: Page<QueueSummary, String>,
     pub tasks: Vec<TaskSummary>,
     pub schedule_count: i64,
     pub worker_count: i64,
 }
 
 impl Dashboard {
-    pub async fn load(pool: &PgPool) -> Result<Self, sqlx::Error> {
+    pub async fn load(pool: &PgPool, after: Option<&str>) -> Result<Self, sqlx::Error> {
         let (queues, tasks, schedule_count, worker_count) = tokio::try_join!(
-            QueueSummary::all(pool),
+            QueueSummary::page(pool, after),
             TaskSummary::search(pool, None),
             ScheduleSummary::count(pool),
             WorkerSummary::count(pool),
