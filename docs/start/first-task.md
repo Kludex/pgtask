@@ -61,8 +61,9 @@ how you keep slow work from starving fast work.
 run, and the database only hands back tasks it declared. A deployment that does not know a task name leaves it
 `pending` instead of consuming an attempt and failing it.
 
-`task.attempt` starts at `1` and increases on every retry. It is the honest signal that your handler may be running for
-the second time.
+`task.attempt` starts at `1` and increases on every retry, and on every resume of a durable workflow. It is the honest
+signal that your handler may be running for the second time. `task.failed_attempts` counts only the failures that use up
+`max_attempts`.
 
 ## Enqueue work
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pgtask._native import TaskSuspended
 from pgtask.client import (
     BatchTransactionConnection,
     Client,
@@ -29,6 +30,7 @@ __all__ = [
     "TaskRegistry",
     "TaskResult",
     "TaskState",
+    "TaskSuspended",
     "TransactionConnection",
     "Worker",
     "get_current_task",
