@@ -65,7 +65,43 @@ fn cut_after(rng: &mut Rng) -> Duration {
     Duration::from_micros(50 + (rng.below(900) as u64))
 }
 
-/// Runs a call, abandoning it after `cut` if one is given.
+/// How a faulted call loses its outcome.
+#[derive(Clone, Copy)]
+enum Fault {
+    /// Abandoned after a random delay. Whether that lands before, during or
+    /// after the round trip depends on how fast this machine and database are.
+    Cut(Duration),
+    /// Runs to completion and its reply is then thrown away: the write
+    /// committed and was never acknowledged. Unlike a timed cut this does not
+    /// depend on latency, so every run reaches the crash case.
+    LostAck,
+}
+
+/// Decides which calls a client faults.
+///
+/// A timed cut alone made the crash case a race against the round trip: on a
+/// fast enough database every cut call finished before its deadline, nothing
+/// was indeterminate, and the run had to fail its own precondition. So a
+/// client's first faulted call, and every third after it, loses its reply
+/// instead of being cut.
+#[derive(Default)]
+struct Faults {
+    issued: usize,
+}
+
+impl Faults {
+    fn next(&mut self, rng: &mut Rng) -> Option<Fault> {
+        if rng.below(100) >= FAULT_PERCENT {
+            return None;
+        }
+        let cut = cut_after(rng);
+        let lost_ack = self.issued.is_multiple_of(3);
+        self.issued += 1;
+        Some(if lost_ack { Fault::LostAck } else { Fault::Cut(cut) })
+    }
+}
+
+/// Runs a call, losing its outcome if a fault is given.
 ///
 /// Dropping the future cancels the query from the client's side, but says
 /// nothing about the server: the statement may already have committed, may
@@ -73,9 +109,13 @@ fn cut_after(rng: &mut Rng) -> Duration {
 /// `docs/failure-model.md` describes as "the client treats the transaction
 /// outcome as unknown", and it is the one worth testing, because a client that
 /// guesses wrong here corrupts state rather than merely stalling.
-async fn maybe_cut<T>(work: impl Future<Output = T>, cut: Option<Duration>) -> Option<T> {
-    match cut {
-        Some(deadline) => tokio::time::timeout(deadline, work).await.ok(),
+async fn maybe_cut<T>(work: impl Future<Output = T>, fault: Option<Fault>) -> Option<T> {
+    match fault {
+        Some(Fault::Cut(deadline)) => tokio::time::timeout(deadline, work).await.ok(),
+        Some(Fault::LostAck) => {
+            let _discarded = work.await;
+            None
+        }
         None => Some(work.await),
     }
 }
@@ -306,7 +346,7 @@ impl LeaseClient {
         self.recorder.remember(lease);
     }
 
-    async fn complete(&self, lease: Lease, cut: Option<Duration>) {
+    async fn complete(&self, lease: Lease, cut: Option<Fault>) {
         let call = self.recorder.now();
         let outcome = maybe_cut(
             self.store
@@ -328,7 +368,7 @@ impl LeaseClient {
         );
     }
 
-    async fn fail(&self, lease: Lease, cut: Option<Duration>) {
+    async fn fail(&self, lease: Lease, cut: Option<Fault>) {
         let call = self.recorder.now();
         let outcome = maybe_cut(
             self.store.fail(
@@ -361,7 +401,7 @@ impl LeaseClient {
         );
     }
 
-    async fn renew(&self, lease: Lease, cut: Option<Duration>) {
+    async fn renew(&self, lease: Lease, cut: Option<Fault>) {
         let call = self.recorder.now();
         let renewed = maybe_cut(
             self.store
@@ -405,6 +445,7 @@ impl LeaseClient {
     }
 
     async fn run(self, mut rng: Rng) {
+        let mut faults = Faults::default();
         for _ in 0..STEPS_PER_CLIENT {
             let choice = rng.below(100);
             if choice < 35 {
@@ -418,7 +459,7 @@ impl LeaseClient {
             let Some(lease) = self.recorder.sample(&mut rng) else {
                 continue;
             };
-            let cut = (rng.below(100) < FAULT_PERCENT).then(|| cut_after(&mut rng));
+            let cut = faults.next(&mut rng);
             match choice {
                 35..=57 => self.complete(lease, cut).await,
                 58..=76 => self.fail(lease, cut).await,
@@ -582,7 +623,7 @@ impl RegisterClient {
 
     /// A durable step. The value is unique per write, so first-write-wins is
     /// observable: a second writer handed its own value back would be a bug.
-    async fn write_checkpoint(&self, lease: Lease, round: usize, cut: Option<Duration>) {
+    async fn write_checkpoint(&self, lease: Lease, round: usize, cut: Option<Fault>) {
         let value = json!({"client": self.id, "round": round});
         let call = self.recorder.now();
         let committed = maybe_cut(
@@ -658,6 +699,7 @@ impl RegisterClient {
     }
 
     async fn run(self, mut rng: Rng) {
+        let mut faults = Faults::default();
         for round in 0..STEPS_PER_CLIENT {
             let choice = rng.below(100);
             if choice < 25 {
@@ -667,7 +709,7 @@ impl RegisterClient {
             let Some(lease) = self.recorder.sample(&mut rng) else {
                 continue;
             };
-            let cut = (rng.below(100) < FAULT_PERCENT).then(|| cut_after(&mut rng));
+            let cut = faults.next(&mut rng);
             match choice {
                 25..=54 => self.write_checkpoint(lease, round, cut).await,
                 55..=74 => self.read_checkpoint(lease).await,
