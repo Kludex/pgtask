@@ -713,3 +713,73 @@ async fn terminal_parent_cancels_descendants_and_retention_deletes_leaves_first(
     assert_eq!(store.delete_expired_terminal(&queue_name, 10).await.unwrap(), 1);
     assert!(store.get_task(parent_id).await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn cancelled_result_wait_waits_again_after_an_administrator_retry() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    let store = Store::connect(&database_url).await.unwrap();
+    store.migrate().await.unwrap();
+
+    let suffix = Uuid::new_v4();
+    let child_queue = QueueName::new(format!("result-retry-child-{suffix}")).unwrap();
+    let parent_queue = QueueName::new(format!("result-retry-parent-{suffix}")).unwrap();
+    let child_name = TaskName::new(format!("result-retry-child-handler-{suffix}")).unwrap();
+    let parent_name = TaskName::new(format!("result-retry-parent-handler-{suffix}")).unwrap();
+    let step_name = StepName::new("wait-for-child").unwrap();
+    let mut child_request = EnqueueRequest::new(child_name.clone(), json!({}));
+    child_request.queue_name = child_queue.clone();
+    let mut parent_request = EnqueueRequest::new(parent_name.clone(), json!({}));
+    parent_request.queue_name = parent_queue.clone();
+    let retry = |task_id: TaskId| {
+        sqlx::query_scalar::<_, bool>("SELECT pgtask.admin_retry_task($1, 'ops')")
+            .bind(task_id.as_uuid())
+            .fetch_one(store.pool())
+    };
+
+    let parent_id = store.enqueue(&parent_request).await.unwrap().task_id;
+    let parent = claim_one(&store, &parent_queue, &parent_name).await;
+    let child_id = spawn_child(&store, &parent, "spawn-child", &child_request).await;
+    let wait = |task: &Task| ResultWaitRequest {
+        task_id: parent_id,
+        attempt: task.attempt,
+        lease_token: task.lease_token.unwrap(),
+        step_name: &step_name,
+        occurrence: 0,
+        result_task_id: child_id,
+        timeout: None,
+    };
+    assert_eq!(
+        store.wait_for_result(wait(&parent)).await.unwrap(),
+        Some(ResultWait::Waiting)
+    );
+
+    // Cancelling the parent cancels the child too; both come back, the child first.
+    assert!(store.cancel(parent_id).await.unwrap());
+    assert!(retry(child_id).await.unwrap());
+    assert!(retry(parent_id).await.unwrap());
+    let retried = claim_one(&store, &parent_queue, &parent_name).await;
+    assert_eq!(
+        store.wait_for_result(wait(&retried)).await.unwrap(),
+        Some(ResultWait::Waiting)
+    );
+
+    let child = claim_one(&store, &child_queue, &child_name).await;
+    store
+        .complete(
+            child.id,
+            child.attempt,
+            child.lease_token.unwrap(),
+            Some(&json!("done")),
+        )
+        .await
+        .unwrap();
+    let resumed = claim_one(&store, &parent_queue, &parent_name).await;
+    assert_eq!(
+        store.wait_for_result(wait(&resumed)).await.unwrap(),
+        Some(ResultWait::Ready(
+            json!({"state": "succeeded", "result": "done", "error": null})
+        ))
+    );
+}

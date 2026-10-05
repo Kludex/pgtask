@@ -93,6 +93,8 @@ Signal identity is `(task_id, signal_name, occurrence)`. The first committed JSO
 
 Use a stable occurrence when a workflow waits for the same named signal more than once. The signal occurrence and step occurrence are independent: the first identifies the external event, and the second identifies the durable checkpoint in the handler.
 
+Cancelling a waiting task resolves its open wait with the outcome `cancelled` (visible in `pgtask.wait_view`). If an administrator retries the task, the handler replays to the same step and waits again, because the cancelled wait wrote no checkpoint. A result wait behaves the same way.
+
 ## Spawn a child and wait for its result
 
 Spawning inserts the child and checkpoints its identifier in one transaction, so a replay adopts the existing child rather than creating a second one:

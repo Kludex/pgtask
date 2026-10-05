@@ -26,6 +26,9 @@ static MIGRATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(()
 
 const UNDEFINED_SCHEMA: &str = "3F000";
 
+/// How long a schedule that cannot be materialized waits before a worker tries it again.
+pub const SCHEDULE_FAILURE_RETRY_DELAY: Duration = Duration::from_mins(1);
+
 #[derive(Debug, Error)]
 pub enum PostgresError {
     #[error("database operation failed: {0}")]
@@ -751,7 +754,10 @@ impl Store {
         let now: DateTime<Utc> = sqlx::query_scalar("SELECT statement_timestamp()")
             .fetch_one(&self.pool)
             .await?;
-        let next_run_at = config.start_at.unwrap_or(config.definition.next_after(now)?);
+        // A schedule with no occurrence after its first due time could never be materialized.
+        let first_due = config.start_at.map_or(now, |start_at| start_at.max(now));
+        let next_occurrence = config.definition.next_after(first_due)?;
+        let next_run_at = config.start_at.unwrap_or(next_occurrence);
         let (kind, interval_milliseconds, cron_expression) = match &config.definition {
             ScheduleDefinition::Interval { every } => {
                 ScheduleDefinition::interval(*every)?;
@@ -863,47 +869,35 @@ impl Store {
         .await?;
         let mut total = 0_u64;
         for row in rows {
-            let schedule = Schedule::try_from(row)?;
-            let materialization =
-                schedule
-                    .config
-                    .definition
-                    .materialize(schedule.next_run_at, now, schedule.config.misfire_policy)?;
-            let span = info_span!(
-                "pgtask.schedule.materialize",
-                pgtask.schedule.name = %schedule.config.name,
-                pgtask.schedule.occurrences = materialization.occurrences.len(),
-            );
-            let materialized: i64 = sqlx::query_scalar("SELECT pgtask.materialize_schedule($1, $2, $3, $4)")
-                .bind(schedule.config.id.as_uuid())
-                .bind(schedule.next_run_at)
-                .bind(&materialization.occurrences)
-                .bind(materialization.next_run_at)
-                .fetch_one(&mut *transaction)
-                .instrument(span)
-                .await?;
-            let materialized = u64::try_from(materialized).map_err(invalid_number)?;
-            let kind = match schedule.config.definition {
-                ScheduleDefinition::Interval { .. } => "interval",
-                ScheduleDefinition::Cron { .. } => "cron",
-            };
-            let lag = materialization
-                .occurrences
-                .first()
-                .map_or(Duration::ZERO, |occurrence| {
-                    now.signed_duration_since(*occurrence).to_std().unwrap_or_default()
-                });
-            pgtask_otel::record_schedule_occurrences(
-                schedule.config.task.queue_name.as_str(),
-                schedule.config.task.task_name.as_str(),
-                kind,
-                materialized,
-                materialization.skipped,
-                lag,
-            );
-            total = total
-                .checked_add(materialized)
-                .ok_or_else(|| PostgresError::InvalidTask("materialized task count overflowed".to_owned()))?;
+            let (schedule_id, schedule_name, expected_next_run_at) = (row.id, row.name.clone(), row.next_run_at);
+            // Each schedule gets its own savepoint, so one that cannot be materialized does not
+            // roll back the others claimed in this transaction.
+            let mut savepoint = sqlx::Acquire::begin(&mut *transaction).await?;
+            match materialize_claimed_schedule(&mut savepoint, row, now).await {
+                Ok(materialized) => {
+                    savepoint.commit().await?;
+                    total = total
+                        .checked_add(materialized)
+                        .ok_or_else(|| PostgresError::InvalidTask("materialized task count overflowed".to_owned()))?;
+                }
+                Err(error) if is_deterministic_schedule_failure(&error) => {
+                    savepoint.rollback().await?;
+                    let retry_at = now
+                        .checked_add_signed(
+                            chrono::TimeDelta::from_std(SCHEDULE_FAILURE_RETRY_DELAY).map_err(invalid_number)?,
+                        )
+                        .ok_or(ScheduleError::DateOutOfRange)?;
+                    tracing::warn!(
+                        %error,
+                        schedule.id = %schedule_id,
+                        schedule.name = %schedule_name,
+                        %retry_at,
+                        "could not materialize schedule; deferring it"
+                    );
+                    defer_schedule(&mut transaction, schedule_id, expected_next_run_at, retry_at).await?;
+                }
+                Err(error) => return Err(error),
+            }
         }
         transaction.commit().await?;
         pgtask_otel::record_schedule_materialization(started_at.elapsed());
@@ -1725,6 +1719,79 @@ impl Store {
         }
         Ok(recovered)
     }
+}
+
+/// Materializes one claimed schedule inside the caller's savepoint and returns how many tasks it created.
+async fn materialize_claimed_schedule(
+    connection: &mut PgConnection,
+    row: ScheduleRow,
+    now: DateTime<Utc>,
+) -> Result<u64, PostgresError> {
+    let schedule = Schedule::try_from(row)?;
+    let materialization =
+        schedule
+            .config
+            .definition
+            .materialize(schedule.next_run_at, now, schedule.config.misfire_policy)?;
+    let span = info_span!(
+        "pgtask.schedule.materialize",
+        pgtask.schedule.name = %schedule.config.name,
+        pgtask.schedule.occurrences = materialization.occurrences.len(),
+    );
+    let materialized: i64 = sqlx::query_scalar("SELECT pgtask.materialize_schedule($1, $2, $3, $4)")
+        .bind(schedule.config.id.as_uuid())
+        .bind(schedule.next_run_at)
+        .bind(&materialization.occurrences)
+        .bind(materialization.next_run_at)
+        .fetch_one(&mut *connection)
+        .instrument(span)
+        .await?;
+    let materialized = u64::try_from(materialized).map_err(invalid_number)?;
+    let kind = match schedule.config.definition {
+        ScheduleDefinition::Interval { .. } => "interval",
+        ScheduleDefinition::Cron { .. } => "cron",
+    };
+    let lag = materialization
+        .occurrences
+        .first()
+        .map_or(Duration::ZERO, |occurrence| {
+            now.signed_duration_since(*occurrence).to_std().unwrap_or_default()
+        });
+    pgtask_otel::record_schedule_occurrences(
+        schedule.config.task.queue_name.as_str(),
+        schedule.config.task.task_name.as_str(),
+        kind,
+        materialized,
+        materialization.skipped,
+        lag,
+    );
+    Ok(materialized)
+}
+
+/// A failure that repeats every time this worker sees the row: it cannot parse the row, the
+/// definition has no next occurrence, or PostgreSQL rejects the materialized values.
+fn is_deterministic_schedule_failure(error: &PostgresError) -> bool {
+    matches!(error, PostgresError::Schedule(_) | PostgresError::InvalidTask(_)) || error.is_rejected_value()
+}
+
+/// Moves a schedule's next run forward without creating tasks, so it stops being due.
+///
+/// `materialize_schedule` with no occurrences does exactly that, fenced on the `next_run_at` this
+/// worker claimed, so no new SQL function is needed.
+async fn defer_schedule(
+    connection: &mut PgConnection,
+    schedule_id: Uuid,
+    expected_next_run_at: DateTime<Utc>,
+    retry_at: DateTime<Utc>,
+) -> Result<(), PostgresError> {
+    sqlx::query_scalar::<_, i64>("SELECT pgtask.materialize_schedule($1, $2, $3, $4)")
+        .bind(schedule_id)
+        .bind(expected_next_run_at)
+        .bind(Vec::<DateTime<Utc>>::new())
+        .bind(retry_at)
+        .fetch_one(&mut *connection)
+        .await?;
+    Ok(())
 }
 
 #[derive(FromRow)]
