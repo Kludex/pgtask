@@ -335,11 +335,17 @@ fn handler_registry_and_errors_expose_explicit_public_values() {
 
     let retryable = HandlerError::retryable("again");
     assert!(retryable.retryable);
-    assert_eq!(retryable.error["message"], "again");
+    assert_eq!(
+        retryable.error,
+        json!({"type": "handler_error", "message": "again", "retryable": true})
+    );
     assert!(!retryable.is_suspended());
     let terminal = HandlerError::terminal("stop");
     assert!(!terminal.retryable);
-    assert_eq!(terminal.error["message"], "stop");
+    assert_eq!(
+        terminal.error,
+        json!({"type": "handler_error", "message": "stop", "retryable": false})
+    );
     let suspended = HandlerError::suspended();
     assert!(suspended.is_suspended());
 }

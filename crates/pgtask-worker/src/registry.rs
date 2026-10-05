@@ -13,6 +13,11 @@ pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<Value, HandlerError>
 
 type HandlerFunction = dyn Fn(Task, TaskContext) -> HandlerFuture + Send + Sync;
 
+/// A handler failure, or the suspension of a durable call.
+///
+/// A failure's `error` is the JSON recorded on the task. Its `"retryable"` matches the `retryable` field: whether the
+/// failure may be retried at all, which the retry policy and `max_attempts` still bound. Errors recorded by older
+/// versions, or by PostgreSQL itself (such as `lease_expired`), have no `"retryable"`, so readers treat it as optional.
 #[derive(Clone, Debug, Error)]
 #[error("task handler failed")]
 pub struct HandlerError {
@@ -29,25 +34,21 @@ enum HandlerControl {
 
 impl HandlerError {
     pub fn retryable(message: impl Into<String>) -> Self {
-        Self {
-            error: json!({"type": "handler_error", "message": message.into()}),
-            retryable: true,
-            control: HandlerControl::Failure,
-        }
+        Self::failure("handler_error", message, true)
     }
 
     pub fn terminal(message: impl Into<String>) -> Self {
-        Self {
-            error: json!({"type": "handler_error", "message": message.into()}),
-            retryable: false,
-            control: HandlerControl::Failure,
-        }
+        Self::failure("handler_error", message, false)
     }
 
     fn checkpoint(kind: &'static str, message: impl Into<String>) -> Self {
+        Self::failure(kind, message, true)
+    }
+
+    fn failure(kind: &'static str, message: impl Into<String>, retryable: bool) -> Self {
         Self {
-            error: json!({"type": kind, "message": message.into()}),
-            retryable: true,
+            error: json!({"type": kind, "message": message.into(), "retryable": retryable}),
+            retryable,
             control: HandlerControl::Failure,
         }
     }
@@ -363,5 +364,27 @@ impl HandlerRegistry {
 
     pub(crate) fn get(&self, task_name: &TaskName, handler_version: HandlerVersion) -> Option<&RegisteredHandler> {
         self.handlers.get(&(task_name.clone(), handler_version))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_failure_records_whether_it_is_retryable() {
+        let invalid = decode_signal_checkpoint(&json!("not an object")).unwrap_err();
+        assert_eq!(
+            invalid.error,
+            json!({"type": "handler_error", "message": "signal checkpoint is not an object", "retryable": false})
+        );
+        assert!(!invalid.retryable);
+        let lost = HandlerError::checkpoint("lease_lost", "task lease is no longer active");
+        assert_eq!(
+            lost.error,
+            json!({"type": "lease_lost", "message": "task lease is no longer active", "retryable": true})
+        );
+        assert!(lost.retryable);
+        assert_eq!(HandlerError::suspended().error, json!({"type": "suspended"}));
     }
 }

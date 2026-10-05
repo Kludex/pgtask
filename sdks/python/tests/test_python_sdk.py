@@ -3,9 +3,13 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import traceback
+from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from typing import Any, cast
 
+import anyio
 import pgtask
 import pytest
 from opentelemetry.context import attach as attach_context, detach as detach_context
@@ -497,6 +501,41 @@ async def test_non_retryable_errors_fail_the_task_without_retrying() -> None:
         error = RuntimeError("caused by itself")
         raise error from error
 
+    async def run_together(*members: Callable[[], Coroutine[Any, Any, JSONValue]]) -> JSONValue:
+        async with anyio.create_task_group() as group:
+            for member in members:
+                group.start_soon(member)
+        raise AssertionError("every member fails, so the group raises")  # pragma: no cover
+
+    async def fail_with(error: Exception) -> JSONValue:
+        raise error
+
+    async def caused_failure() -> JSONValue:
+        try:
+            raise pgtask.NonRetryableError("permission denied")
+        except pgtask.NonRetryableError as error:
+            raise RuntimeError("could not load the report") from error
+
+    @registry.task("non-retryable.group", retry_delay=0.001)
+    async def group(task: Task, payload: None) -> JSONValue:
+        record(task)
+        return await run_together(
+            partial(fail_with, RuntimeError("unrelated")),
+            partial(fail_with, InvalidPayload("resource was deleted")),
+        )
+
+    @registry.task("non-retryable.nested-group", retry_delay=0.001)
+    async def nested_group(task: Task, payload: None) -> JSONValue:
+        record(task)
+        return await run_together(partial(run_together, caused_failure, partial(fail_with, ValueError("unrelated"))))
+
+    @registry.task("non-retryable.ordinary-group", retry_delay=0.001)
+    async def ordinary_group(task: Task, payload: None) -> JSONValue:
+        record(task)
+        return await run_together(
+            partial(fail_with, RuntimeError("try again")), partial(fail_with, ValueError("and again"))
+        )
+
     handles = {
         "non-retryable.direct": await client.enqueue(direct.request(None)),
         "non-retryable.subclass": await client.enqueue(subclass.request(None)),
@@ -504,8 +543,11 @@ async def test_non_retryable_errors_fail_the_task_without_retrying() -> None:
         "non-retryable.cause": await client.enqueue(caused.request(None)),
         "non-retryable.ordinary": await client.enqueue(ordinary.request(None, max_attempts=2)),
         "non-retryable.cycle": await client.enqueue(cycle.request(None, max_attempts=2)),
+        "non-retryable.group": await client.enqueue(group.request(None, max_attempts=2)),
+        "non-retryable.nested-group": await client.enqueue(nested_group.request(None, max_attempts=2)),
+        "non-retryable.ordinary-group": await client.enqueue(ordinary_group.request(None, max_attempts=2)),
     }
-    worker = Worker(database_url, registry, concurrency=6)
+    worker = Worker(database_url, registry, concurrency=9)
     running = asyncio.create_task(worker.run())
     errors: dict[str, dict[str, JSONValue]] = {}
     for name, handle in handles.items():
@@ -523,22 +565,87 @@ async def test_non_retryable_errors_fail_the_task_without_retrying() -> None:
         "non-retryable.cause": [1],
         "non-retryable.ordinary": [1, 2],
         "non-retryable.cycle": [1, 2],
+        "non-retryable.group": [1],
+        "non-retryable.nested-group": [1],
+        "non-retryable.ordinary-group": [1, 2],
     }
-    assert surfaced == [pgtask.NonRetryableError]
+    assert surfaced == [InvalidPayload]
     assert errors["non-retryable.direct"] == {
         "type": "handler_error",
         "message": "NonRetryableError: payload is invalid",
         "retryable": False,
     }
     assert errors["non-retryable.subclass"]["message"] == "InvalidPayload: missing field"
-    assert errors["non-retryable.step"]["message"] == "NonRetryableError: InvalidPayload: resource was deleted"
+    assert errors["non-retryable.step"]["message"] == "InvalidPayload: resource was deleted"
     assert errors["non-retryable.cause"]["message"] == "RuntimeError: could not load the report"
-    for name in ["non-retryable.subclass", "non-retryable.step", "non-retryable.cause"]:
+    for name in [
+        "non-retryable.subclass",
+        "non-retryable.step",
+        "non-retryable.cause",
+        "non-retryable.group",
+        "non-retryable.nested-group",
+    ]:
         assert errors[name]["retryable"] is False
     assert errors["non-retryable.ordinary"] == {
         "type": "handler_error",
-        "message": "RuntimeError: RuntimeError: try again",
+        "message": "RuntimeError: try again",
+        "retryable": True,
     }
+    assert errors["non-retryable.cycle"]["retryable"] is True
+    assert errors["non-retryable.ordinary-group"]["retryable"] is True
+
+
+class LookupFailed(Exception):
+    def __init__(self, message: str, *, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+@pytest.mark.anyio
+async def test_step_raises_the_operations_own_exception() -> None:
+    database_url = os.environ["PGTASK_DATABASE_URL"]
+    client = await Client.connect(database_url)
+    registry = TaskRegistry(f"python-step-exception-{os.urandom(8).hex()}")
+    root = KeyError("report-123")
+
+    async def lookup() -> JSONValue:
+        raise LookupFailed("report is gone", status=404) from root
+
+    @registry.task("step.original", retry_delay=None)
+    async def original(task: Task, payload: None) -> JSONValue:
+        with pytest.raises(LookupFailed) as caught:
+            await task.step("lookup", lookup)
+        return {
+            "status": caught.value.status,
+            "same_cause": caught.value.__cause__ is root,
+            "frames": [frame.name for frame in traceback.extract_tb(caught.value.__traceback__)],
+        }
+
+    async def suspend() -> JSONValue:
+        raise pgtask.TaskSuspended("not a durable call")
+
+    @registry.task("step.suspended", retry_delay=None)
+    async def suspended(task: Task, payload: None) -> JSONValue:
+        with pytest.raises(RuntimeError) as caught:
+            await task.step("suspend", suspend)
+        return str(caught.value)
+
+    first = await client.enqueue(original.request(None))
+    second = await client.enqueue(suspended.request(None))
+    worker = Worker(database_url, registry, concurrency=2)
+    running = asyncio.create_task(worker.run())
+    outcomes = [await first.result(timeout=5), await second.result(timeout=5)]
+    worker.shutdown()
+    await running
+
+    assert outcomes[0] is not None
+    assert outcomes[0].state == "succeeded"
+    result = cast(dict[str, JSONValue], outcomes[0].result)
+    assert result["status"] == 404
+    assert result["same_cause"] is True
+    assert "lookup" in cast(list[str], result["frames"])
+    assert outcomes[1] is not None
+    assert outcomes[1].result == "TaskSuspended: not a durable call"
 
 
 @pytest.mark.anyio

@@ -110,7 +110,11 @@ fn truncate_error(error: &Value, bytes: usize) -> Value {
             .and_then(Value::as_str)
             .filter(|kind| kind.len() <= 255)
             .unwrap_or("handler_error");
-        json!({"type": kind, "truncated": true, "original_bytes": bytes})
+        let mut summary = json!({"type": kind, "truncated": true, "original_bytes": bytes});
+        if let Some(retryable) = error.get("retryable").filter(|value| value.is_boolean()) {
+            summary["retryable"] = retryable.clone();
+        }
+        summary
     })
 }
 
@@ -266,6 +270,11 @@ mod tests {
         assert_eq!(
             prepare_error(error),
             json!({"type": "handler_error", "truncated": true, "original_bytes": 300_036})
+        );
+        let error = json!({"type": "handler_error", "items": vec![1; 100_000], "retryable": false});
+        assert_eq!(
+            prepare_error(error),
+            json!({"type": "handler_error", "truncated": true, "original_bytes": 300_056, "retryable": false})
         );
         let prepared = prepare_error(json!("e".repeat(300_000)));
         assert_eq!(prepared["truncated"], true);
