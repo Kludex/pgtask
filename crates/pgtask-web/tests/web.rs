@@ -62,8 +62,21 @@ async fn administrator_mode_mutates_through_audited_post_operations() {
             StatusCode::SEE_OTHER
         );
     }
-    let (_, paused_schedule_page) = response(&app, "/schedules").await;
-    assert!(paused_schedule_page.contains("paused"));
+    // The list is paginated by name and shared with every other test in the database, so the
+    // first page need not hold this schedule. Start the page just before its name and look at
+    // its own row, not for "paused" anywhere on the page.
+    let schedule_name: String = sqlx::query_scalar("SELECT name FROM pgtask.schedule_view WHERE id = $1")
+        .bind(schedule_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    let cursor = &schedule_name[..schedule_name.len() - 1];
+    let (_, paused_schedule_page) = response(&app, &format!("/schedules?after={cursor}")).await;
+    let schedule_row = paused_schedule_page
+        .split("<tr>")
+        .find(|row| row.contains(&format!("href=\"/schedules/{schedule_id}\"")))
+        .expect("the paused schedule is listed");
+    assert!(schedule_row.contains("<td class=\"state\">paused</td>"));
     assert_eq!(
         request(
             &app,
