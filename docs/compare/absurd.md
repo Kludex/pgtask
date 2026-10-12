@@ -52,8 +52,7 @@ how much policy you want the engine to own.
 Choose Absurd when durable steps, sleeps, and events cover the workflow and you want the smallest engine. Its core is
 a SQL schema. Its SDKs keep the application surface close to the database operations.
 
-Absurd also has a longer public track record. `pgtask` is still under active development and is not ready for
-production.
+Absurd also has a longer public track record.
 
 ## Choose pgtask when
 

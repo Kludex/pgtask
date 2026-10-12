@@ -5,9 +5,6 @@ Durable tasks and workflows that live entirely in PostgreSQL.
 You get a queue, a scheduler, and a durable workflow runtime out of a database you already run. There is no broker, no
 coordinator, and no extension to install. If your database is up, your queue is up.
 
-> [!WARNING]
-> `pgtask` is under active development. It is not ready for production use.
-
 ## Install
 
 | Language or tool | Install |
