@@ -14,10 +14,6 @@ async with connection.transaction():
     await Client.enqueue_on(connection, render.request({"report_id": report_id}))
 ```
 
-!!! warning "Not ready for production"
-
-    `pgtask` is under active development. The contracts described here are still changing.
-
 ## What you get
 
 Four properties describe the engine better than a feature list.
