@@ -21,7 +21,7 @@ pub enum NameError {
     UnsupportedCharacter { kind: &'static str, character: char },
 }
 
-fn validate_name(value: &str, kind: &'static str, maximum: usize) -> Result<(), NameError> {
+fn validate_bounds(value: &str, kind: &'static str, maximum: usize) -> Result<(), NameError> {
     if value.is_empty() {
         return Err(NameError::Empty { kind });
     }
@@ -32,6 +32,15 @@ fn validate_name(value: &str, kind: &'static str, maximum: usize) -> Result<(), 
             actual: value.len(),
         });
     }
+    // Postgres cannot store a NUL in `text`, so catching it here beats an encoding error mid-task.
+    if value.contains('\0') {
+        return Err(NameError::UnsupportedCharacter { kind, character: '\0' });
+    }
+    Ok(())
+}
+
+fn validate_identifier(value: &str, kind: &'static str, maximum: usize) -> Result<(), NameError> {
+    validate_bounds(value, kind, maximum)?;
     if let Some(character) = value
         .chars()
         .find(|character| !(character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | ':' | '-')))
@@ -42,7 +51,7 @@ fn validate_name(value: &str, kind: &'static str, maximum: usize) -> Result<(), 
 }
 
 macro_rules! name_type {
-    ($name:ident, $kind:literal, $maximum:expr) => {
+    ($name:ident, $kind:literal, $maximum:expr, $validate:path) => {
         #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
@@ -50,7 +59,7 @@ macro_rules! name_type {
         impl $name {
             pub fn new(value: impl Into<String>) -> Result<Self, NameError> {
                 let value = value.into();
-                validate_name(&value, $kind, $maximum)?;
+                $validate(&value, $kind, $maximum)?;
                 Ok(Self(value))
             }
 
@@ -87,11 +96,12 @@ macro_rules! name_type {
     };
 }
 
-name_type!(QueueName, "queue name", MAX_QUEUE_NAME_BYTES);
-name_type!(ScheduleName, "schedule name", MAX_TASK_NAME_BYTES);
-name_type!(SignalName, "signal name", MAX_TASK_NAME_BYTES);
-name_type!(StepName, "step name", MAX_TASK_NAME_BYTES);
-name_type!(TaskName, "task name", MAX_TASK_NAME_BYTES);
+name_type!(QueueName, "queue name", MAX_QUEUE_NAME_BYTES, validate_identifier);
+name_type!(ScheduleName, "schedule name", MAX_TASK_NAME_BYTES, validate_identifier);
+name_type!(SignalName, "signal name", MAX_TASK_NAME_BYTES, validate_identifier);
+// Step names are never used as identifiers, channels, or metric attributes.
+name_type!(StepName, "step name", MAX_TASK_NAME_BYTES, validate_bounds);
+name_type!(TaskName, "task name", MAX_TASK_NAME_BYTES, validate_identifier);
 
 impl Default for QueueName {
     fn default() -> Self {

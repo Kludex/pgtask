@@ -45,6 +45,12 @@ Use a stable step name for the source-code location. Use `occurrence = 0` for a 
 
 Do not derive an occurrence from the attempt number, process time, a random value, or the worker identity. Those values change during replay and would execute the operation again.
 
+A step name is free text. It has to be non-empty and at most 255 bytes, and that is the whole rule. Queue, task, schedule, and signal names allow only `A-Za-z0-9._:-`, because those names can reach a CLI argument, a NOTIFY channel, or a bounded metric attribute. pgtask uses step names only in storage rows and free-form span attributes, which do not need an allowlist. A library can build one from a function, class, or agent name without learning pgtask's conventions first.
+
+!!! warning "An external idempotency key still needs your character set"
+
+    The key you derive from `(task_id, handler_version, step_name, occurrence)` travels to a system with rules of its own. Normalize it where you build that key, not where you name the step.
+
 Checkpoints are scoped by handler version. Bump the handler version when a deployed code change alters the meaning, order, or result shape of an existing step. Keep the old handler registered until its tasks have finished or have been migrated explicitly.
 
 ## Sleep without occupying a worker
